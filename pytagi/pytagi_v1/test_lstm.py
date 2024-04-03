@@ -205,7 +205,7 @@ class PredictionViz:
         task_name: str,
         data_name: str,
         figsize: tuple = (12, 12),
-        fontsize: int = 28,
+        fontsize: int = 12,
         lw: int = 3,
         ms: int = 10,
         ndiv_x: int = 4,
@@ -296,7 +296,7 @@ class PredictionViz:
         if eq is not None:
             ax.text(x_eq, y_eq, eq, color="k", fontsize=self.fontsize)
         ax.plot(x_test, y_pred, "r", lw=self.lw, label=r"$\mathbb{E}[Y^{'}]$")
-        ax.plot(x_test, y_test, "k", lw=self.lw, label=r"$y_{true}$")
+        ax.plot(x_test, y_test, "k", lw=self.lw, label=r"$y_{true}$", alpha=0.6)
 
         ax.fill_between(
             x_test,
@@ -370,18 +370,28 @@ class PredictionViz:
 def clsf_runner():
     """Run classification training"""
     # User-input
-    num_epochs = 20
+    num_epochs = 5
     output_col = [0]
     num_features = 1
-    input_seq_len = 5
+    input_seq_len = 64
     output_seq_len = 1
     seq_stride = 1
-    batch_size = 10
-    sigma_v = 1.0
-    x_train_file = "../../data/toy_time_series/x_train_sin_data.csv"
-    datetime_train_file = "../../data/toy_time_series/train_sin_datetime.csv"
-    x_test_file = "../../data/toy_time_series/x_test_sin_data.csv"
-    datetime_test_file = "../../data/toy_time_series/test_sin_datetime.csv"
+    batch_size = 1
+    sigma_v = 1
+    # x_train_file = "../../data/toy_time_series/x_train_sin_data.csv"
+    # datetime_train_file = "../../data/toy_time_series/train_sin_datetime.csv"
+    # x_test_file = "../../data/toy_time_series/x_test_sin_data.csv"
+    # datetime_test_file = "../../data/toy_time_series/test_sin_datetime.csv"
+
+    # x_train_file = "../../data/traffic_electricity/Xtrain_traffic.csv"
+    # datetime_train_file = "../../data/traffic_electricity/train_time_traffic.csv"
+    # x_test_file = "../../data/traffic_electricity/Xtest_traffic.csv"
+    # datetime_test_file = "../../data/traffic_electricity/test_time_traffic.csv"
+
+    x_train_file = "../../data/traffic_electricity/Xtrain_elec.csv"
+    datetime_train_file = "../../data/traffic_electricity/train_time_elec.csv"
+    x_test_file = "../../data/traffic_electricity/Xtest_elec.csv"
+    datetime_test_file = "../../data/traffic_electricity/test_time_elec.csv"
 
     # Data loader
     ts_data_loader = TimeSeriesDataloader(
