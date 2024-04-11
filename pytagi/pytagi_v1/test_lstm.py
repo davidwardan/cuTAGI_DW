@@ -44,12 +44,13 @@ class TimeSeriesForecaster:
         self.sigma_v = sigma_v
 
         self.network = Sequential(
-            LSTM(1, 5, input_seq_len),
-            LSTM(5, 5, input_seq_len),
+            LSTM(1, 20, input_seq_len),
+            LSTM(10, 10, input_seq_len),
+            LSTM(10, 5, input_seq_len),
             Linear(5 * input_seq_len, 1),
         )
 
-        self.num_epochs = 5
+        self.num_epochs = 10
         self.viz = viz
         self.dtype = dtype
 
@@ -389,10 +390,11 @@ def clsf_runner():
     # x_test_file = "../../data/traffic_electricity/Xtest_traffic.csv"
     # datetime_test_file = "../../data/traffic_electricity/test_time_traffic.csv"
 
-    x_train_file = "../../data/traffic_electricity/Xtrain_elec.csv"
-    datetime_train_file = "../../data/traffic_electricity/train_time_elec.csv"
-    x_test_file = "../../data/traffic_electricity/Xtest_elec.csv"
-    datetime_test_file = "../../data/traffic_electricity/test_time_elec.csv"
+    x_train_file_elec = "../../data/traffic_electricity/train_elec.csv"
+    x_test_file_elec = "../../data/traffic_electricity/test_elec.csv"
+    x_test_file_traffic = "../../data/traffic_electricity/test_traffic.csv"
+    x_test_file_traffic = "../../data/traffic_electricity/test_traffic.csv"
+
 
     # Data loader
     ts_data_loader = TimeSeriesDataloader(
@@ -404,10 +406,11 @@ def clsf_runner():
         stride=seq_stride,
     )
     data_loader = ts_data_loader.process_data(
-        x_train_file=x_train_file,
-        datetime_train_file=datetime_train_file,
-        x_test_file=x_test_file,
-        datetime_test_file=datetime_test_file,
+        x_train_file=x_train_file_elec,
+        # datetime_train_file=datetime_train_file,
+        x_test_file=x_test_file_elec,
+        # datetime_test_file=datetime_test_file,
+        idx=235
     )
 
     # Visualzier

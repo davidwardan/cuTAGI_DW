@@ -73,7 +73,19 @@ class DataloaderBase(ABC):
 
         data = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
 
+        # return data.values
+        return data
+    @staticmethod
+    def load_ts_from_df(df: pd.DataFrame, idx: int):
+        """Load time series data from pandas dataframe"""
+        data = df[df.columns[idx]]
         return data.values
+
+    @staticmethod
+    def load_temporal_data(df: pd.DataFrame):
+        """Load temporal data"""
+        temporal_data = df[df.columns[-1]]
+        return temporal_data.values
 
     @staticmethod
     def split_evenly(num_data, chunk_size: int):
@@ -262,20 +274,31 @@ class TimeSeriesDataloader(DataloaderBase):
     def process_data(
         self,
         x_train_file: str,
-        datetime_train_file: str,
+        # datetime_train_file: str,
         x_test_file: str,
-        datetime_test_file: str,
+        # datetime_test_file: str,
+        idx,
     ) -> dict:
         """Process time series"""
         # Initialization
         utils = Utils()
 
         # Load data
-        x_train = self.load_data_from_csv(x_train_file)
-        datetime_train = self.load_data_from_csv(datetime_train_file)
+        train = self.load_data_from_csv(x_train_file)
+        # datetime_train = self.load_data_from_csv(datetime_train_file)
+        x_train = self.load_ts_from_df(train, idx)
+        datetime_train = self.load_temporal_data(train)
 
-        x_test = self.load_data_from_csv(x_test_file)
-        datetime_test = self.load_data_from_csv(datetime_test_file)
+
+        test = self.load_data_from_csv(x_test_file)
+        # datetime_test = self.load_data_from_csv(datetime_test_file)
+        x_test = self.load_ts_from_df(test, idx)
+        datetime_test = self.load_temporal_data(test)
+
+        print(x_train.shape)
+        print(datetime_train.shape)
+
+
 
         # Normalizer
         x_mean, x_std = self.normalizer.compute_mean_std(x_train)
@@ -310,8 +333,8 @@ class TimeSeriesDataloader(DataloaderBase):
         # Store normalization parameters
         data_loader["x_norm_param_1"] = x_mean
         data_loader["x_norm_param_2"] = x_std
-        data_loader["y_norm_param_1"] = x_mean[self.output_col]
-        data_loader["y_norm_param_2"] = x_std[self.output_col]
+        data_loader["y_norm_param_1"] = x_mean #[self.output_col] #TODO: check this
+        data_loader["y_norm_param_2"] = x_std #[self.output_col] #TODO: check this
 
         # NOTE: Datetime is saved for the visualization purpose
         data_loader["datetime_train"] = [
