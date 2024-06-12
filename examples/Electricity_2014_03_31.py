@@ -32,9 +32,10 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
     early_stopping_criteria = 'log_lik' # 'log_lik' or 'mse'
+    patience = 10
 
     # Loop over each time series in the benchmark
-    nb_ts = 963
+    nb_ts = 370
     ts_idx = np.arange(0, nb_ts)   # time series no.
     ytestPd  = np.full((168, nb_ts), np.nan)
     SytestPd = np.full((168, nb_ts), np.nan)
@@ -43,22 +44,22 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
         log_lik_optim = -1E100
         mse_optim = 1E100
         epoch_optim = 1
-        patience = 5
         net_optim = []  # to save optimal net at the optimal epoch
 
         train_dtl = TimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_train.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_train_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_train.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_train_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
+            time_covariates = ['hour_of_day','day_of_week'],
         )
         val_dtl = TimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_val.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_val_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_val.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_val_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -67,10 +68,11 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
             x_mean=train_dtl.x_mean,
             x_std=train_dtl.x_std,
             ts_idx=ts,
+            time_covariates = ['hour_of_day','day_of_week'],
         )
         test_dtl = TimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_test.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_test_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_test.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_test_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -79,6 +81,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
             x_mean=train_dtl.x_mean,
             x_std=train_dtl.x_std,
             ts_idx=ts,
+            time_covariates = ['hour_of_day','day_of_week'],
         )
 
         # Viz
@@ -92,7 +95,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
             Linear(40 * input_seq_len, 1),
         )
         # net.to_device("cuda")
-        net.set_threads(8)
+        # net.set_threads(8)
         out_updater = OutputUpdater(net.device)
 
         # -------------------------------------------------------------------------#
@@ -104,7 +107,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
 
             # Decaying observation's variance
             sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.5, decaying_factor=0.99, curr_iter=epoch
+                curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
             )
             var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
@@ -237,8 +240,9 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
         ytestPd[:,ts]  = mu_preds.flatten()
         SytestPd[:,ts] = std_preds.flatten()**2
 
-    np.savetxt("traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    np.savetxt("traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
+    # np.savetxt("electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
+    # np.savetxt("electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
+
         # # Compute log-likelihood
         # mse = metric.mse(mu_preds, y_test)
         # log_lik = metric.log_likelihood(

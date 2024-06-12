@@ -56,3 +56,43 @@ def classification_error(prediction: np.ndarray, label: np.ndarray) -> None:
             count += 1
 
     return count / len(prediction)
+
+def early_stopping(early_stopping_criteria : str, patience: int, mu_preds, y_val) -> int:
+    """Early stopping"""
+    if early_stopping_criteria == 'mse':
+        mse_val = mse(mu_preds, y_val)
+
+def computeRMSE(y, ypred):
+    ypred = ypred.astype(float)
+    e = np.reshape((y - ypred) ** 2, (-1, 1))
+    e = np.sqrt(np.mean(e))
+    return e
+
+#TODO: check if ytrain is correct
+def computeMASE(y, ypred, ytrain, seasonality):
+    nbts = y.shape[1]
+    se = np.full((1, y.shape[1]), np.nan)
+    for i in range(nbts):
+        ytrain_ = ytrain[:, i]
+        # remove nans
+        ytrain_ = ytrain_[~np.isnan(ytrain_)]
+        if len(ytrain_) > seasonality:
+            se[0, i] = np.mean(np.abs(ytrain_[seasonality:] - ytrain_[:-seasonality]))
+    se[se == 0] = np.nan
+    MASE = np.mean(np.abs(y - ypred) / se)
+    MASE = np.nanmean(MASE)
+    return MASE
+
+def computeND(y, ypred):
+    ND = np.sum(np.abs(ypred - y)) / np.sum(np.abs(y))
+    return ND
+
+def compute90QL(y, ypred, Vpred):
+    ypred_90q = ypred + 1.282 * np.sqrt(Vpred)
+    Iq = y > ypred_90q
+    Iq_ = y <= ypred_90q
+    e = y - ypred_90q
+    p90 = np.sum(2 * e * (0.9 * Iq - (1 - 0.9) * Iq_)) / np.sum(np.abs(y))
+    return p90
+
+

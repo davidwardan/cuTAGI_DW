@@ -17,7 +17,7 @@ class Utils:
         self._cpp_backend = cutagi.Utils()
 
     def label_to_obs(
-        self, labels: np.ndarray, num_classes: int
+            self, labels: np.ndarray, num_classes: int
     ) -> Tuple[np.ndarray, np.ndarray, int]:
         """Get observations and observation indices of the binary tree for
             classification
@@ -50,7 +50,7 @@ class Utils:
         return self._cpp_backend.label_to_one_hot_wrapper(labels, num_classes)
 
     def load_mnist_images(
-        self, image_file: str, label_file: str, num_images: int
+            self, image_file: str, label_file: str, num_images: int
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Load mnist dataset
 
@@ -70,7 +70,7 @@ class Utils:
         return images, labels
 
     def load_cifar_images(
-        self, image_file: str, num: int
+            self, image_file: str, num: int
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Load cifar dataset
 
@@ -87,12 +87,12 @@ class Utils:
         return images, labels
 
     def get_labels(
-        self,
-        ma: np.ndarray,
-        Sa: np.ndarray,
-        hr_softmax: HRCSoftmax,
-        num_classes: int,
-        batch_size: int,
+            self,
+            ma: np.ndarray,
+            Sa: np.ndarray,
+            hr_softmax: HRCSoftmax,
+            num_classes: int,
+            batch_size: int,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Convert last layer's hidden state to labels
 
@@ -114,13 +114,13 @@ class Utils:
         return pred, prob
 
     def get_errors(
-        self,
-        ma: np.ndarray,
-        Sa: np.ndarray,
-        labels: np.ndarray,
-        hr_softmax: HRCSoftmax,
-        num_classes: int,
-        batch_size: int,
+            self,
+            ma: np.ndarray,
+            Sa: np.ndarray,
+            labels: np.ndarray,
+            hr_softmax: HRCSoftmax,
+            num_classes: int,
+            batch_size: int,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Convert last layer's hidden state to labels
 
@@ -155,11 +155,11 @@ class Utils:
         return hr_softmax
 
     def obs_to_label_prob(
-        self,
-        ma: np.ndarray,
-        Sa: np.ndarray,
-        hr_softmax: HRCSoftmax,
-        num_classes: int,
+            self,
+            ma: np.ndarray,
+            Sa: np.ndarray,
+            hr_softmax: HRCSoftmax,
+            num_classes: int,
     ) -> np.ndarray:
         """Convert observation to label probabilities
 
@@ -179,13 +179,13 @@ class Utils:
         return np.array(prob)
 
     def create_rolling_window(
-        self,
-        data: np.ndarray,
-        output_col: np.ndarray,
-        input_seq_len: int,
-        output_seq_len: int,
-        num_features: int,
-        stride: int,
+            self,
+            data: np.ndarray,
+            output_col: np.ndarray,
+            input_seq_len: int,
+            output_seq_len: int,
+            num_features: int,
+            stride: int,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Create rolling window for time series data
 
@@ -202,7 +202,7 @@ class Utils:
         """
         num_data = int(
             # (len(data) / num_features - input_seq_len - output_seq_len) / stride + 1
-           (len(data) - input_seq_len - output_seq_len) / stride + 1
+            (len(data) - input_seq_len - output_seq_len) / stride + 1
         )
 
         input_data, output_data = self._cpp_backend.create_rolling_window_wrapper(
@@ -214,13 +214,13 @@ class Utils:
             stride,
         )
         # input_data = input_data.reshape((num_data, input_seq_len))
-        input_data = input_data.reshape((num_data, input_seq_len*num_features))
+        input_data = input_data.reshape((num_data, input_seq_len * num_features))
         output_data = output_data.reshape((num_data, output_seq_len))
 
         return input_data, output_data
 
     def get_upper_triu_cov(
-        self, batch_size: int, num_data: int, sigma: float
+            self, batch_size: int, num_data: int, sigma: float
     ) -> np.ndarray:
         """Create an upper triangle covriance matrix for inputs"""
 
@@ -230,11 +230,11 @@ class Utils:
 
 
 def exponential_scheduler(
-    curr_v: float, min_v: float, decaying_factor: float, curr_iter: float
+        curr_v: float, min_v: float, decaying_factor: float, curr_iter: float
 ) -> float:
     """Exponentially decaying"""
 
-    return np.maximum(curr_v * (decaying_factor**curr_iter), min_v)
+    return np.maximum(curr_v * (decaying_factor ** curr_iter), min_v)
 
 
 class Normalizer:
@@ -253,7 +253,7 @@ class Normalizer:
 
     @staticmethod
     def unstandardize(
-        norm_data: np.ndarray, mu: np.ndarray, std: np.ndarray
+            norm_data: np.ndarray, mu: np.ndarray, std: np.ndarray
     ) -> np.ndarray:
         """Transform standardized data to original space"""
         return norm_data * (std + 1e-10) + mu
@@ -265,7 +265,7 @@ class Normalizer:
         return norm_std * (std + 1e-10)
 
     def max_min_norm(
-        self, data: np.ndarray, max_value: np.ndarray, min_value: np.ndarray
+            self, data: np.ndarray, max_value: np.ndarray, min_value: np.ndarray
     ) -> np.ndarray:
         """Normalize the data between 0 and 1"""
         assert np.all(max_value > min_value)
@@ -273,7 +273,7 @@ class Normalizer:
 
     @staticmethod
     def max_min_unnorm(
-        norm_data: np.ndarray, max_value: np.ndarray, min_value: np.ndarray
+            norm_data: np.ndarray, max_value: np.ndarray, min_value: np.ndarray
     ) -> np.ndarray:
         """Transform max-min normalized data to original space"""
 
@@ -281,7 +281,7 @@ class Normalizer:
 
     @staticmethod
     def max_min_unnorm_std(
-        norm_std: np.ndarray, max_value: np.ndarray, min_value: np.ndarray
+            norm_std: np.ndarray, max_value: np.ndarray, min_value: np.ndarray
     ) -> np.ndarray:
         """Transform max-min normalized std to original space"""
 
@@ -298,3 +298,22 @@ class Normalizer:
         """Compute max min values"""
 
         return (np.nanmax(data, axis=0), np.nanmin(data, axis=0))
+
+
+class ForecastToolbox:
+    """Utility functions for forecasting"""
+
+    def __init__(self, method: Union[str, None] = None) -> None:
+        self.method = method
+
+    @staticmethod
+    def rolling_window_forecast(
+            x: np.ndarray, mu_preds: np.ndarray, RW_idx_: int, rolling_window: int, num_features: int
+    ) -> np.ndarray:
+        """Create rolling window predictions"""
+
+        RW_idx = RW_idx_ % (rolling_window)
+        if RW_idx > 0:
+            x[-RW_idx * num_features::num_features] = mu_preds[-RW_idx:]
+
+        return x
