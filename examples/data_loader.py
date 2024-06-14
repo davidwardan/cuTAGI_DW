@@ -92,13 +92,13 @@ class RegressionDataLoader:
     The user must provide the input and output data file in *csv"""
 
     def __init__(
-        self,
-        x_file: str,
-        y_file: str,
-        x_mean: Optional[np.ndarray] = None,
-        x_std: Optional[np.ndarray] = None,
-        y_mean: Optional[np.ndarray] = None,
-        y_std: Optional[np.ndarray] = None,
+            self,
+            x_file: str,
+            y_file: str,
+            x_mean: Optional[np.ndarray] = None,
+            x_std: Optional[np.ndarray] = None,
+            y_mean: Optional[np.ndarray] = None,
+            y_std: Optional[np.ndarray] = None,
     ) -> None:
         self.x_file = x_file
         self.y_file = y_file
@@ -118,10 +118,10 @@ class RegressionDataLoader:
 
     @staticmethod
     def batch_generator(
-        input_data: np.ndarray,
-        output_data: np.ndarray,
-        batch_size: int,
-        shuffle: bool = True,
+            input_data: np.ndarray,
+            output_data: np.ndarray,
+            batch_size: int,
+            shuffle: bool = True,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         """
         Generator function to yield batches of data.
@@ -167,10 +167,10 @@ class MnistDataLoader:
     """Data loader for MNIST."""
 
     def __init__(
-        self,
-        x_file: Optional[str] = None,
-        y_file: Optional[str] = None,
-        num_images: int = None,
+            self,
+            x_file: Optional[str] = None,
+            y_file: Optional[str] = None,
+            num_images: int = None,
     ):
         if x_file is None and y_file is None:
             # Load from default location
@@ -190,12 +190,12 @@ class MnistDataLoader:
 
     @staticmethod
     def batch_generator(
-        input_data: np.ndarray,
-        output_data: np.ndarray,
-        output_idx: np.ndarray,
-        labels: np.ndarray,
-        batch_size: int,
-        shuffle: bool = True,
+            input_data: np.ndarray,
+            output_data: np.ndarray,
+            output_idx: np.ndarray,
+            labels: np.ndarray,
+            batch_size: int,
+            shuffle: bool = True,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         """
         Generator function to yield batches of data.
@@ -213,7 +213,7 @@ class MnistDataLoader:
             ].flatten(), labels[idx].flatten()
 
     def process_data(
-        self, x_train_file: str, y_train_file: str, num_images: int
+            self, x_train_file: str, y_train_file: str, num_images: int
     ) -> dict:
         """Process MNIST images."""
         # Load training and test data
@@ -241,7 +241,7 @@ class MnistOneHotDataloader(DataloaderBase):
     """Data loader for mnist dataset"""
 
     def process_data(
-        self, x_train_file: str, y_train_file: str, x_test_file: str, y_test_file: str
+            self, x_train_file: str, y_train_file: str, x_test_file: str, y_test_file: str
     ) -> dict:
         """Process mnist images"""
         # Initialization
@@ -289,18 +289,18 @@ class TimeSeriesDataloader:
     """Data loader for time series"""
 
     def __init__(
-        self,
-        x_file: str,
-        date_time_file: str,
-        output_col: np.ndarray,
-        input_seq_len: int,
-        output_seq_len: int,
-        num_features: int,
-        stride: int,
-        x_mean: Optional[np.ndarray] = None,
-        x_std: Optional[np.ndarray] = None,
-        ts_idx: Optional[int] = None,
-        time_covariates: Optional[str] = None,
+            self,
+            x_file: str,
+            date_time_file: str,
+            output_col: np.ndarray,
+            input_seq_len: int,
+            output_seq_len: int,
+            num_features: int,
+            stride: int,
+            x_mean: Optional[np.ndarray] = None,
+            x_std: Optional[np.ndarray] = None,
+            ts_idx: Optional[int] = None,
+            time_covariates: Optional[str] = None,
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -311,8 +311,8 @@ class TimeSeriesDataloader:
         self.stride = stride
         self.x_mean = x_mean
         self.x_std = x_std
-        self.ts_idx = ts_idx # add time series index when data having multiple ts
-        self.time_covariates = time_covariates # for adding time covariates
+        self.ts_idx = ts_idx  # add time series index when data having multiple ts
+        self.time_covariates = time_covariates  # for adding time covariates
         self.dataset = self.process_data()
 
     def load_data_from_csv(self, data_file: str) -> pd.DataFrame:
@@ -324,10 +324,10 @@ class TimeSeriesDataloader:
 
     @staticmethod
     def batch_generator(
-        input_data: np.ndarray,
-        output_data: np.ndarray,
-        batch_size: int,
-        shuffle: bool = True,
+            input_data: np.ndarray,
+            output_data: np.ndarray,
+            batch_size: int,
+            shuffle: bool = True,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         """
         Generator function to yield batches of data.
@@ -352,7 +352,7 @@ class TimeSeriesDataloader:
         # Load data
         x = self.load_data_from_csv(self.x_file)
         if self.ts_idx is not None:
-            x = x[:,self.ts_idx:self.ts_idx+1]   # choose time series column
+            x = x[:, self.ts_idx:self.ts_idx + 1]  # choose time series column
         date_time = self.load_data_from_csv(self.date_time_file)
 
         # Add time covariates
@@ -361,20 +361,20 @@ class TimeSeriesDataloader:
             for time_cov in self.time_covariates:
                 if time_cov == 'hour_of_day':
                     hour_of_day = date_time.astype('datetime64[h]').astype(int) % 24
-                    x = np.concatenate((x,hour_of_day),axis=1)
+                    x = np.concatenate((x, hour_of_day), axis=1)
                 elif time_cov == 'day_of_week':
                     day_of_week = date_time.astype('datetime64[D]').astype(int) % 7
-                    x = np.concatenate((x,day_of_week),axis=1)
+                    x = np.concatenate((x, day_of_week), axis=1)
                 elif time_cov == 'week_of_year':
                     week_of_year = date_time.astype('datetime64[W]').astype(int) % 52 + 1
-                    x = np.concatenate((x,week_of_year),axis=1)
+                    x = np.concatenate((x, week_of_year), axis=1)
                 elif time_cov == 'month_of_year':
                     month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
-                    x = np.concatenate((x,month_of_year),axis=1)
+                    x = np.concatenate((x, month_of_year), axis=1)
                 elif time_cov == 'quarter_of_year':
                     month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
                     quarter_of_year = (month_of_year - 1) // 3 + 1
-                    x = np.concatenate((x,quarter_of_year),axis=1)
+                    x = np.concatenate((x, quarter_of_year), axis=1)
 
         # Normalizer
         if self.x_mean is None and self.x_std is None:
@@ -403,24 +403,27 @@ class TimeSeriesDataloader:
     def create_data_loader(self, batch_size: int, shuffle: bool = True):
         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
 
+
 class GlobalTimeSeriesDataloader:
     """Similar to TimeSeriesDataloader but with global normalization"""
 
     def __init__(
-        self,
-        x_file: str,
-        date_time_file: str,
-        output_col: np.ndarray,
-        input_seq_len: int,
-        output_seq_len: int,
-        num_features: int,
-        stride: int,
-        x_mean: Optional[np.ndarray] = None,
-        x_std: Optional[np.ndarray] = None,
-        ts_idx: Optional[int] = 0,
-        time_covariates: Optional[str] = None,
+            self,
+            x_file: str,
+            date_time_file: str,
+            output_col: np.ndarray,
+            input_seq_len: int,
+            output_seq_len: int,
+            num_features: int,
+            stride: int,
+            ts_idx: Optional[int] = 0,
+            time_covariates: Optional[str] = None,
+            scale_i: Optional[float] = None,
+            global_scale: Optional[bool] = False,
+            scale_factor: Optional[list] = None,
 
     ) -> None:
+        self.global_scale = global_scale
         self.x_file = x_file
         self.date_time_file = date_time_file
         self.output_col = output_col
@@ -428,10 +431,10 @@ class GlobalTimeSeriesDataloader:
         self.output_seq_len = output_seq_len
         self.num_features = num_features
         self.stride = stride
-        self.x_mean = x_mean
-        self.x_std = x_std
-        self.ts_idx = ts_idx # add time series index when data having multiple ts
-        self.time_covariates = time_covariates # for adding time covariates
+        self.ts_idx = ts_idx  # add time series index when data having multiple ts
+        self.time_covariates = time_covariates  # for adding time covariates
+        self.scale_factor = scale_factor  # empty list to store the scaling factors
+        self.scale_i = scale_i  # scaling factor for ith time series
         self.dataset = self.process_data()
 
     def load_data_from_csv(self, data_file: str) -> pd.DataFrame:
@@ -443,10 +446,10 @@ class GlobalTimeSeriesDataloader:
 
     @staticmethod
     def batch_generator(
-        input_data: np.ndarray,
-        output_data: np.ndarray,
-        batch_size: int,
-        shuffle: bool = True,
+            input_data: np.ndarray,
+            output_data: np.ndarray,
+            batch_size: int,
+            shuffle: bool = True,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         """
         Generator function to yield batches of data.
@@ -470,8 +473,17 @@ class GlobalTimeSeriesDataloader:
 
         # Load data
         x = self.load_data_from_csv(self.x_file)
-        x = x[:,self.ts_idx:self.ts_idx+1]   # choose time series column
+        x = x[:, self.ts_idx:self.ts_idx + 1]  # choose time series column
         date_time = self.load_data_from_csv(self.date_time_file)
+
+        # TODO: Add global scaling
+        # get a scaling factor of ith time series
+        if self.global_scale is True:
+            if self.scale_i is None:
+                self.scale_factor[self.ts_idx] = 1 + (np.sum(x) / x.size)
+                x = x / self.scale_factor[self.ts_idx]
+            else:
+                x = x / self.scale_i
 
         # Add time covariates
         if self.time_covariates is not None:
@@ -479,26 +491,20 @@ class GlobalTimeSeriesDataloader:
             for time_cov in self.time_covariates:
                 if time_cov == 'hour_of_day':
                     hour_of_day = date_time.astype('datetime64[h]').astype(int) % 24
-                    x = np.concatenate((x,hour_of_day),axis=1)
+                    x = np.concatenate((x, hour_of_day), axis=1)
                 elif time_cov == 'day_of_week':
                     day_of_week = date_time.astype('datetime64[D]').astype(int) % 7
-                    x = np.concatenate((x,day_of_week),axis=1)
+                    x = np.concatenate((x, day_of_week), axis=1)
                 elif time_cov == 'week_of_year':
                     week_of_year = date_time.astype('datetime64[W]').astype(int) % 52 + 1
-                    x = np.concatenate((x,week_of_year),axis=1)
+                    x = np.concatenate((x, week_of_year), axis=1)
                 elif time_cov == 'month_of_year':
                     month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
-                    x = np.concatenate((x,month_of_year),axis=1)
+                    x = np.concatenate((x, month_of_year), axis=1)
                 elif time_cov == 'quarter_of_year':
                     month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
                     quarter_of_year = (month_of_year - 1) // 3 + 1
-                    x = np.concatenate((x,quarter_of_year),axis=1)
-
-        # TODO: Add global normalization
-        # Normalizer (Global)
-        # if self.x_mean is None and self.x_std is None:
-        #     self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
-        # x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
+                    x = np.concatenate((x, quarter_of_year), axis=1)
 
         # Create rolling windows
         x_rolled, y_rolled = utils.create_rolling_window(
@@ -511,11 +517,8 @@ class GlobalTimeSeriesDataloader:
         )
 
         # Dataloader
-        dataset = {}
-        dataset["value"] = (x_rolled, y_rolled)
-
-        # NOTE: Datetime is saved for the visualization purpose
-        dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
+        dataset = {"value": (x_rolled, y_rolled),
+                   "date_time": [np.datetime64(date) for date in np.squeeze(date_time)]}
 
         return dataset
 

@@ -26,7 +26,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
     """
 
     # Dataset
-    nb_ts = 963  # for electricity 370 and 963 for traffic
+    nb_ts = 370  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 3
@@ -39,27 +39,31 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
 
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_train.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_train_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_train.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_train_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            time_covariates=['hour_of_day', 'day_of_week'],
             ts_idx=ts,
+            time_covariates=['hour_of_day', 'day_of_week'],
+            scale_factor=[1.0] * nb_ts,
+            global_scale=True,
         )
 
         val_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_val.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_val_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_val.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_val_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            time_covariates=['hour_of_day', 'day_of_week'],
             ts_idx=ts,
+            time_covariates=['hour_of_day', 'day_of_week'],
+            scale_i=train_dtl_.scale_factor[ts],
+            global_scale=True,
         )
 
         if ts == 0:
@@ -81,8 +85,8 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = "david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(
-        lstm_nodes) + "_method1"
+    out_dir = "david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(
+        lstm_nodes) + "_method2"
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -164,8 +168,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
         ll_val.append(log_lik_val)
 
         # Progress bar
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}",
-                         sigma_v=f"{sigma_v:.4f}")
+        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}")
 
         # early-stopping
         if early_stopping_criteria == 'mse':
@@ -195,6 +198,9 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
         plt.savefig(out_dir + "/validation_plot.png", dpi=300, bbox_inches='tight')
 
     # -------------------------------------------------------------------------#
+    # save the model
+    net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
+
     # Testing
     pbar = tqdm(ts_idx, desc="Testing Progress")
 
@@ -204,15 +210,17 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
     for ts in pbar:
 
         test_dtl = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_test.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_test_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_test.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_test_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            time_covariates=['hour_of_day', 'day_of_week'],
             ts_idx=ts,
+            time_covariates=['hour_of_day', 'day_of_week'],
+            scale_i=train_dtl.scale_factor[ts],
+            global_scale=True,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -247,13 +255,11 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
+    np.savetxt(out_dir + "/electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
+    np.savetxt(out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
+    np.savetxt(out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
 
     # -------------------------------------------------------------------------#
-    # save the model
-    net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
 
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
@@ -262,15 +268,15 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
     # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct
 
     # save metrics into a text file
-    with open(out_dir + "/metrics.txt", "w") as f:
+    with open(out_dir + "/electricity_2014_03_31_metrics.txt", "w") as f:
         f.write(f'ND/p50:    {p50_tagi}\n')
         f.write(f'p90:    {p90_tagi}\n')
         f.write(f'RMSE:    {RMSE_tagi}\n')
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes)
+    out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2"
     os.rename(out_dir, out_dir_)
 
 

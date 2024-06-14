@@ -21,13 +21,13 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
-    nb_ts = 963  # for electricity 370 and 963 for traffic
+    nb_ts = 370  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
     output_col = [0]
@@ -50,7 +50,7 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = "david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(
+    out_dir = "david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(
         lstm_nodes) + "_method1"
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -65,8 +65,8 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     log_lik_optim = -1E100
     mse_optim = 1E100
     epoch_optim = 1
-    early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
-    patience = 3
+    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
+    patience = 5
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
     global_log_lik = []
@@ -76,8 +76,8 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     for epoch in pbar:
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
-                x_file="data/traffic/traffic_2008_01_14_train.csv",
-                date_time_file="data/traffic/traffic_2008_01_14_train_datetime.csv",
+                x_file="data/electricity/electricity_2014_03_31_train.csv",
+                date_time_file="data/electricity/electricity_2014_03_31_train_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
@@ -85,12 +85,14 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 stride=seq_stride,
                 ts_idx=ts,
                 time_covariates=['hour_of_day', 'day_of_week'],
+                scale_factor=[1.0] * nb_ts,
+                global_scale=True,
             )
             batch_iter = train_dtl.create_data_loader(batch_size)
 
             # Decaying observation's variance
             sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
+                curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
             )
             var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -110,6 +112,10 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 net.backward()
                 net.step()
 
+                # unscale the predictions
+                m_pred = m_pred * train_dtl.scale_factor[ts]
+                y = y * train_dtl.scale_factor[ts]
+
                 # Compute MSE
                 mse = metric.mse(m_pred, y)
                 mses.append(mse)
@@ -121,17 +127,17 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         for ts in ts_idx:
 
             val_dtl = GlobalTimeSeriesDataloader(
-                x_file="data/traffic/traffic_2008_01_14_val.csv",
-                date_time_file="data/traffic/traffic_2008_01_14_val_datetime.csv",
+                x_file="data/electricity/electricity_2014_03_31_val.csv",
+                date_time_file="data/electricity/electricity_2014_03_31_val_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
                 num_features=num_features,
                 stride=seq_stride,
-                x_mean=train_dtl.x_mean,
-                x_std=train_dtl.x_std,
                 ts_idx=ts,
                 time_covariates=['hour_of_day', 'day_of_week'],
+                scale_i=train_dtl.scale_factor[ts],
+                global_scale=True,
             )
 
             val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
@@ -155,6 +161,11 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             y_val = np.array(y_val)
             x_val = np.array(x_val)
 
+            # Unscale the predictions
+            # mu_preds = mu_preds * train_dtl.scale_factor[ts]
+            # std_preds = std_preds * train_dtl.scale_factor[ts]
+            # y_val = y_val * train_dtl.scale_factor[ts]
+
             # Compute log-likelihood for validation set
             mse_val = metric.mse(mu_preds, y_val)
             log_lik_val = metric.log_likelihood(
@@ -171,8 +182,7 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         mses_val.append(mse_val)
         ll_val.append(log_lik_val)
 
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}",
-                         sigma_v=f"{sigma_v:.4f}")
+        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}, sigma_v={sigma_v:.4f}")
 
         # plot and save mse_val, and ll_val with two different axes
         fig, ax1 = plt.subplots()
@@ -204,6 +214,9 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         # shuffle ts_idx
         np.random.shuffle(ts_idx)
     # -------------------------------------------------------------------------#
+    # save the model
+    net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
+
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
 
@@ -213,17 +226,17 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     for ts in pbar:
 
         test_dtl = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_test.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_test_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_test.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_test_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            x_mean=train_dtl.x_mean,
-            x_std=train_dtl.x_std,
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
+            scale_i=train_dtl.scale_factor[ts],
+            global_scale=True,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -253,18 +266,21 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         y_test = np.array(y_test)
         x_test = np.array(x_test)
 
+        # Unscale the predictions
+        # mu_preds = mu_preds * train_dtl.scale_factor[ts]
+        # std_preds = std_preds * train_dtl.scale_factor[ts]
+        # y_test = y_test * train_dtl.scale_factor[ts]
+
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
+    np.savetxt(out_dir + "/electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
+    np.savetxt(out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
+    np.savetxt(out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
 
     # -------------------------------------------------------------------------#
-    # save the model
-    net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
 
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
@@ -273,15 +289,15 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct
 
     # save metrics into a text file
-    with open(out_dir + "/metrics.txt", "w") as f:
+    with open(out_dir + "/electricity_2014_03_31_metrics.txt", "w") as f:
         f.write(f'ND/p50:    {p50_tagi}\n')
         f.write(f'p90:    {p90_tagi}\n')
         f.write(f'RMSE:    {RMSE_tagi}\n')
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes)
+    out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1"
     os.rename(out_dir, out_dir_)
 
 

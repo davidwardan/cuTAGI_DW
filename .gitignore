@@ -20,3 +20,4 @@ dist
 !test/fnn_heteros/data/*.csv
 !test/lstm/data/*.csv
 /david/
+/david/
