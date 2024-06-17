@@ -10,6 +10,7 @@ import pytagi.metric as metric
 from pytagi import exponential_scheduler
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 from pytagi.tagi_utils import ForecastToolbox
+from pytagi import Normalizer as normalizer
 
 from examples.data_loader import GlobalTimeSeriesDataloader
 
@@ -21,7 +22,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
@@ -50,8 +51,8 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = "david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(
-        lstm_nodes) + "_method1"
+    out_dir = ("/Users/davidwardan/PycharmProjects/cuTAGI_DW/david/output/electricity_" + str(num_epochs)
+               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -73,7 +74,11 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
 
+    # mean_train = []
+    # std_train = []
+
     for epoch in pbar:
+        factors = [1.0] * nb_ts
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
                 x_file="data/electricity/electricity_2014_03_31_train.csv",
@@ -85,17 +90,17 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 stride=seq_stride,
                 ts_idx=ts,
                 time_covariates=['hour_of_day', 'day_of_week'],
-                scale_factor=[1.0] * nb_ts,
-                global_scale=True,
+                global_scale='deepAR',
             )
             batch_iter = train_dtl.create_data_loader(batch_size)
 
             # Decaying observation's variance
             sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
+                curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
             )
             var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
+            mse = []
             for x, y in batch_iter:
                 # Feed forward
                 m_pred, _ = net(x)
@@ -113,12 +118,28 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 net.step()
 
                 # unscale the predictions
-                m_pred = m_pred * train_dtl.scale_factor[ts]
-                y = y * train_dtl.scale_factor[ts]
+                pred = m_pred  #* train_dtl.scale_factor[ts]
+                obs = y  #* train_dtl.scale_factor[ts]
+                # pred = normalizer.unstandardize(
+                #     m_pred, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
+                # )
+                # obs = normalizer.unstandardize(
+                #     y, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
+                # )
 
                 # Compute MSE
-                mse = metric.mse(m_pred, y)
-                mses.append(mse)
+                mse.append(metric.mse(pred, obs))
+            mses.append(np.mean(mse))
+
+            # mean_train.append(train_dtl.x_mean)
+            # std_train.append(train_dtl.x_std)
+            factors[ts] = train_dtl.scale_i
+
+        # plt.plot(mses)
+        # plt.show()
+
+        # # stop script here
+        # sys.exit()
 
         #-------------------------------------------------------------------------#
         # validation
@@ -135,9 +156,11 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
+                # x_mean=mean_train[ts],
+                # x_std=std_train[ts],
                 time_covariates=['hour_of_day', 'day_of_week'],
-                scale_i=train_dtl.scale_factor[ts],
-                global_scale=True,
+                global_scale='deepAR',
+                scale_i=factors[ts],
             )
 
             val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
@@ -166,6 +189,15 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             # std_preds = std_preds * train_dtl.scale_factor[ts]
             # y_val = y_val * train_dtl.scale_factor[ts]
 
+            # mu_preds = normalizer.unstandardize(
+            #     mu_preds, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
+            # )
+            # std_preds = normalizer.unstandardize_std(std_preds, train_dtl.x_std[output_col])
+            #
+            # y_val = normalizer.unstandardize(
+            #     y_val, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
+            # )
+
             # Compute log-likelihood for validation set
             mse_val = metric.mse(mu_preds, y_val)
             log_lik_val = metric.log_likelihood(
@@ -182,7 +214,8 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         mses_val.append(mse_val)
         ll_val.append(log_lik_val)
 
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}, sigma_v={sigma_v:.4f}")
+        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}"
+                                                                                           f", sigma_v={sigma_v:.4f}")
 
         # plot and save mse_val, and ll_val with two different axes
         fig, ax1 = plt.subplots()
@@ -194,6 +227,7 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         ax2.set_ylabel('Log Likelihood', color='tab:red')
         ax2.plot(ll_val, color='tab:red')
         plt.savefig(out_dir + "/validation_plot.png", dpi=300, bbox_inches='tight')
+        plt.close()
 
         # early-stopping
         if early_stopping_criteria == 'mse':
@@ -218,7 +252,7 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
 
     # Testing
-    pbar = tqdm(ts_idx_test, desc="Testing Progress")
+    pbar = tqdm(ts_idx, desc="Testing Progress")
 
     ytestPd = np.full((168, nb_ts), np.nan)
     SytestPd = np.full((168, nb_ts), np.nan)
@@ -234,9 +268,11 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
+            # x_mean=mean_train[ts],
+            # x_std=std_train[ts],
             time_covariates=['hour_of_day', 'day_of_week'],
-            scale_i=train_dtl.scale_factor[ts],
-            global_scale=True,
+            global_scale='deepAR',
+            scale_i=factors[ts],
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -267,9 +303,17 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         x_test = np.array(x_test)
 
         # Unscale the predictions
-        # mu_preds = mu_preds * train_dtl.scale_factor[ts]
-        # std_preds = std_preds * train_dtl.scale_factor[ts]
-        # y_test = y_test * train_dtl.scale_factor[ts]
+        mu_preds = mu_preds * factors[ts]
+        std_preds = std_preds * factors[ts]
+        y_test = y_test * factors[ts]
+        # mu_preds = normalizer.unstandardize(
+        #     mu_preds, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
+        # )
+        # std_preds = normalizer.unstandardize_std(std_preds, train_dtl.x_std[output_col])
+        #
+        # y_test = normalizer.unstandardize(
+        #     y_test, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
+        # )
 
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
@@ -296,8 +340,8 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1"
+    out_dir_ = ("/Users/davidwardan/PycharmProjects/cuTAGI_DW/david/output/electricity_" + str(epoch_optim) + "_"
+                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1")
     os.rename(out_dir, out_dir_)
 
 

@@ -81,8 +81,8 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = "david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(
-        lstm_nodes) + "_method1"
+    out_dir = ("cuTAGI_DW/david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
+               + "_" + str(lstm_nodes) + "_method1")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -269,7 +269,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
+    out_dir_ = "cuTAGI_DW/david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
         round(sigma_v, 3)) + "_" + str(lstm_nodes)
     os.rename(out_dir, out_dir_)
 

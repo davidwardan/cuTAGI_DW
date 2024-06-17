@@ -50,8 +50,8 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = "david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(
-        lstm_nodes) + "_method1"
+    out_dir = ("cuTAGI_DW/david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
+               + "_" + str(lstm_nodes) + "_method1")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -94,6 +94,7 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             )
             var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
+            mse = []
             for x, y in batch_iter:
                 # Feed forward
                 m_pred, _ = net(x)
@@ -111,8 +112,8 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 net.step()
 
                 # Compute MSE
-                mse = metric.mse(m_pred, y)
-                mses.append(mse)
+                mse.append(metric.mse(m_pred, y))
+            mses.append(np.mean(mse))
 
         #-------------------------------------------------------------------------#
         # validation
@@ -128,8 +129,6 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 output_seq_len=output_seq_len,
                 num_features=num_features,
                 stride=seq_stride,
-                x_mean=train_dtl.x_mean,
-                x_std=train_dtl.x_std,
                 ts_idx=ts,
                 time_covariates=['hour_of_day', 'day_of_week'],
             )
@@ -220,8 +219,6 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            x_mean=train_dtl.x_mean,
-            x_std=train_dtl.x_std,
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
         )
@@ -280,7 +277,7 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
+    out_dir_ = "cuTAGI_DW/david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
         round(sigma_v, 3)) + "_" + str(lstm_nodes)
     os.rename(out_dir, out_dir_)
 

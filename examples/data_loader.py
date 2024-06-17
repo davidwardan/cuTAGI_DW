@@ -417,13 +417,13 @@ class GlobalTimeSeriesDataloader:
             num_features: int,
             stride: int,
             ts_idx: Optional[int] = 0,
+            x_mean: Optional[np.ndarray] = None,
+            x_std: Optional[np.ndarray] = None,
             time_covariates: Optional[str] = None,
             scale_i: Optional[float] = None,
-            global_scale: Optional[bool] = False,
-            scale_factor: Optional[list] = None,
+            global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
 
     ) -> None:
-        self.global_scale = global_scale
         self.x_file = x_file
         self.date_time_file = date_time_file
         self.output_col = output_col
@@ -433,8 +433,10 @@ class GlobalTimeSeriesDataloader:
         self.stride = stride
         self.ts_idx = ts_idx  # add time series index when data having multiple ts
         self.time_covariates = time_covariates  # for adding time covariates
-        self.scale_factor = scale_factor  # empty list to store the scaling factors
         self.scale_i = scale_i  # scaling factor for ith time series
+        self.global_scale = global_scale
+        self.x_mean = x_mean
+        self.x_std = x_std
         self.dataset = self.process_data()
 
     def load_data_from_csv(self, data_file: str) -> pd.DataFrame:
@@ -478,12 +480,17 @@ class GlobalTimeSeriesDataloader:
 
         # TODO: Add global scaling
         # get a scaling factor of ith time series
-        if self.global_scale is True:
-            if self.scale_i is None:
-                self.scale_factor[self.ts_idx] = 1 + (np.sum(x) / x.size)
-                x = x / self.scale_factor[self.ts_idx]
-            else:
-                x = x / self.scale_i
+        if self.global_scale is not None:
+            if self.global_scale == 'deepAR':
+                if self.scale_i is None:
+                    self.scale_i = 1 + np.nanmean(x)
+                    x = x / np.array(self.scale_i)
+                else:
+                    x = x / np.array(self.scale_i)
+            elif self.global_scale == 'standard':
+                if self.x_mean is None and self.x_std is None:
+                    self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
+                x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
 
         # Add time covariates
         if self.time_covariates is not None:
@@ -518,7 +525,9 @@ class GlobalTimeSeriesDataloader:
 
         # Dataloader
         dataset = {"value": (x_rolled, y_rolled),
-                   "date_time": [np.datetime64(date) for date in np.squeeze(date_time)]}
+                   "date_time": [np.datetime64(date) for date in np.squeeze(date_time)],
+                   "scale_factor": self.scale_i
+                   }
 
         return dataset
 
