@@ -19,7 +19,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_nodes: int = 40):
+def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 100):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -37,6 +37,8 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
+    factors = [1.0] * nb_ts
+
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/electricity/electricity_2014_03_31_train.csv",
@@ -48,9 +50,10 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
             stride=seq_stride,
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
-            scale_factor=[1.0] * nb_ts,
-            global_scale=True,
+            global_scale='deepAR',
         )
+
+        factors[ts] = train_dtl_.scale_i
 
         val_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/electricity/electricity_2014_03_31_val.csv",
@@ -62,8 +65,8 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
             stride=seq_stride,
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
-            scale_i=train_dtl_.scale_factor[ts],
-            global_scale=True,
+            global_scale='deepAR',
+            scale_i=factors[ts],
         )
 
         if ts == 0:
@@ -85,7 +88,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = ("cuTAGI_DW/david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
+    out_dir = ("david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
                + "_" + str(lstm_nodes) + "_method2")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -110,7 +113,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=1, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -195,6 +198,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
         ax2 = ax1.twinx()
         ax2.set_ylabel('Log Likelihood', color='tab:red')
         ax2.plot(ll_val, color='tab:red')
+        fig.suptitle('Validation Metrics')
         plt.savefig(out_dir + "/validation_plot.png", dpi=300, bbox_inches='tight')
 
     # -------------------------------------------------------------------------#
@@ -219,8 +223,8 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
             stride=seq_stride,
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
-            scale_i=train_dtl.scale_factor[ts],
-            global_scale=True,
+            global_scale='deepAR',
+            scale_i=factors[ts],
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -250,6 +254,11 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
         y_test = np.array(y_test)
         x_test = np.array(x_test)
 
+        # Unscale the predictions
+        mu_preds = mu_preds * factors[ts]
+        std_preds = std_preds * factors[ts]
+        y_test = y_test * factors[ts]
+
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
         SytestPd[:, ts] = std_preds.flatten() ** 2
@@ -264,7 +273,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)
-    RMSE_tagi = metric.mse(ytestTr, ytestPd)
+    RMSE_tagi = metric.computeRMSE(ytestTr, ytestPd)
     # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct
 
     # save metrics into a text file
@@ -275,7 +284,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "cuTAGI_DW/david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
+    out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
         round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2"
     os.rename(out_dir, out_dir_)
 

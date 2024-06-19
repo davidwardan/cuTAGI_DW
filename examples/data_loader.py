@@ -447,6 +447,7 @@ class GlobalTimeSeriesDataloader:
         return data.values
 
     @staticmethod
+    # TODO: add scaling factor within the generator to be able to unstandardize the data
     def batch_generator(
             input_data: np.ndarray,
             output_data: np.ndarray,
@@ -478,20 +479,6 @@ class GlobalTimeSeriesDataloader:
         x = x[:, self.ts_idx:self.ts_idx + 1]  # choose time series column
         date_time = self.load_data_from_csv(self.date_time_file)
 
-        # TODO: Add global scaling
-        # get a scaling factor of ith time series
-        if self.global_scale is not None:
-            if self.global_scale == 'deepAR':
-                if self.scale_i is None:
-                    self.scale_i = 1 + np.nanmean(x)
-                    x = x / np.array(self.scale_i)
-                else:
-                    x = x / np.array(self.scale_i)
-            elif self.global_scale == 'standard':
-                if self.x_mean is None and self.x_std is None:
-                    self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
-                x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
-
         # Add time covariates
         if self.time_covariates is not None:
             date_time = np.array(date_time, dtype='datetime64')
@@ -512,6 +499,20 @@ class GlobalTimeSeriesDataloader:
                     month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
                     quarter_of_year = (month_of_year - 1) // 3 + 1
                     x = np.concatenate((x, quarter_of_year), axis=1)
+
+        # TODO: Add global scaling
+        # get a scaling factor of ith time series
+        if self.global_scale is not None:
+            if self.global_scale == 'deepAR':
+                if self.scale_i is None:
+                    self.scale_i = 1 + np.nanmean(x)
+                    x = x / np.array(self.scale_i)
+                else:
+                    x = x / np.array(self.scale_i) #TODO: remove else statement
+            elif self.global_scale == 'standard':
+                if self.x_mean is None and self.x_std is None:
+                    self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
+                x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
 
         # Create rolling windows
         x_rolled, y_rolled = utils.create_rolling_window(

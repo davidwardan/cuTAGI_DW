@@ -329,7 +329,7 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)
-    RMSE_tagi = metric.mse(ytestTr, ytestPd)
+    RMSE_tagi = metric.computeRMSE(ytestTr, ytestPd)
     # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct
 
     # save metrics into a text file
