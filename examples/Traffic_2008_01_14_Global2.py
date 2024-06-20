@@ -19,7 +19,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_nodes: int = 40):
+def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -106,7 +106,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.05, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -190,15 +190,15 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 0.1, lstm_
 
         # Plot MSE on primary y-axis
         ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('MSE', color='tab:blue')
-        ax1.plot(mses_val, color='tab:blue', label='MSE')
-        ax1.tick_params(axis='y', labelcolor='tab:blue')
+        ax1.set_ylabel('MSE', color='steelblue')
+        ax1.plot(mses_val, color='steelblue', label='MSE')
+        ax1.tick_params(axis='y', labelcolor='steelblue')
 
         # Plot Log Likelihood on secondary y-axis
         ax2 = ax1.twinx()
-        ax2.set_ylabel('Log Likelihood', color='tab:red')
-        ax2.plot(ll_val, color='tab:red', label='Log Likelihood')
-        ax2.tick_params(axis='y', labelcolor='tab:red')
+        ax2.set_ylabel('Log Likelihood', color='indianred')
+        ax2.plot(ll_val, color='indianred', label='Log Likelihood')
+        ax2.tick_params(axis='y', labelcolor='indianred')
 
         # Adjust layout to make room for the title and legends
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])

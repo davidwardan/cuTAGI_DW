@@ -197,15 +197,15 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 1, lstm_no
 
         # Plot MSE on primary y-axis
         ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('MSE', color='tab:blue')
-        ax1.plot(mses_val, color='tab:blue', label='MSE')
-        ax1.tick_params(axis='y', labelcolor='tab:blue')
+        ax1.set_ylabel('MSE', color='steelblue')
+        ax1.plot(mses_val, color='steelblue', label='MSE')
+        ax1.tick_params(axis='y', labelcolor='steelblue')
 
         # Plot Log Likelihood on secondary y-axis
         ax2 = ax1.twinx()
-        ax2.set_ylabel('Log Likelihood', color='tab:red')
-        ax2.plot(ll_val, color='tab:red', label='Log Likelihood')
-        ax2.tick_params(axis='y', labelcolor='tab:red')
+        ax2.set_ylabel('Log Likelihood', color='indianred')
+        ax2.plot(ll_val, color='indianred', label='Log Likelihood')
+        ax2.tick_params(axis='y', labelcolor='indianred')
 
         # Adjust layout to make room for the title and legends
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -267,7 +267,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 1, lstm_no
 
         # Unscale the predictions
         mu_preds = mu_preds * factors[ts]
-        std_preds = std_preds / (factors[ts] ** 0.5)
+        std_preds = std_preds * factors[ts]
         y_test = y_test * factors[ts]
 
         # save test predictions for each time series
