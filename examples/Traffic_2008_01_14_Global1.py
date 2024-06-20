@@ -50,7 +50,7 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = ("cuTAGI_DW/david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
+    out_dir = ("david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
                + "_" + str(lstm_nodes) + "_method1")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -173,16 +173,30 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}",
                          sigma_v=f"{sigma_v:.4f}")
 
-        # plot and save mse_val, and ll_val with two different axes
+        #-------------------------------------------------------------------------#
         fig, ax1 = plt.subplots()
-        ax1.set_xlabel('epoch')
+
+        # Set title for the plot
+        ax1.set_title('Validation Metrics', fontsize=16)
+
+        # Plot MSE on primary y-axis
+        ax1.set_xlabel('Epoch')
         ax1.set_ylabel('MSE', color='tab:blue')
-        ax1.plot(mses_val, color='tab:blue')
+        ax1.plot(mses_val, color='tab:blue', label='MSE')
         ax1.tick_params(axis='y', labelcolor='tab:blue')
+
+        # Plot Log Likelihood on secondary y-axis
         ax2 = ax1.twinx()
         ax2.set_ylabel('Log Likelihood', color='tab:red')
-        ax2.plot(ll_val, color='tab:red')
-        plt.savefig(out_dir + "/validation_plot.png", dpi=300, bbox_inches='tight')
+        ax2.plot(ll_val, color='tab:red', label='Log Likelihood')
+        ax2.tick_params(axis='y', labelcolor='tab:red')
+
+        # Adjust layout to make room for the title and legends
+        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        # Save the figure
+        fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+        #-------------------------------------------------------------------------#
 
         # early-stopping
         if early_stopping_criteria == 'mse':
@@ -277,8 +291,8 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "cuTAGI_DW/david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes)
+    out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1"
     os.rename(out_dir, out_dir_)
 
 

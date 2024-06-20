@@ -19,7 +19,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 100):
+def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 1, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -113,7 +113,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=1, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.5, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -189,18 +189,29 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 2, lstm_no
         if epoch - epoch_optim > patience:
             break
 
-        # Plotting validation metrics
+    #-------------------------------------------------------------------------#
         fig, ax1 = plt.subplots()
-        ax1.set_xlabel('epoch')
+
+        # Set title for the plot
+        ax1.set_title('Validation Metrics', fontsize=16)
+
+        # Plot MSE on primary y-axis
+        ax1.set_xlabel('Epoch')
         ax1.set_ylabel('MSE', color='tab:blue')
-        ax1.plot(mses_val, color='tab:blue')
+        ax1.plot(mses_val, color='tab:blue', label='MSE')
         ax1.tick_params(axis='y', labelcolor='tab:blue')
+
+        # Plot Log Likelihood on secondary y-axis
         ax2 = ax1.twinx()
         ax2.set_ylabel('Log Likelihood', color='tab:red')
-        ax2.plot(ll_val, color='tab:red')
-        fig.suptitle('Validation Metrics')
-        plt.savefig(out_dir + "/validation_plot.png", dpi=300, bbox_inches='tight')
+        ax2.plot(ll_val, color='tab:red', label='Log Likelihood')
+        ax2.tick_params(axis='y', labelcolor='tab:red')
 
+        # Adjust layout to make room for the title and legends
+        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+
+        # Save the figure
+        fig.savefig(out_dir + "/validation_plot.png", dpi=300)
     # -------------------------------------------------------------------------#
     # save the model
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
@@ -256,7 +267,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
         # Unscale the predictions
         mu_preds = mu_preds * factors[ts]
-        std_preds = std_preds * factors[ts]
+        std_preds = std_preds / (factors[ts] ** 0.5)
         y_test = y_test * factors[ts]
 
         # save test predictions for each time series
