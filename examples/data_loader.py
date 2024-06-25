@@ -423,6 +423,7 @@ class GlobalTimeSeriesDataloader:
             scale_i: Optional[float] = None,
             global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
             idx_as_feature: Optional[bool] = False,
+            min_max_scaler: Optional[list] = None,
 
     ) -> None:
         self.x_file = x_file
@@ -439,6 +440,7 @@ class GlobalTimeSeriesDataloader:
         self.x_mean = x_mean
         self.x_std = x_std
         self.idx_as_feature = idx_as_feature
+        self.min_max_scaler = min_max_scaler
         self.dataset = self.process_data()
 
 
@@ -450,7 +452,6 @@ class GlobalTimeSeriesDataloader:
         return data.values
 
     @staticmethod
-    # TODO: add scaling factor within the generator to be able to unstandardize the data
     def batch_generator(
             input_data: np.ndarray,
             output_data: np.ndarray,
@@ -509,7 +510,6 @@ class GlobalTimeSeriesDataloader:
             idx_to_add[:, 0] = self.ts_idx
             x = np.concatenate((x, idx_to_add), axis=1)
 
-        # TODO: Add global scaling
         # get a scaling factor of ith time series
         if self.global_scale is not None:
             if self.global_scale == 'deepAR':
@@ -522,6 +522,12 @@ class GlobalTimeSeriesDataloader:
                     self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
                 x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
 
+            elif self.global_scale == 'min_max':
+                if self.min_max_scaler is None:
+                    self.min_max_scaler = [np.nanmax(x), np.nanmin(x)]
+                x = Normalizer.max_min_norm(x, max_value=self.min_max_scaler[0], min_value=self.min_max_scaler[1])
+
+
         # Create rolling windows
         x_rolled, y_rolled = utils.create_rolling_window(
             data=x,
@@ -533,10 +539,11 @@ class GlobalTimeSeriesDataloader:
         )
 
         # Dataloader
-        dataset = {"value": (x_rolled, y_rolled),
-                   "date_time": [np.datetime64(date) for date in np.squeeze(date_time)],
-                   "scale_factor": self.scale_i
-                   }
+        dataset = {}
+        dataset["value"] = (x_rolled, y_rolled)
+
+        # NOTE: Datetime is saved for the visualization purpose
+        dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
 
         return dataset
 

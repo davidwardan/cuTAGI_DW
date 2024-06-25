@@ -22,14 +22,14 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 4, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
-    nb_ts = 370  # for electricity 370 and 963 for traffic
-    ts_idx = np.arange(0, nb_ts)
+    nb_ts =  370  # for electricity 370 and 963 for traffic
+    ts_idx = [1] #  list(range(nb_ts))
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
     output_col = [0]
     num_features = 3
@@ -52,7 +52,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs)
-               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1")
+               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1_test")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -66,19 +66,19 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
     log_lik_optim = -1E100
     mse_optim = 1E100
     epoch_optim = 1
-    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
-    patience = 5
+    early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
+    patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
     global_log_lik = []
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
 
-    # mean_train = []
-    # std_train = []
+    factors = [1.0] * nb_ts
+    mean_train = [0.0] * nb_ts
+    std_train = [1.0] * nb_ts
 
     for epoch in pbar:
-        factors = [1.0] * nb_ts
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
                 x_file="data/electricity/electricity_2014_03_31_train.csv",
@@ -90,13 +90,20 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 stride=seq_stride,
                 ts_idx=ts,
                 time_covariates=['hour_of_day', 'day_of_week'],
-                global_scale='deepAR',
+                global_scale='standard',
             )
+
+            # Store scaling factors----------------------#
+            # factors[ts] = train_dtl.scale_i
+            mean_train[ts] = train_dtl.x_mean[output_col]
+            std_train[ts] = train_dtl.x_std[output_col]
+            # -------------------------------------------#
+
             batch_iter = train_dtl.create_data_loader(batch_size)
 
             # Decaying observation's variance
             sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.5, decaying_factor=0.99, curr_iter=epoch
+                curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
             )
             var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -118,28 +125,18 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 net.step()
 
                 # unscale the predictions
-                pred = m_pred  #* train_dtl.scale_factor[ts]
-                obs = y  #* train_dtl.scale_factor[ts]
-                # pred = normalizer.unstandardize(
-                #     m_pred, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
-                # )
-                # obs = normalizer.unstandardize(
-                #     y, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
-                # )
+                # pred = m_pred  * factors[ts]
+                # obs = y  * factors[ts]
+                pred = normalizer.unstandardize(
+                    m_pred, mean_train[ts], std_train[ts]
+                )
+                obs = normalizer.unstandardize(
+                    y, mean_train[ts], std_train[ts]
+                )
 
                 # Compute MSE
                 mse.append(metric.mse(pred, obs))
             mses.append(np.mean(mse))
-
-            # mean_train.append(train_dtl.x_mean)
-            # std_train.append(train_dtl.x_std)
-            factors[ts] = train_dtl.scale_i
-
-        # plt.plot(mses)
-        # plt.show()
-
-        # # stop script here
-        # sys.exit()
 
         #-------------------------------------------------------------------------#
         # validation
@@ -156,11 +153,11 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
-                # x_mean=mean_train[ts],
-                # x_std=std_train[ts],
+                x_mean=mean_train[ts],
+                x_std=std_train[ts],
                 time_covariates=['hour_of_day', 'day_of_week'],
-                global_scale='deepAR',
-                scale_i=factors[ts],
+                global_scale='standard',
+                # scale_i=factors[ts],
             )
 
             val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
@@ -185,18 +182,18 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
             x_val = np.array(x_val)
 
             # Unscale the predictions
-            # mu_preds = mu_preds * train_dtl.scale_factor[ts]
-            # std_preds = std_preds * train_dtl.scale_factor[ts]
-            # y_val = y_val * train_dtl.scale_factor[ts]
+            # mu_preds = mu_preds * factors[ts]
+            # std_preds = std_preds * factors[ts]
+            # y_val = y_val * factors[ts]
 
-            # mu_preds = normalizer.unstandardize(
-            #     mu_preds, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
-            # )
-            # std_preds = normalizer.unstandardize_std(std_preds, train_dtl.x_std[output_col])
-            #
-            # y_val = normalizer.unstandardize(
-            #     y_val, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
-            # )
+            mu_preds = normalizer.unstandardize(
+                mu_preds, mean_train[ts], std_train[ts]
+            )
+            std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+
+            y_val = normalizer.unstandardize(
+                y_val, mean_train[ts], std_train[ts]
+            )
 
             # Compute log-likelihood for validation set
             mse_val = metric.mse(mu_preds, y_val)
@@ -240,23 +237,24 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
         # Save the figure
         fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+        plt.close(fig)
         #-------------------------------------------------------------------------#
 
         # early-stopping
-        if early_stopping_criteria == 'mse':
-            if mse_val < mse_optim:
-                mse_optim = mse_val
-                log_lik_optim = log_lik_val
-                epoch_optim = epoch
-                net_optim = net
-        elif early_stopping_criteria == 'log_lik':
-            if log_lik_val > log_lik_optim:
-                mse_optim = mse_val
-                log_lik_optim = log_lik_val
-                epoch_optim = epoch
-                net_optim = net
-        if epoch - epoch_optim > patience:
-            break
+        # if early_stopping_criteria == 'mse':
+        #     if mse_val < mse_optim:
+        #         mse_optim = mse_val
+        #         log_lik_optim = log_lik_val
+        #         epoch_optim = epoch
+        #         net_optim = net
+        # elif early_stopping_criteria == 'log_lik':
+        #     if log_lik_val > log_lik_optim:
+        #         mse_optim = mse_val
+        #         log_lik_optim = log_lik_val
+        #         epoch_optim = epoch
+        #         net_optim = net
+        # if epoch - epoch_optim > patience:
+        #     break
 
         # shuffle ts_idx
         np.random.shuffle(ts_idx)
@@ -281,11 +279,11 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            # x_mean=mean_train[ts],
-            # x_std=std_train[ts],
+            x_mean=mean_train[ts],
+            x_std=std_train[ts],
             time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
-            scale_i=factors[ts],
+            global_scale='standard',
+            # scale_i=factors[ts],
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -296,7 +294,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         y_test = []
         x_test = []
 
-        net = net_optim
+        # net = net_optim
 
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
@@ -316,17 +314,17 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         x_test = np.array(x_test)
 
         # Unscale the predictions
-        mu_preds = mu_preds * factors[ts]
-        std_preds = std_preds * factors[ts]
-        y_test = y_test * factors[ts]
-        # mu_preds = normalizer.unstandardize(
-        #     mu_preds, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
-        # )
-        # std_preds = normalizer.unstandardize_std(std_preds, train_dtl.x_std[output_col])
-        #
-        # y_test = normalizer.unstandardize(
-        #     y_test, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
-        # )
+        # mu_preds = mu_preds * factors[ts]
+        # std_preds = std_preds * factors[ts]
+        # y_test = y_test * factors[ts]
+        mu_preds = normalizer.unstandardize(
+            mu_preds, mean_train[ts], std_train[ts]
+        )
+        std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+
+        y_test = normalizer.unstandardize(
+            y_test, mean_train[ts], std_train[ts]
+        )
 
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
@@ -350,11 +348,15 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         f.write(f'ND/p50:    {p50_tagi}\n')
         f.write(f'p90:    {p90_tagi}\n')
         f.write(f'RMSE:    {RMSE_tagi}\n')
+        f.write(f'Epoch:    {epoch_optim}\n')
+        f.write(f'Batch size:    {batch_size}\n')
+        f.write(f'Sigma_v:    {sigma_v}\n')
+        f.write(f'LSTM nodes:    {lstm_nodes}\n')
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = ("david/output/electricity_" + str(epoch_optim) + "_"
-                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1")
+    out_dir_ = ("david/output/electricity_" + str(epoch+1) + "_"
+                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_test")
     os.rename(out_dir, out_dir_)
 
 

@@ -288,6 +288,10 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         f.write(f'ND/p50:    {p50_tagi}\n')
         f.write(f'p90:    {p90_tagi}\n')
         f.write(f'RMSE:    {RMSE_tagi}\n')
+        f.write(f'Epoch:    {epoch_optim}\n')
+        f.write(f'Batch size:    {batch_size}\n')
+        f.write(f'Sigma_v:    {sigma_v}\n')
+        f.write(f'LSTM nodes:    {lstm_nodes}\n')
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
