@@ -11,9 +11,10 @@ num_features = 3
 input_seq_len = 24
 output_seq_len = 1
 seq_stride = 1
-idx = 100
+idx = 4
 #
-file_dir = '/david/output/electricity_29_16_0.3_40_method1_ns/'
+file_dir = '/Users/davidwardan/PycharmProjects/cuTAGI_DW/david/output/electricity_27_64_0.5_40_method2_nocv/'
+
 
 # test_dtl = GlobalTimeSeriesDataloader(
 #     x_file="data/traffic/traffic_2008_01_14_test.csv",
@@ -24,6 +25,7 @@ file_dir = '/david/output/electricity_29_16_0.3_40_method1_ns/'
 #     num_features=num_features,
 #     stride=seq_stride,
 #     ts_idx=idx,
+#     time_covariates=['hour_of_day', 'day_of_week'],
 # )
 
 test_dtl = GlobalTimeSeriesDataloader(
@@ -38,7 +40,6 @@ test_dtl = GlobalTimeSeriesDataloader(
     time_covariates=['hour_of_day', 'day_of_week'],
 )
 
-
 # load the predictions into a pandas dataframe
 mu_pred = pd.read_csv(file_dir + "electricity_2014_03_31_ytestPd_pyTAGI.csv", header=None)
 var_pred = pd.read_csv(file_dir + "electricity_2014_03_31_SytestPd_pyTAGI.csv", header=None)
@@ -51,7 +52,7 @@ y_test = y_test.iloc[:, idx].values
 
 # create the prediction visualization object
 # Viz
-viz = PredictionViz(task_name="forecasting", data_name="sin_signal")
+viz = PredictionViz(task_name="Global LSTM", data_name="electricity_2014_03_31")
 
 # img_title = 'TS #{}. Traffic_2008_01_14 Global Model'.format(
 #     idx + 1)  #r"$\text{Time Series Forecasting}$" + " " + str(idx)
@@ -66,9 +67,9 @@ viz.plot_predictions(
     y_pred=mu_preds,
     sy_pred=std_preds,
     std_factor=1,
-    label="time_series_forecasting",
+    label="{}".format(idx+1),
     title=img_title,
     time_series=True,
-)
+    )
 
-plt.savefig(file_dir + "electricity_2014_03_31_ts{}_pyTAGI.png".format(idx), bbox_inches='tight')
+plt.savefig(file_dir + "electricity_2014_03_31_ts{}.png".format(idx+1))

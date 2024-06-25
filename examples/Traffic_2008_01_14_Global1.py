@@ -74,6 +74,13 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     pbar = tqdm(range(num_epochs), desc="Training Progress")
 
     for epoch in pbar:
+
+        # Decaying observation's variance
+        sigma_v = exponential_scheduler(
+            curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
+        )
+        var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
+
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
                 x_file="data/traffic/traffic_2008_01_14_train.csv",
@@ -87,12 +94,6 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 time_covariates=['hour_of_day', 'day_of_week'],
             )
             batch_iter = train_dtl.create_data_loader(batch_size)
-
-            # Decaying observation's variance
-            sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
-            )
-            var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
             mse = []
             for x, y in batch_iter:

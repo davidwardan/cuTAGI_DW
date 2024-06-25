@@ -19,7 +19,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_nodes: int = 40):
+def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -29,7 +29,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
     nb_ts = 370  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
-    num_features = 3
+    num_features = 1
     input_seq_len = 24
     output_seq_len = 1
     seq_stride = 1
@@ -49,7 +49,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            time_covariates=['hour_of_day', 'day_of_week'],
+            # time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
         )
 
@@ -64,7 +64,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            time_covariates=['hour_of_day', 'day_of_week'],
+            # time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             scale_i=factors[ts],
         )
@@ -89,7 +89,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
 
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
-               + "_" + str(lstm_nodes) + "_method2")
+               + "_" + str(lstm_nodes) + "_method2_nocv")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -100,12 +100,12 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
     ll_val = []  # to save log likelihood for plotting
 
     # options for early stopping
-    # log_lik_optim = -1E100
-    # mse_optim = 1E100
-    # epoch_optim = 1
-    # early_stopping_criteria = # 'log_lik' or 'mse'
-    # patience = 3
-    # net_optim = []  # to save optimal net at the optimal epoch
+    log_lik_optim = -1E100
+    mse_optim = 1E100
+    epoch_optim = 1
+    early_stopping_criteria = 'log_lik' # 'log_lik' or 'mse'
+    patience = 3
+    net_optim = []  # to save optimal net at the optimal epoch
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
@@ -113,7 +113,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.5, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -174,20 +174,20 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
         pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}")
 
         # early-stopping
-        # if early_stopping_criteria == 'mse':
-        #     if mse_val < mse_optim:
-        #         mse_optim = mse_val
-        #         log_lik_optim = log_lik_val
-        #         epoch_optim = epoch
-        #         net_optim = net
-        # elif early_stopping_criteria == 'log_lik':
-        #     if log_lik_val > log_lik_optim:
-        #         mse_optim = mse_val
-        #         log_lik_optim = log_lik_val
-        #         epoch_optim = epoch
-        #         net_optim = net
-        # if epoch - epoch_optim > patience:
-        #     break
+        if early_stopping_criteria == 'mse':
+            if mse_val < mse_optim:
+                mse_optim = mse_val
+                log_lik_optim = log_lik_val
+                epoch_optim = epoch
+                net_optim = net
+        elif early_stopping_criteria == 'log_lik':
+            if log_lik_val > log_lik_optim:
+                mse_optim = mse_val
+                log_lik_optim = log_lik_val
+                epoch_optim = epoch
+                net_optim = net
+        if epoch - epoch_optim > patience:
+            break
 
     #-------------------------------------------------------------------------#
         fig, ax1 = plt.subplots()
@@ -233,7 +233,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            time_covariates=['hour_of_day', 'day_of_week'],
+            # time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             scale_i=factors[ts],
         )
@@ -246,7 +246,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
         y_test = []
         x_test = []
 
-        # net = net_optim
+        net = net_optim
 
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
@@ -292,7 +292,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
         f.write(f'ND/p50:    {p50_tagi}\n')
         f.write(f'p90:    {p90_tagi}\n')
         f.write(f'RMSE:    {RMSE_tagi}\n')
-        # f.write(f'Epoch:    {epoch_optim}\n')
+        f.write(f'Epoch:    {epoch_optim}\n')
         f.write(f'Batch size:    {batch_size}\n')
         f.write(f'Sigma_v:    {sigma_v}\n')
         f.write(f'LSTM nodes:    {lstm_nodes}\n')
@@ -300,7 +300,7 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 3, lstm_no
 
     # rename the directory
     out_dir_ = "david/output/electricity_" + str(epoch+1) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_nocv"
     os.rename(out_dir, out_dir_)
 
 
