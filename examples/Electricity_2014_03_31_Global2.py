@@ -8,6 +8,7 @@ import pytagi.metric as metric
 from pytagi import exponential_scheduler
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 from pytagi.tagi_utils import ForecastToolbox
+from pytagi import Normalizer as normalizer
 
 from examples.data_loader import GlobalTimeSeriesDataloader
 
@@ -19,7 +20,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -38,6 +39,8 @@ def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_no
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
     factors = [1.0] * nb_ts
+    mean_train = [0.0] * nb_ts
+    std_train = [1.0] * nb_ts
 
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
@@ -50,10 +53,15 @@ def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_no
             stride=seq_stride,
             ts_idx=ts,
             # time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
+            global_scale='standard',
         )
 
-        factors[ts] = train_dtl_.scale_i
+        # Store scaling factors----------------------#
+        # factors[ts] = train_dtl.scale_i
+        mean_train[ts] = train_dtl_.x_mean[output_col]
+        std_train[ts] = train_dtl_.x_std[output_col]
+        # -------------------------------------------#
+
 
         val_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/electricity/electricity_2014_03_31_val.csv",
@@ -64,9 +72,11 @@ def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
+            x_mean=mean_train[ts],
+            x_std=std_train[ts],
             # time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
-            scale_i=factors[ts],
+            global_scale='standard',
+            # scale_i=factors[ts],
         )
 
         if ts == 0:
@@ -233,9 +243,11 @@ def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
+            x_mean=mean_train[ts],
+            x_std=std_train[ts],
             # time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
-            scale_i=factors[ts],
+            global_scale='standard',
+            # scale_i=factors[ts],
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -266,9 +278,17 @@ def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_no
         x_test = np.array(x_test)
 
         # Unscale the predictions
-        mu_preds = mu_preds * factors[ts]
-        std_preds = std_preds * factors[ts]
-        y_test = y_test * factors[ts]
+        # mu_preds = mu_preds * factors[ts]
+        # std_preds = std_preds * factors[ts]
+        # y_test = y_test * factors[ts]
+        mu_preds = normalizer.unstandardize(
+            mu_preds, mean_train[ts], std_train[ts]
+        )
+        std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+
+        y_test = normalizer.unstandardize(
+            y_test, mean_train[ts], std_train[ts]
+        )
 
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
@@ -285,7 +305,7 @@ def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_no
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)
     RMSE_tagi = metric.computeRMSE(ytestTr, ytestPd)
-    # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct
+    # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct in MASE
 
     # save metrics into a text file
     with open(out_dir + "/electricity_2014_03_31_metrics.txt", "w") as f:
@@ -296,10 +316,11 @@ def main(num_epochs: int = 30, batch_size: int = 32, sigma_v: float = 2, lstm_no
         f.write(f'Batch size:    {batch_size}\n')
         f.write(f'Sigma_v:    {sigma_v}\n')
         f.write(f'LSTM nodes:    {lstm_nodes}\n')
+        f.write(f'global_scale:    {test_dtl.global_scale}\n')
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/electricity_" + str(epoch+1) + "_" + str(batch_size) + "_" + str(
+    out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
         round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_nocv"
     os.rename(out_dir, out_dir_)
 
