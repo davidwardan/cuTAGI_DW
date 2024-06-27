@@ -424,6 +424,10 @@ class GlobalTimeSeriesDataloader:
             global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
             idx_as_feature: Optional[bool] = False,
             min_max_scaler: Optional[list] = None,
+            scale_covariates: Optional[list] = None,
+            covariate_means: Optional[np.ndarray] = None,
+            covariate_stds: Optional[np.ndarray] = None,
+
 
     ) -> None:
         self.x_file = x_file
@@ -441,8 +445,10 @@ class GlobalTimeSeriesDataloader:
         self.x_std = x_std
         self.idx_as_feature = idx_as_feature
         self.min_max_scaler = min_max_scaler
+        self.scale_covariates = scale_covariates
+        self.covariate_means = covariate_means
+        self.covariate_stds = covariate_stds
         self.dataset = self.process_data()
-
 
     def load_data_from_csv(self, data_file: str) -> pd.DataFrame:
         """Load data from csv file"""
@@ -504,29 +510,43 @@ class GlobalTimeSeriesDataloader:
                     quarter_of_year = (month_of_year - 1) // 3 + 1
                     x = np.concatenate((x, quarter_of_year), axis=1)
 
+        # TODO: Add scaling method for time series index as a feature
         # Add time series index as a feature
         if self.idx_as_feature:
             idx_to_add = np.zeros((x.shape[0], 1))
             idx_to_add[:, 0] = self.ts_idx
             x = np.concatenate((x, idx_to_add), axis=1)
 
-        # get a scaling factor of ith time series
+        # standardize covariates
+        if self.scale_covariates is None:
+            for col in range(1, self.num_features):
+                column_to_scale = x[:, col]
+                mean, std = Normalizer.compute_mean_std(column_to_scale)
+                x[:, col] = Normalizer.standardize(column_to_scale, mean, std)
+            self.covariate_means = np.nanmean(x)  # store the mean for scaling the test data
+            self.covariate_stds = np.nanstd(x)  # store the std for scaling the test data
+        else:
+            for col in range(1, self.num_features):
+                column_to_scale = x[:, col]
+                x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
+                                                   self.covariate_stds[col])
+
+        # scale the observations using time series dependent scaling factors
         if self.global_scale is not None:
             if self.global_scale == 'deepAR':
                 if self.scale_i is None:
-                    self.scale_i = 1 + np.nanmean(x)
-                x = x / np.array(self.scale_i)
+                    self.scale_i = 1 + np.nanmean(x[:, 0])
+                x[:, 0] = x[:, 0] / np.array(self.scale_i)
 
             elif self.global_scale == 'standard':
                 if self.x_mean is None and self.x_std is None:
-                    self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
-                x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
+                    self.x_mean, self.x_std = Normalizer.compute_mean_std(x[:, 0])
+                x[:, 0] = Normalizer.standardize(data=x[:, 0], mu=self.x_mean, std=self.x_std)
 
-            elif self.global_scale == 'min_max':
-                if self.min_max_scaler is None:
-                    self.min_max_scaler = [np.nanmax(x), np.nanmin(x)]
-                x = Normalizer.max_min_norm(x, max_value=self.min_max_scaler[0], min_value=self.min_max_scaler[1])
-
+            # elif self.global_scale == 'min_max':
+            #     if self.min_max_scaler is None:
+            #         self.min_max_scaler = [np.nanmax(x), np.nanmin(x)]
+            #     x = Normalizer.max_min_norm(x, max_value=self.min_max_scaler[0], min_value=self.min_max_scaler[1])
 
         # Create rolling windows
         x_rolled, y_rolled = utils.create_rolling_window(

@@ -27,4 +27,4 @@ data/cifar_torch
 !test/fnn_heteros/data/*.csv
 !test/lstm/data/*.csv
 /david/
-!/david/visualize_results.py
+

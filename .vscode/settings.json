@@ -221,5 +221,6 @@
         "expected": "cpp",
         "spanstream": "cpp",
         "stacktrace": "cpp"
-    }
+    },
+    "python.analysis.autoImportCompletions": true
 }

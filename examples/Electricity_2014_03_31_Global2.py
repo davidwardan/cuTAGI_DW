@@ -20,7 +20,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -312,12 +312,12 @@ def main(num_epochs: int = 30, batch_size: int = 64, sigma_v: float = 2, lstm_no
         f.write(f'ND/p50:    {p50_tagi}\n')
         f.write(f'p90:    {p90_tagi}\n')
         f.write(f'RMSE:    {RMSE_tagi}\n')
+        # f.write(f'MASE:    {MASE_tagi}\n')
         f.write(f'Epoch:    {epoch_optim}\n')
         f.write(f'Batch size:    {batch_size}\n')
         f.write(f'Sigma_v:    {sigma_v}\n')
         f.write(f'LSTM nodes:    {lstm_nodes}\n')
         f.write(f'global_scale:    {test_dtl.global_scale}\n')
-        # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
     out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
