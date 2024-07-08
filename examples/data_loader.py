@@ -428,7 +428,6 @@ class GlobalTimeSeriesDataloader:
             covariate_means: Optional[np.ndarray] = None,
             covariate_stds: Optional[np.ndarray] = None,
 
-
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -463,6 +462,8 @@ class GlobalTimeSeriesDataloader:
             output_data: np.ndarray,
             batch_size: int,
             shuffle: bool = True,
+            weighted_sampling: bool = False,
+            weights: Optional[np.ndarray] = None,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         """
         Generator function to yield batches of data.
@@ -471,6 +472,14 @@ class GlobalTimeSeriesDataloader:
         indices = np.arange(num_data)
         if shuffle:
             np.random.shuffle(indices)
+
+        # TODO: Implement weighted sampling
+        if weighted_sampling:
+            if weights is None:
+                raise ValueError("Weights must be provided for weighted sampling.")
+            if weights.shape[0] != num_data:
+                raise ValueError("Weights array must be the same length as the number of data points.")
+            indices = np.random.choice(indices, size=num_data, replace=True, p=weights)
 
         for start_idx in range(0, num_data, batch_size):
             if start_idx + batch_size > num_data:
@@ -510,21 +519,21 @@ class GlobalTimeSeriesDataloader:
                     quarter_of_year = (month_of_year - 1) // 3 + 1
                     x = np.concatenate((x, quarter_of_year), axis=1)
 
-        # TODO: Add scaling method for time series index as a feature
         # Add time series index as a feature
         if self.idx_as_feature:
             idx_to_add = np.zeros((x.shape[0], 1))
             idx_to_add[:, 0] = self.ts_idx
-            x = np.concatenate((x, idx_to_add), axis=1)
+            x = np.concatenate((x, idx_to_add), axis=1)  # TODO: fix time series index is not scaled in this case
 
+        # TODO: Add scaling method for time series index as a feature
         # standardize covariates
         if self.scale_covariates is None:
             for col in range(1, self.num_features):
                 column_to_scale = x[:, col]
                 mean, std = Normalizer.compute_mean_std(column_to_scale)
                 x[:, col] = Normalizer.standardize(column_to_scale, mean, std)
-            self.covariate_means = np.nanmean(x)  # store the mean for scaling the test data
-            self.covariate_stds = np.nanstd(x)  # store the std for scaling the test data
+            self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
+            self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
         else:
             for col in range(1, self.num_features):
                 column_to_scale = x[:, col]
@@ -543,11 +552,6 @@ class GlobalTimeSeriesDataloader:
                     self.x_mean, self.x_std = Normalizer.compute_mean_std(x[:, 0])
                 x[:, 0] = Normalizer.standardize(data=x[:, 0], mu=self.x_mean, std=self.x_std)
 
-            # elif self.global_scale == 'min_max':
-            #     if self.min_max_scaler is None:
-            #         self.min_max_scaler = [np.nanmax(x), np.nanmin(x)]
-            #     x = Normalizer.max_min_norm(x, max_value=self.min_max_scaler[0], min_value=self.min_max_scaler[1])
-
         # Create rolling windows
         x_rolled, y_rolled = utils.create_rolling_window(
             data=x,
@@ -565,7 +569,12 @@ class GlobalTimeSeriesDataloader:
         # NOTE: Datetime is saved for the visualization purpose
         dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
 
+        # store weights for weighted sampling. Default is uniform sampling
+        if self.global_scale == 'deepAR':
+            dataset["weights"] = self.scale_i * np.ones(x_rolled.shape[0])
+
         return dataset
 
-    def create_data_loader(self, batch_size: int, shuffle: bool = True):
-        return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
+    def create_data_loader(self, batch_size: int, shuffle: bool = True, weighted_sampling: bool = False,
+                           weights: Optional[np.ndarray] = None):
+        return self.batch_generator(*self.dataset["value"], batch_size, shuffle, weighted_sampling, weights)

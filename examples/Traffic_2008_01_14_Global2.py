@@ -66,8 +66,8 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             train_dtl = train_dtl_
             val_dtl = val_dtl_
         else:
-            train_dtl = concatTsSample(train_dtl, train_dtl_)
-            val_dtl = concatTsSample(val_dtl, val_dtl_)
+            train_dtl = concat_ts_sample(train_dtl, train_dtl_)
+            val_dtl = concat_ts_sample(val_dtl, val_dtl_)
 
     # Network
     net = Sequential(
@@ -96,7 +96,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     log_lik_optim = -1E100
     mse_optim = 1E100
     epoch_optim = 1
-    early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
+    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
     patience = 3
     net_optim = []  # to save optimal net at the optimal epoch
 
@@ -289,13 +289,12 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     os.rename(out_dir, out_dir_)
 
 
-def concatTsSample(data, data_add):
+def concat_ts_sample(data, data_add):
     x_combined = np.concatenate((data.dataset["value"][0], data_add.dataset["value"][0]), axis=0)
     y_combined = np.concatenate((data.dataset["value"][1], data_add.dataset["value"][1]), axis=0)
     time_combined = np.concatenate((data.dataset["date_time"], data_add.dataset["date_time"]))
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
-
     return data
 
 

@@ -20,7 +20,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -41,6 +41,8 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
     factors = [1.0] * nb_ts
     mean_train = [0.0] * nb_ts
     std_train = [1.0] * nb_ts
+    covar_means = [0.0] * nb_ts
+    covar_stds = [1.0] * nb_ts
 
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
@@ -53,15 +55,19 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
             stride=seq_stride,
             ts_idx=ts,
             # time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='standard',
+            global_scale='deepAR',
+            # idx_as_feature=True,
         )
 
         # Store scaling factors----------------------#
-        # factors[ts] = train_dtl.scale_i
-        mean_train[ts] = train_dtl_.x_mean[output_col]
-        std_train[ts] = train_dtl_.x_std[output_col]
+        factors[ts] = train_dtl_.scale_i
+        # mean_train[ts] = train_dtl_.x_mean
+        # std_train[ts] = train_dtl_.x_std
         # -------------------------------------------#
 
+        # store covariate means and stds
+        # covar_means[ts] = train_dtl_.covariate_means
+        # covar_stds[ts] = train_dtl_.covariate_stds
 
         val_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/electricity/electricity_2014_03_31_val.csv",
@@ -72,19 +78,22 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
+            # x_mean=mean_train[ts],
+            # x_std=std_train[ts],
             # time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='standard',
-            # scale_i=factors[ts],
+            global_scale='deepAR',
+            scale_i=factors[ts],
+            # covariate_means=covar_means[ts],
+            # covariate_stds=covar_stds[ts],
+            # idx_as_feature=True,
         )
 
         if ts == 0:
             train_dtl = train_dtl_
             val_dtl = val_dtl_
         else:
-            train_dtl = concatTsSample(train_dtl, train_dtl_)
-            val_dtl = concatTsSample(val_dtl, val_dtl_)
+            train_dtl = concat_ts_sample(train_dtl, train_dtl_)
+            val_dtl = concat_ts_sample(val_dtl, val_dtl_)
 
     # Network
     net = Sequential(
@@ -99,11 +108,14 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
-               + "_" + str(lstm_nodes) + "_method2_nocv")
+               + "_" + str(lstm_nodes) + "_method2")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
     # -------------------------------------------------------------------------#
+    # calculate the weights for each time series
+    weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
+
     # Training
     mses = []
     mses_val = []  # to save mse_val for plotting
@@ -113,17 +125,17 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
     log_lik_optim = -1E100
     mse_optim = 1E100
     epoch_optim = 1
-    early_stopping_criteria = 'log_lik' # 'log_lik' or 'mse'
-    patience = 3
+    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
+    patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
+        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True, weighted_sampling=True, weights=weights)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.5, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -143,8 +155,18 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
             net.backward()
             net.step()
 
+            # unscale the predictions
+            # pred = m_pred * factors[ts]
+            # obs = y * factors[ts]
+            pred = normalizer.unstandardize(
+                m_pred, mean_train[ts], std_train[ts]
+            )
+            obs = normalizer.unstandardize(
+                y, mean_train[ts], std_train[ts]
+            )
+
             # Training metric
-            mse = metric.mse(m_pred, y)
+            mse = metric.mse(pred, obs)
             mses.append(mse)
 
         # -------------------------------------------------------------------------#
@@ -169,6 +191,20 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
         std_preds = np.array(var_preds) ** 0.5
         y_val = np.array(y_val)
         x_val = np.array(x_val)
+
+        # Unscale the predictions
+        # mu_preds = mu_preds * factors[ts]
+        # std_preds = std_preds * factors[ts] ** 0.5
+        # y_val = y_val * factors[ts]
+
+        mu_preds = normalizer.unstandardize(
+            mu_preds, mean_train[ts], std_train[ts]
+        )
+        std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+
+        y_val = normalizer.unstandardize(
+            y_val, mean_train[ts], std_train[ts]
+        )
 
         # Compute log-likelihood for validation set
         mse_val = metric.mse(mu_preds, y_val)
@@ -200,28 +236,32 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
             break
 
     #-------------------------------------------------------------------------#
-        fig, ax1 = plt.subplots()
-
-        # Set title for the plot
-        ax1.set_title('Validation Metrics', fontsize=16)
-
-        # Plot MSE on primary y-axis
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('MSE', color='steelblue')
-        ax1.plot(mses_val, color='steelblue', label='MSE')
-        ax1.tick_params(axis='y', labelcolor='steelblue')
-
-        # Plot Log Likelihood on secondary y-axis
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Log Likelihood', color='indianred')
-        ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-        ax2.tick_params(axis='y', labelcolor='indianred')
-
-        # Adjust layout to make room for the title and legends
-        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        # Save the figure
-        fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+    # fig, ax1 = plt.subplots()
+    #
+    # # Set title for the plot
+    # ax1.set_title('Validation Metrics', fontsize=16)
+    #
+    # # Plot MSE on primary y-axis
+    # ax1.set_xlabel('Epoch')
+    # ax1.set_ylabel('MSE', color='steelblue')
+    # ax1.plot(mses_val, color='steelblue', label='MSE')
+    # ax1.tick_params(axis='y', labelcolor='steelblue')
+    #
+    # # Plot Log Likelihood on secondary y-axis
+    # ax2 = ax1.twinx()
+    # ax2.set_ylabel('Log Likelihood', color='indianred')
+    # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
+    # ax2.tick_params(axis='y', labelcolor='indianred')
+    #
+    # # Adjust layout to make room for the title and legends
+    # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    #
+    # # Save the figure
+    # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+    # -------------------------------------------------------------------------#
+    # save validation metrics into csv
+    df = np.array([mses_val, ll_val]).T
+    np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
     # -------------------------------------------------------------------------#
     # save the model
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
@@ -243,11 +283,14 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
+            # x_mean=mean_train[ts],
+            # x_std=std_train[ts],
             # time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='standard',
-            # scale_i=factors[ts],
+            global_scale='deepAR',
+            scale_i=factors[ts],
+            # covariate_means=covar_means[ts],
+            # covariate_stds=covar_stds[ts],
+            # idx_as_feature=True,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -321,18 +364,25 @@ def main(num_epochs: int = 30, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # rename the directory
     out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_nocv"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2"
     os.rename(out_dir, out_dir_)
 
 
-def concatTsSample(data, data_add):
+def concat_ts_sample(data, data_add):
+    """Concatenate two time series samples"""
     x_combined = np.concatenate((data.dataset["value"][0], data_add.dataset["value"][0]), axis=0)
     y_combined = np.concatenate((data.dataset["value"][1], data_add.dataset["value"][1]), axis=0)
     time_combined = np.concatenate((data.dataset["date_time"], data_add.dataset["date_time"]))
+    weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
-
+    data.dataset["weights"] = weights_combined
     return data
+
+
+def random_weighted_sampling(data: np.ndarray, weights: np.ndarray, num_samples: int) -> np.ndarray:
+    """Random-weighted sampling"""
+    return np.random.choice(data, num_samples, p=weights)
 
 
 if __name__ == "__main__":

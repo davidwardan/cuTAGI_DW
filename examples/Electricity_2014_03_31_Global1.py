@@ -22,7 +22,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_nodes: int = 60):
+def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
@@ -32,7 +32,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
     output_col = [0]
-    num_features = 3
+    num_features = 4
     input_seq_len = 24
     output_seq_len = 1
     seq_stride = 1
@@ -52,7 +52,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs)
-               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1_nocv")
+               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1_std")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -98,14 +98,15 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
+                idx_as_feature=True,
                 time_covariates=['hour_of_day', 'day_of_week'],
                 global_scale='deepAR',
             )
 
             # Store scaling factors----------------------#
             factors[ts] = train_dtl.scale_i
-            # mean_train[ts] = train_dtl.x_mean[output_col]
-            # std_train[ts] = train_dtl.x_std[output_col]
+            # mean_train[ts] = train_dtl.x_mean
+            # std_train[ts] = train_dtl.x_std
             # -------------------------------------------#
 
             # store covariate means and stds
@@ -133,8 +134,8 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 net.step()
 
                 # unscale the predictions
-                pred = m_pred  # * factors[ts]
-                obs = y  # * factors[ts]
+                pred = m_pred * factors[ts]
+                obs = y * factors[ts]
                 # pred = normalizer.unstandardize(
                 #     m_pred, mean_train[ts], std_train[ts]
                 # )
@@ -166,6 +167,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 time_covariates=['hour_of_day', 'day_of_week'],
                 global_scale='deepAR',
                 scale_i=factors[ts],
+                idx_as_feature=True,
                 covariate_means=covar_means[ts],
                 covariate_stds=covar_stds[ts],
             )
@@ -193,7 +195,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
             # Unscale the predictions
             # mu_preds = mu_preds * factors[ts]
-            # std_preds = std_preds * factors[ts]
+            # std_preds = std_preds * factors[ts]**0.5
             # y_val = y_val * factors[ts]
 
             # mu_preds = normalizer.unstandardize(
@@ -225,29 +227,29 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                                                                                            f", sigma_v={sigma_v:.4f}")
 
         #-------------------------------------------------------------------------#
-        fig, ax1 = plt.subplots()
-
-        # Set title for the plot
-        ax1.set_title('Validation Metrics', fontsize=16)
-
-        # Plot MSE on primary y-axis
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('MSE', color='steelblue')
-        ax1.plot(mses_val, color='steelblue', label='MSE')
-        ax1.tick_params(axis='y', labelcolor='steelblue')
-
-        # Plot Log Likelihood on secondary y-axis
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Log Likelihood', color='indianred')
-        ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-        ax2.tick_params(axis='y', labelcolor='indianred')
-
-        # Adjust layout to make room for the title and legends
-        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        # Save the figure
-        fig.savefig(out_dir + "/validation_plot.png", dpi=300)
-        plt.close(fig)
+        # fig, ax1 = plt.subplots()
+        #
+        # # Set title for the plot
+        # ax1.set_title('Validation Metrics', fontsize=16)
+        #
+        # # Plot MSE on primary y-axis
+        # ax1.set_xlabel('Epoch')
+        # ax1.set_ylabel('MSE', color='steelblue')
+        # ax1.plot(mses_val, color='steelblue', label='MSE')
+        # ax1.tick_params(axis='y', labelcolor='steelblue')
+        #
+        # # Plot Log Likelihood on secondary y-axis
+        # ax2 = ax1.twinx()
+        # ax2.set_ylabel('Log Likelihood', color='indianred')
+        # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
+        # ax2.tick_params(axis='y', labelcolor='indianred')
+        #
+        # # Adjust layout to make room for the title and legends
+        # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        #
+        # # Save the figure
+        # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+        # plt.close(fig)
         #-------------------------------------------------------------------------#
 
         # early-stopping
@@ -268,6 +270,10 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
         # shuffle ts_idx
         np.random.shuffle(ts_idx)
+    # -------------------------------------------------------------------------#
+    # save validation metrics into csv
+    df = np.array([mses_val, ll_val]).T
+    np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
     # -------------------------------------------------------------------------#
     # save the model
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
@@ -291,6 +297,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
             ts_idx=ts,
             # x_mean=mean_train[ts],
             # x_std=std_train[ts],
+            idx_as_feature=True,
             time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             scale_i=factors[ts],
@@ -306,7 +313,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         y_test = []
         x_test = []
 
-        net = net_optim
+        # net = net_optim
 
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
@@ -369,7 +376,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # rename the directory
     out_dir_ = ("david/output/electricity_" + str(epoch_optim) + "_"
-                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_nocv")
+                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_std")
     os.rename(out_dir, out_dir_)
 
 
