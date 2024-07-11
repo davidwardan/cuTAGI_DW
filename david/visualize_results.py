@@ -13,7 +13,7 @@ output_seq_len = 1
 seq_stride = 1
 idx = 14
 #
-file_dir = '/Users/davidwardan/PycharmProjects/cuTAGI_DW/david/output/electricity_14_64_0.359_40_method2_std/'
+file_dir = '/Users/davidwardan/PycharmProjects/cuTAGI_DW/david/output/electricity_11_64_0.43_40_method2_std/'
 
 
 # test_dtl = GlobalTimeSeriesDataloader(

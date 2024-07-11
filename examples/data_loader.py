@@ -424,7 +424,7 @@ class GlobalTimeSeriesDataloader:
             global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
             idx_as_feature: Optional[bool] = False,
             min_max_scaler: Optional[list] = None,
-            scale_covariates: Optional[list] = None,
+            scale_covariates: Optional[bool] = False,
             covariate_means: Optional[np.ndarray] = None,
             covariate_stds: Optional[np.ndarray] = None,
 
@@ -527,18 +527,19 @@ class GlobalTimeSeriesDataloader:
 
         # TODO: Add scaling method for time series index as a feature
         # standardize covariates
-        if self.scale_covariates is None:
-            for col in range(1, self.num_features):
-                column_to_scale = x[:, col]
-                mean, std = Normalizer.compute_mean_std(column_to_scale)
-                x[:, col] = Normalizer.standardize(column_to_scale, mean, std)
-            self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
-            self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
-        else:
-            for col in range(1, self.num_features):
-                column_to_scale = x[:, col]
-                x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
-                                                   self.covariate_stds[col])
+        if self.scale_covariates is False:
+            if self.covariate_means is None and self.covariate_stds is None:
+                for col in range(1, self.num_features):
+                    column_to_scale = x[:, col]
+                    mean, std = Normalizer.compute_mean_std(column_to_scale)
+                    x[:, col] = Normalizer.standardize(column_to_scale, mean, std)
+                self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
+                self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
+            else:
+                for col in range(1, self.num_features):
+                    column_to_scale = x[:, col]
+                    x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
+                                                       self.covariate_stds[col])
 
         # scale the observations using time series dependent scaling factors
         if self.global_scale is not None:

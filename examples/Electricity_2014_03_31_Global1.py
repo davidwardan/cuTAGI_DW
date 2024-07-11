@@ -32,7 +32,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
     output_col = [0]
-    num_features = 4
+    num_features = 3
     input_seq_len = 24
     output_seq_len = 1
     seq_stride = 1
@@ -43,7 +43,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         LSTM(num_features, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        # LSTM(40, 40, input_seq_len),
+        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
     # net.to_device("cuda")
@@ -52,7 +52,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs)
-               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1_std")
+               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1_ar")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -67,7 +67,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
     mse_optim = 1E100
     epoch_optim = 1
     early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
-    patience = 3
+    patience = 5
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
     global_log_lik = []
@@ -98,9 +98,10 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
-                idx_as_feature=True,
+                # idx_as_feature=True,
                 time_covariates=['hour_of_day', 'day_of_week'],
                 global_scale='deepAR',
+                scale_covariates=True,
             )
 
             # Store scaling factors----------------------#
@@ -134,14 +135,17 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 net.step()
 
                 # unscale the predictions
-                pred = m_pred * factors[ts]
-                obs = y * factors[ts]
+                # pred = m_pred * factors[ts]
+                # obs = y * factors[ts]
                 # pred = normalizer.unstandardize(
                 #     m_pred, mean_train[ts], std_train[ts]
                 # )
                 # obs = normalizer.unstandardize(
                 #     y, mean_train[ts], std_train[ts]
                 # )
+
+                pred = m_pred
+                obs = y
 
                 # Compute MSE
                 mse.append(metric.mse(pred, obs))
@@ -167,7 +171,8 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
                 time_covariates=['hour_of_day', 'day_of_week'],
                 global_scale='deepAR',
                 scale_i=factors[ts],
-                idx_as_feature=True,
+                # idx_as_feature=True,
+                scale_covariates=True,
                 covariate_means=covar_means[ts],
                 covariate_stds=covar_stds[ts],
             )
@@ -297,10 +302,11 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
             ts_idx=ts,
             # x_mean=mean_train[ts],
             # x_std=std_train[ts],
-            idx_as_feature=True,
+            # idx_as_feature=True,
             time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             scale_i=factors[ts],
+            scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
         )
@@ -313,7 +319,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         y_test = []
         x_test = []
 
-        # net = net_optim
+        net = net_optim
 
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
@@ -336,6 +342,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         mu_preds = mu_preds * factors[ts]
         std_preds = std_preds * factors[ts]
         y_test = y_test * factors[ts]
+        #
         # mu_preds = normalizer.unstandardize(
         #     mu_preds, mean_train[ts], std_train[ts]
         # )
@@ -376,7 +383,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # rename the directory
     out_dir_ = ("david/output/electricity_" + str(epoch_optim) + "_"
-                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_std")
+                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_ar")
     os.rename(out_dir, out_dir_)
 
 
