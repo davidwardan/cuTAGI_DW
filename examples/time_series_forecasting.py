@@ -1,3 +1,11 @@
+# Temporary import. It will be removed in the final version
+import os
+import sys
+
+# Add the 'build' directory to sys.path in one line
+sys.path.append(
+    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "build"))
+)
 from typing import Optional
 
 import fire
@@ -147,7 +155,7 @@ def main(num_epochs: int = 20, batch_size: int = 10, sigma_v: float = 2):
         sy_pred=std_preds,
         std_factor=1,
         label="time_series_forecasting",
-        title=r"\text{Time Series Forecasting}",
+        title=r"\textbf{Time Series Forecasting}",
         time_series=True,
     )
 
@@ -155,8 +163,8 @@ def main(num_epochs: int = 20, batch_size: int = 10, sigma_v: float = 2):
     print(f"MSE           : {mse: 0.2f}")
     print(f"Log-likelihood: {log_lik: 0.2f}")
 
-class PredictionViz:
 
+class PredictionViz:
     """Visualization of prediction
     Attributes:
         task_name: Name of the task such as autoencoder
@@ -330,7 +338,7 @@ class PredictionViz:
         if save_folder is None:
             plt.show()
         else:
-            saving_path = f"/pred_{label}_{self.data_name}.png"
+            saving_path = f"saved_results/pred_{label}_{self.data_name}.png"
             plt.savefig(saving_path, bbox_inches="tight")
             plt.close()
 

@@ -12,6 +12,8 @@ pytagi.egg-info
 dist
 data/cifar
 data/mnist/MNIST
+data/traffic
+data/electricity
 *ncu-rep
 *sys-rep
 *sqlite

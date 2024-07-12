@@ -55,15 +55,15 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
             stride=seq_stride,
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='standard',
+            global_scale='deepAR',
             # idx_as_feature=True,
             scale_covariates=True,
         )
 
         # Store scaling factors----------------------#
-        # factors[ts] = train_dtl_.scale_i
-        mean_train[ts] = train_dtl_.x_mean
-        std_train[ts] = train_dtl_.x_std
+        factors[ts] = train_dtl_.scale_i
+        # mean_train[ts] = train_dtl_.x_mean
+        # std_train[ts] = train_dtl_.x_std
         # -------------------------------------------#
 
         # store covariate means and stds
@@ -79,11 +79,11 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
+            # x_mean=mean_train[ts],
+            # x_std=std_train[ts],
             time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='standard',
-            # scale_i=factors[ts],
+            global_scale='deepAR',
+            scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
@@ -111,13 +111,13 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
-               + "_" + str(lstm_nodes) + "_method2_std")
+               + "_" + str(lstm_nodes) + "_method2_ar")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
     # -------------------------------------------------------------------------#
     # calculate the weights for each time series
-    # weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
+    weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
 
     # Training
     mses = []
@@ -134,7 +134,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)  #, weighted_sampling=True, weights=weights)
+        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False, weighted_sampling=True, weights=weights)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
@@ -289,11 +289,11 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
+            # x_mean=mean_train[ts],
+            # x_std=std_train[ts],
             time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='standard',
-            # scale_i=factors[ts],
+            global_scale='deepAR',
+            scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
@@ -328,17 +328,17 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
         x_test = np.array(x_test)
 
         # Unscale the predictions
-        # mu_preds = mu_preds * factors[ts]
-        # std_preds = std_preds * factors[ts]
-        # y_test = y_test * factors[ts]
-        mu_preds = normalizer.unstandardize(
-            mu_preds, mean_train[ts], std_train[ts]
-        )
-        std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-
-        y_test = normalizer.unstandardize(
-            y_test, mean_train[ts], std_train[ts]
-        )
+        mu_preds = mu_preds * factors[ts]
+        std_preds = std_preds * factors[ts]
+        y_test = y_test * factors[ts]
+        # mu_preds = normalizer.unstandardize(
+        #     mu_preds, mean_train[ts], std_train[ts]
+        # )
+        # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+        #
+        # y_test = normalizer.unstandardize(
+        #     y_test, mean_train[ts], std_train[ts]
+        # )
 
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
@@ -371,7 +371,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
     # rename the directory
     out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_std"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_ar"
     os.rename(out_dir, out_dir_)
 
 
@@ -380,10 +380,10 @@ def concat_ts_sample(data, data_add):
     x_combined = np.concatenate((data.dataset["value"][0], data_add.dataset["value"][0]), axis=0)
     y_combined = np.concatenate((data.dataset["value"][1], data_add.dataset["value"][1]), axis=0)
     time_combined = np.concatenate((data.dataset["date_time"], data_add.dataset["date_time"]))
-    # weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
+    weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
-    # data.dataset["weights"] = weights_combined
+    data.dataset["weights"] = weights_combined
     return data
 
 

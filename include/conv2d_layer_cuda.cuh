@@ -1,119 +1,382 @@
 ///////////////////////////////////////////////////////////////////////////////
-// File:         linear_layer_cuda.cuh
+// File:         base_layer_cuda.cuh
 // Description:  ...
 // Authors:      Luong-Ha Nguyen & James-A. Goulet
-// Created:      January 04, 2024
-// Updated:      April 18, 2024
+// Created:      December 13, 2023
+// Updated:      April 08, 2024
 // Contact:      luongha.nguyen@gmail.com & james.goulet@polymtl.ca
 // License:      This code is released under the MIT License.
 ////////////////////////////////////////////////////////////////////////////////
 
-#pragma once
+#include "../include/base_layer_cuda.cuh"
+#include "../include/cuda_error_checking.cuh"
 
-#include "base_layer_cuda.cuh"
+__global__ void fill_bwd_states_on_device(float const *mu_a_in,
+                                          float const *jcb_in, int size,
+                                          float *mu_a, float *jcb)
+/*
+ */
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < size) {
+        mu_a[col] = mu_a_in[col];
+        jcb[col] = jcb_in[col];
+    }
+}
 
-class Conv2dCuda : public BaseLayerCuda {
-   public:
-    float gain_w;
-    float gain_b;
-    std::string init_method;
-    size_t kernel_size = 0;
-    int padding = 0;
-    int stride = 1;
-    int padding_type = 1;
+__global__ void fill_output_states_on_device(int size, float *jcb)
+/*
+ */
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < size) {
+        jcb[col] = 1.0f;
+    }
+}
 
-    int *d_idx_mwa_2;
-    int *d_idx_cov_zwa_1;
-    int *d_idx_var_z_ud;
-    std::vector<int> idx_mwa_2;
-    std::vector<int> idx_cov_zwa_1;
-    std::vector<int> idx_var_z_ud;
-    int row_zw = 0, col_z_ud = 0;
+__global__ void device_raw_weight_update(float const *delta_mu_w,
+                                         float const *delta_var_w, size_t size,
+                                         float *mu_w, float *var_w)
+/*
+ */
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    Conv2dCuda(size_t in_channels, size_t out_channels, size_t kernel_size,
-               bool bias = true, int stride = 1, int padding = 0,
-               int padding_type = 1, size_t in_width = 0, size_t in_height = 0,
-               float gain_w = 1.0f, float gain_b = 1.0f,
-               std::string init_method = "He");
+    if (col < size) {
+        mu_w[col] += delta_mu_w[col];
+        var_w[col] += delta_var_w[col];
+    }
+}
 
-    virtual ~Conv2dCuda();
+__global__ void device_raw_bias_update(float const *delta_mu_b,
+                                       float const *delta_var_b, size_t size,
+                                       float *mu_b, float *var_b)
+/*
+ */
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    // Delete copy constructor and copy assignment
-    Conv2dCuda(const Conv2dCuda &) = delete;
-    Conv2dCuda &operator=(const Conv2dCuda &) = delete;
+    if (col < size) {
+        mu_b[col] += delta_mu_b[col];
+        var_b[col] += delta_var_b[col];
+    }
+}
 
-    // Optionally implement move constructor and move assignment. This is
-    // required for bwd_states
-    Conv2dCuda(Conv2dCuda &&) = default;
-    Conv2dCuda &operator=(Conv2dCuda &&) = default;
+__global__ void device_weight_update(float const *delta_mu_w,
+                                     float const *delta_var_w,
+                                     float cap_factor_udapte, size_t size,
+                                     float *mu_w, float *var_w)
+/*
+ */
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float delta_mu_sign, delta_var_sign, delta_bar;
+    if (col < size) {
+        delta_mu_sign = (delta_mu_w[col] > 0) - (delta_mu_w[col] < 0);
+        delta_var_sign = (delta_var_w[col] > 0) - (delta_var_w[col] < 0);
+        delta_bar = powf(var_w[col], 0.5) / cap_factor_udapte;
 
-    std::string get_layer_info() const override;
+        mu_w[col] += delta_mu_sign * min(fabsf(delta_mu_w[col]), delta_bar);
+        var_w[col] += delta_var_sign * min(fabsf(delta_var_w[col]), delta_bar);
+    }
+}
 
-    std::string get_layer_name() const override;
+__global__ void device_bias_update(float const *delta_mu_b,
+                                   float const *delta_var_b,
+                                   float cap_factor_udapte, size_t size,
+                                   float *mu_b, float *var_b)
+/*
+ */
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    float delta_mu_sign, delta_var_sign, delta_bar;
+    if (col < size) {
+        delta_mu_sign = (delta_mu_b[col] > 0) - (delta_mu_b[col] < 0);
+        delta_var_sign = (delta_var_b[col] > 0) - (delta_var_b[col] < 0);
+        delta_bar = powf(var_b[col], 0.5) / cap_factor_udapte;
 
-    LayerType get_layer_type() const override;
+        mu_b[col] += delta_mu_sign * min(fabsf(delta_mu_b[col]), delta_bar);
+        var_b[col] += delta_var_sign * min(fabsf(delta_var_b[col]), delta_bar);
+    }
+}
 
-    void compute_input_output_size(const InitArgs &args) override;
+BaseLayerCuda::BaseLayerCuda() {
+    this->device = "cuda";
+    if (this->training) {
+        this->bwd_states = std::make_unique<BackwardStateCuda>();
+    }
+}
 
-    void get_number_param();
+BaseLayerCuda::~BaseLayerCuda()
+/*
+ */
+{
+    cudaFree(d_mu_w);
+    cudaFree(d_var_w);
+    cudaFree(d_mu_b);
+    cudaFree(d_var_b);
+    cudaFree(d_delta_mu_w);
+    cudaFree(d_delta_var_w);
+    cudaFree(d_delta_mu_b);
+    cudaFree(d_delta_var_b);
+}
 
-    void init_weight_bias() override;
+void BaseLayerCuda::allocate_param_delta()
+/*
+ */
+{
+    this->delta_mu_w.resize(this->num_weights, 0.0f);
+    this->delta_var_w.resize(this->num_weights, 0.0f);
 
-    void forward(BaseHiddenStates &input_states,
-                 BaseHiddenStates &output_states,
-                 BaseTempStates &temp_states) override;
+    cudaMalloc(&this->d_delta_mu_w, this->num_weights * sizeof(float));
+    cudaMalloc(&this->d_delta_var_w, this->num_weights * sizeof(float));
+    if (this->bias) {
+        this->delta_mu_b.resize(this->num_biases, 0.0f);
+        this->delta_var_b.resize(this->num_biases, 0.0f);
+        cudaMalloc(&this->d_delta_mu_b, this->num_biases * sizeof(float));
+        cudaMalloc(&this->d_delta_var_b, this->num_biases * sizeof(float));
+    }
+    CHECK_LAST_CUDA_ERROR();
+}
 
-    void backward(BaseDeltaStates &input_delta_states,
-                  BaseDeltaStates &output_delta_states,
-                  BaseTempStates &temp_states,
-                  bool state_udapte = true) override;
+void BaseLayerCuda::raw_update_weights()
+/*
+ */
+{
+    // TODO: replace with capped update version
+    unsigned int blocks = (this->num_weights + this->num_cuda_threads - 1) /
+                          this->num_cuda_threads;
 
-    std::unique_ptr<BaseLayer> to_host() override;
+    device_raw_weight_update<<<blocks, this->num_cuda_threads>>>(
+        this->d_delta_mu_w, this->d_delta_var_w, this->num_weights,
+        this->d_mu_w, this->d_var_w);
 
-    void preinit_layer() override;
+    // this->params_to_host();
+    // this->delta_params_to_host();
+}
 
-   protected:
-    void allocate_conv_index();
-    void conv_index_to_device();
-    void lazy_index_init();
-    using BaseLayerCuda::allocate_param_memory;
-    using BaseLayerCuda::params_to_device;
-};
+void BaseLayerCuda::raw_update_biases()
+/*
+ */
+{
+    if (this->bias) {
+        // TODO: replace with capped update version
+        unsigned int blocks = (this->num_biases + this->num_cuda_threads - 1) /
+                              this->num_cuda_threads;
 
-////////////////////////////////////////////////////////////////////////////////
-// Conv2d Backward and Forward
-////////////////////////////////////////////////////////////////////////////////
-__global__ void conv2d_fwd_mean_var_cuda(float const *mu_w, float const *var_w,
-                                         float const *mu_b, float const *var_b,
-                                         float const *mu_a, float const *var_a,
-                                         int const *aidx, int woho, int fo,
-                                         int wihi, int fi, int ki, int B,
-                                         int pad_idx, bool bias, float *mu_z,
-                                         float *var_z);
+        device_raw_bias_update<<<blocks, this->num_cuda_threads>>>(
+            this->d_delta_mu_b, this->d_delta_var_b, this->num_biases,
+            this->d_mu_b, this->d_var_b);
+    }
 
-__global__ void conv2d_bwd_delta_z_cuda(
-    float const *mu_w, float const *jcb, float const *delta_mu_out,
-    const float *delta_var_out, int const *zw_idx, int const *zud_idx, int woho,
-    int fo, int wihi, int fi, int ki, int nr, int n, int B, int pad_idx,
-    float *delta_mu, float *delta_var);
+    // this->params_to_host();
+    // this->delta_params_to_host();
+}
 
-__global__ void permmute_jacobian_cuda(float const *jcb_0, int wihi, int fi,
-                                       int batch_size, float *jcb);
+void BaseLayerCuda::update_weights()
+/*
+ */
+{
+    // TODO: replace with capped update version
+    unsigned int blocks = (this->num_weights + this->num_cuda_threads - 1) /
+                          this->num_cuda_threads;
 
-__global__ void conv2d_bwd_delta_w_cuda(float const *var_w, float const *mu_a,
-                                        float const *delta_mu_out,
-                                        float const *delta_var_out,
-                                        int const *aidx, int B, int k, int woho,
-                                        int wihi, int fi, int ki, int pad_idx,
-                                        float *delta_mu_w, float *delta_var_w);
+    device_weight_update<<<blocks, this->num_cuda_threads>>>(
+        this->d_delta_mu_w, this->d_delta_var_w, this->cap_factor_update,
+        this->num_weights, this->d_mu_w, this->d_var_w);
+}
 
-__global__ void conv2d_bwd_delta_b_cuda(float const *var_b,
-                                        float const *delta_mu_out,
-                                        const float *delta_var_out, int n,
-                                        int k, float *delta_mu_b,
-                                        float *delta_var_b);
+void BaseLayerCuda::update_biases()
+/*
+ */
+{
+    if (this->bias) {
+        // TODO: replace with capped update version
+        unsigned int blocks = (this->num_biases + this->num_cuda_threads - 1) /
+                              this->num_cuda_threads;
 
-__global__ void permute_delta_cuda(float const *delta_mu_0,
-                                   float const *delta_var_0, int woho, int kp,
-                                   int batch_size, float *delta_mu,
-                                   float *delta_var);
+        device_bias_update<<<blocks, this->num_cuda_threads>>>(
+            this->d_delta_mu_b, this->d_delta_var_b, this->cap_factor_update,
+            this->num_biases, this->d_mu_b, this->d_var_b);
+    }
+}
+
+void BaseLayerCuda::set_cuda_threads(int num)
+/**/
+{
+    this->num_cuda_threads = num;
+}
+
+void BaseLayerCuda::allocate_param_memory()
+/*
+ */
+{
+    cudaMalloc(&this->d_mu_w, this->num_weights * sizeof(float));
+    cudaMalloc(&this->d_var_w, this->num_weights * sizeof(float));
+    cudaMalloc(&this->d_mu_b, this->num_biases * sizeof(float));
+    cudaMalloc(&this->d_var_b, this->num_biases * sizeof(float));
+
+    CHECK_LAST_CUDA_ERROR();
+}
+
+void BaseLayerCuda::params_to_device()
+/*
+ */
+{
+    cudaMemcpy(this->d_mu_w, this->mu_w.data(),
+               this->num_weights * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(this->d_var_w, this->var_w.data(),
+               this->num_weights * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(this->d_mu_b, this->mu_b.data(),
+               this->num_biases * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(this->d_var_b, this->var_b.data(),
+               this->num_biases * sizeof(float), cudaMemcpyHostToDevice);
+
+    CHECK_LAST_CUDA_ERROR();
+}
+
+void BaseLayerCuda::params_to_host()
+/*
+ */
+{
+    cudaMemcpy(this->mu_w.data(), this->d_mu_w,
+               this->num_weights * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(this->var_w.data(), this->d_var_w,
+               this->num_weights * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(this->mu_b.data(), this->d_mu_b,
+               this->num_biases * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(this->var_b.data(), this->d_var_b,
+               this->num_biases * sizeof(float), cudaMemcpyDeviceToHost);
+
+    CHECK_LAST_CUDA_ERROR();
+}
+
+void BaseLayerCuda::delta_params_to_host()
+/*
+ */
+{
+    cudaMemcpy(this->delta_mu_w.data(), this->d_delta_mu_w,
+               this->num_weights * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(this->delta_var_w.data(), this->d_delta_var_w,
+               this->num_weights * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(this->delta_mu_b.data(), this->d_delta_mu_b,
+               this->num_biases * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(this->delta_var_b.data(), this->d_delta_var_b,
+               this->num_biases * sizeof(float), cudaMemcpyDeviceToHost);
+
+    CHECK_LAST_CUDA_ERROR();
+}
+
+void BaseLayerCuda::save(std::ofstream &file)
+/*
+ */
+{
+    if (!file.is_open()) {
+        throw std::runtime_error("Error in file: " + std::string(__FILE__) +
+                                 " at line: " + std::to_string(__LINE__) +
+                                 ". Failed to open file for saving");
+    }
+    // Transfer data to host
+    this->params_to_host();
+
+    // Save the name length and name
+    auto layer_name = this->get_layer_info();
+    size_t name_length = layer_name.length();
+    file.write(reinterpret_cast<char *>(&name_length), sizeof(name_length));
+    file.write(layer_name.c_str(), name_length);
+
+    for (const auto &m_w : this->mu_w) {
+        file.write(reinterpret_cast<const char *>(&m_w), sizeof(m_w));
+    }
+    for (const auto &v_w : this->var_w) {
+        file.write(reinterpret_cast<const char *>(&v_w), sizeof(v_w));
+    }
+    for (const auto &m_b : this->mu_b) {
+        file.write(reinterpret_cast<const char *>(&m_b), sizeof(m_b));
+    }
+    for (const auto &v_b : this->var_b) {
+        file.write(reinterpret_cast<const char *>(&v_b), sizeof(v_b));
+    }
+}
+
+void BaseLayerCuda::load(std::ifstream &file)
+/*
+ */
+{
+    if (!file.is_open()) {
+        throw std::runtime_error("Error in file: " + std::string(__FILE__) +
+                                 " at line: " + std::to_string(__LINE__) +
+                                 ". Failed to open file for loading");
+    }
+    // Load the name length and name
+    auto layer_name = this->get_layer_info();
+    std::string loaded_name;
+    size_t name_length;
+    file.read(reinterpret_cast<char *>(&name_length), sizeof(name_length));
+    loaded_name.resize(name_length);
+    file.read(&loaded_name[0], name_length);
+
+    // Check layer name
+    if (layer_name != loaded_name) {
+        throw std::runtime_error("Error in file: " + std::string(__FILE__) +
+                                 " at line: " + std::to_string(__LINE__) +
+                                 ". Layer name are not match. Expected: " +
+                                 layer_name + ", Found: " + loaded_name);
+    }
+
+    for (auto &m_w : this->mu_w) {
+        file.read(reinterpret_cast<char *>(&m_w), sizeof(m_w));
+    }
+    for (auto &v_w : this->var_w) {
+        file.read(reinterpret_cast<char *>(&v_w), sizeof(v_w));
+    }
+    for (auto &m_b : this->mu_b) {
+        file.read(reinterpret_cast<char *>(&m_b), sizeof(m_b));
+    }
+    for (auto &v_b : this->var_b) {
+        file.read(reinterpret_cast<char *>(&v_b), sizeof(v_b));
+    }
+
+    this->num_weights = this->mu_w.size();
+    this->num_biases = this->mu_b.size();
+    if (this->training) {
+        this->allocate_param_delta();
+    }
+
+    // Transfer data to device
+    this->params_to_device();
+}
+
+std::unique_ptr<BaseLayer> BaseLayerCuda::to_host() {
+    throw std::runtime_error("Error in file: " + std::string(__FILE__) +
+                             " at line: " + std::to_string(__LINE__) +
+                             ". ErrorNotImplemented");
+}
+
+void BaseLayerCuda::store_states_for_training_cuda(
+    HiddenStateCuda &input_states, HiddenStateCuda &output_states)
+/*
+ */
+{
+    BackwardStateCuda *cu_bwd_states =
+        dynamic_cast<BackwardStateCuda *>(this->bwd_states.get());
+    int batch_size = input_states.block_size;
+    int threads = this->num_cuda_threads;
+    int act_size = input_states.actual_size * batch_size;
+    if (cu_bwd_states->size != act_size) {
+        cu_bwd_states->size = act_size;
+        cu_bwd_states->allocate_memory();
+    }
+
+    unsigned int blocks = (act_size + threads - 1) / threads;
+
+    fill_bwd_states_on_device<<<blocks, threads>>>(
+        input_states.d_mu_a, input_states.d_jcb, act_size,
+        cu_bwd_states->d_mu_a, cu_bwd_states->d_jcb);
+
+    int out_size = this->output_size * batch_size;
+    unsigned int out_blocks = (out_size + threads - 1) / threads;
+
+    fill_output_states_on_device<<<out_blocks, threads>>>(out_size,
+                                                          output_states.d_jcb);
+}

@@ -527,7 +527,7 @@ class GlobalTimeSeriesDataloader:
 
         # TODO: Add scaling method for time series index as a feature
         # standardize covariates
-        if self.scale_covariates is False:
+        if self.scale_covariates is True:
             if self.covariate_means is None and self.covariate_stds is None:
                 for col in range(1, self.num_features):
                     column_to_scale = x[:, col]
