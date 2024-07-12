@@ -12,7 +12,6 @@ pytagi.egg-info
 dist
 data/cifar
 data/mnist/MNIST
-data/traffic
 *ncu-rep
 *sys-rep
 *sqlite
@@ -26,4 +25,4 @@ data/traffic
 !test/fnn/data/*.csv
 !test/fnn_full_cov/data/*.csv
 !test/fnn_heteros/data/*.csv
-!test/lstm/data/*.csv
+!test/lstm/data/*.csv!/david/

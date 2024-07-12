@@ -7,7 +7,6 @@ from tqdm import tqdm
 import pytagi.metric as metric
 from pytagi import exponential_scheduler
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
-from pytagi.tagi_utils import ForecastToolbox
 from pytagi import Normalizer as normalizer
 
 from examples.data_loader import GlobalTimeSeriesDataloader
@@ -310,9 +309,12 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
         net = net_optim
 
+        # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
-            x = ForecastToolbox.rolling_window_forecast(x, mu_preds, RW_idx_, rolling_window, num_features)
+            RW_idx = RW_idx_ % rolling_window
+            if RW_idx > 0:
+                x[-RW_idx * num_features::num_features] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)

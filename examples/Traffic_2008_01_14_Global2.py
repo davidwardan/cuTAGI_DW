@@ -19,7 +19,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -37,6 +37,9 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
+    covar_means = [0.0] * nb_ts
+    covar_stds = [1.0] * nb_ts
+
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/traffic/traffic_2008_01_14_train.csv",
@@ -47,8 +50,13 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             num_features=num_features,
             stride=seq_stride,
             time_covariates=['hour_of_day', 'day_of_week'],
+            # scale_covariates=True,
             ts_idx=ts,
         )
+
+        # store covariate means and stds
+        # covar_means[ts] = train_dtl_.covariate_means
+        # covar_stds[ts] = train_dtl_.covariate_stds
 
         val_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/traffic/traffic_2008_01_14_val.csv",
@@ -59,7 +67,11 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             num_features=num_features,
             stride=seq_stride,
             time_covariates=['hour_of_day', 'day_of_week'],
+            # scale_covariates=True,
+            # covariate_means=covar_means[ts],
+            # covariate_stds=covar_stds[ts],
             ts_idx=ts,
+
         )
 
         if ts == 0:
@@ -76,7 +88,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
-    # net.to_device("cuda")
+    net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
@@ -97,7 +109,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     mse_optim = 1E100
     epoch_optim = 1
     early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
-    patience = 3
+    patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
@@ -106,7 +118,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.05, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.03, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -223,6 +235,9 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             num_features=num_features,
             stride=seq_stride,
             time_covariates=['hour_of_day', 'day_of_week'],
+            # scale_covariates=True,
+            # covariate_means=covar_means[ts],
+            # covariate_stds=covar_stds[ts],
             ts_idx=ts,
         )
 
@@ -236,9 +251,12 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 0.5, lstm_
 
         net = net_optim
 
+        # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
-            x = ForecastToolbox.rolling_window_forecast(x, mu_preds, RW_idx_, rolling_window, num_features)
+            RW_idx = RW_idx_ % rolling_window
+            if RW_idx > 0:
+                x[-RW_idx * num_features::num_features] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)
