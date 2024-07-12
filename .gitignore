@@ -13,7 +13,6 @@ dist
 data/cifar
 data/mnist/MNIST
 data/traffic
-data/electricity
 *ncu-rep
 *sys-rep
 *sqlite
@@ -28,5 +27,3 @@ data/electricity
 !test/fnn_full_cov/data/*.csv
 !test/fnn_heteros/data/*.csv
 !test/lstm/data/*.csv
-/david/
-

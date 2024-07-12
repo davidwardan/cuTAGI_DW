@@ -1,328 +1,337 @@
-///////////////////////////////////////////////////////////////////////////////
-// File:         pooling_layer_cuda.cu
-// Description:  ...
-// Authors:      Luong-Ha Nguyen & James-A. Goulet
-// Created:      January 08, 2024
-// Updated:      July 12, 2024
-// Contact:      luongha.nguyen@gmail.com & james.goulet@polymtl.ca
-// License:      This code is released under the MIT License.
-////////////////////////////////////////////////////////////////////////////////
+import fire
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from tqdm import tqdm
 
-#include <cuda.h>
-#include <cuda_runtime.h>
+from pytagi import HRCSoftmaxMetric, Utils, exponential_scheduler
+from pytagi.nn import (
+    AvgPool2d,
+    BatchNorm2d,
+    Conv2d,
+    Linear,
+    OutputUpdater,
+    ReLU,
+    Sequential,
+)
 
-#include "../include/conv2d_layer.h"
-#include "../include/cuda_error_checking.cuh"
-#include "../include/pooling_layer.h"
-#include "../include/pooling_layer_cuda.cuh"
+TAGI_FNN = Sequential(
+    Linear(784, 4096),
+    ReLU(),
+    Linear(4096, 4096),
+    ReLU(),
+    Linear(4096, 11),
+)
 
-AvgPool2dCuda::AvgPool2dCuda(size_t kernel_size, int stride, int padding,
-                             int padding_type)
-    : kernel_size(kernel_size),
-      stride(stride),
-      padding(padding),
-      padding_type(padding_type) {}
+TAGI_CNN = Sequential(
+    Conv2d(1, 16, 4, padding=1, in_width=28, in_height=28),
+    ReLU(),
+    AvgPool2d(3, 2),
+    Conv2d(16, 32, 5),
+    ReLU(),
+    AvgPool2d(3, 2),
+    Linear(32 * 4 * 4, 256),
+    ReLU(),
+    Linear(256, 11),
+)
 
-AvgPool2dCuda::~AvgPool2dCuda() {
-    cudaFree(d_pool_idx);
-    cudaFree(d_z_ud_idx);
-}
+TAGI_CNN_BATCHNORM = Sequential(
+    Conv2d(1, 16, 4, padding=1, in_width=28, in_height=28, bias=False),
+    ReLU(),
+    BatchNorm2d(16),
+    AvgPool2d(3, 2),
+    Conv2d(16, 32, 5, bias=False),
+    ReLU(),
+    BatchNorm2d(32),
+    AvgPool2d(3, 2),
+    Linear(32 * 4 * 4, 256),
+    ReLU(),
+    Linear(256, 11),
+)
 
-std::string AvgPool2dCuda::get_layer_info() const {
-    return "AvgPool2d(" + std::to_string(this->in_channels) + "," +
-           std::to_string(this->out_channels) + "," +
-           std::to_string(this->out_width) + "," +
-           std::to_string(this->out_height) + "," +
-           std::to_string(this->kernel_size) + ")";
-}
 
-std::string AvgPool2dCuda::get_layer_name() const { return "AvgPool2dCuda"; }
+DATA_FOLDER = "./data/mnist"
 
-LayerType AvgPool2dCuda::get_layer_type() const { return LayerType::Pool2d; }
 
-void AvgPool2dCuda::compute_input_output_size(const InitArgs &args)
-/*
- */
-{
-    this->in_width = args.width;
-    this->in_height = args.height;
-    this->in_channels = args.depth;
-    this->out_channels = args.depth;
+# TORCH
+def initialize_weights(module):
+    if isinstance(module, nn.Conv2d):
+        nn.init.kaiming_uniform_(module.weight, nonlinearity="relu")
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
+    elif isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)
 
-    std::tie(this->out_width, this->out_height) =
-        compute_downsample_img_size_v2(this->kernel_size, this->stride,
-                                       this->in_width, this->in_height,
-                                       this->padding, this->padding_type);
 
-    this->input_size = this->in_width * this->in_width * this->in_channels;
-    this->output_size = this->out_width * this->out_height * this->out_channels;
-}
+class TorchFNN(nn.Module):
+    def __init__(self):
+        super(TorchFNN, self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(28 * 28, 4096),
+            nn.ReLU(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(),
+            nn.Linear(4096, 10),
+        )
+        self.model.apply(initialize_weights)
 
-void AvgPool2dCuda::forward(BaseHiddenStates &input_states,
-                            BaseHiddenStates &output_states,
-                            BaseTempStates &temp_states)
-/*
- */
-{
-    // New poitner will point to the same memory location when casting
-    HiddenStateCuda *cu_input_states =
-        dynamic_cast<HiddenStateCuda *>(&input_states);
-    HiddenStateCuda *cu_output_states =
-        dynamic_cast<HiddenStateCuda *>(&output_states);
+    def forward(self, x):
+        x = x.view(-1, 28 * 28)
+        x = self.model(x)
+        return x
 
-    int batch_size = input_states.block_size;
-    unsigned int threads = this->num_cuda_threads;
 
-    if (this->pool_idx.size() == 0) {
-        this->lazy_index_init();
-    }
+class TorchCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=4, padding=1),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(16, 32, kernel_size=5),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=3, stride=2),
+            nn.Flatten(),
+            nn.Linear(32 * 4 * 4, 256),
+            nn.ReLU(),
+            nn.Linear(256, 10),
+        )
+        self.model.apply(initialize_weights)
 
-    // Assign output dimensions
-    cu_output_states->width = this->out_width;
-    cu_output_states->height = this->out_height;
-    cu_output_states->depth = this->out_channels;
-    cu_output_states->block_size = batch_size;
-    cu_output_states->actual_size = this->output_size;
+    def forward(self, x):
+        return self.model(x)
 
-    // Launch kernels
-    int woho = this->out_width * this->out_height;
-    int wihi = this->in_width * this->in_height;
-    int num_states = woho * this->out_channels * batch_size;
-    int pad_idx_in = wihi * this->in_channels * batch_size + 1;
 
-    unsigned int grid_size = (num_states + threads - 1) / threads;
+class TorchCNNBatchNorm(nn.Module):
+    def __init__(self):
+        super(TorchCNNBatchNorm, self).__init__()
+        self.model = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=4, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=3, stride=2),
+            nn.Conv2d(16, 32, kernel_size=5),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=3, stride=2),
+            nn.Flatten(),
+            nn.Linear(32 * 4 * 4, 256),
+            nn.ReLU(),
+            nn.Linear(256, 10),
+        )
 
-    if (this->overlap) {
-        avgpool2d_fwd_overlapped_mean_var_cuda<<<grid_size, threads>>>(
-            cu_input_states->d_mu_a, cu_input_states->d_var_a, this->d_pool_idx,
-            woho, wihi, this->kernel_size, num_states, pad_idx_in,
-            cu_output_states->d_mu_a, cu_output_states->d_var_a);
-    } else {
-        avgpool2d_fwd_mean_var_cuda<<<grid_size, threads>>>(
-            cu_input_states->d_mu_a, cu_input_states->d_var_a, this->d_pool_idx,
-            woho, wihi, this->kernel_size, num_states, cu_output_states->d_mu_a,
-            cu_output_states->d_var_a);
-    }
+    def forward(self, x):
+        return self.model(x)
 
-    // Update backward state for inferring parameters
-    if (this->training) {
-        this->store_states_for_training_cuda(*cu_input_states,
-                                             *cu_output_states);
-    }
-}
 
-void AvgPool2dCuda::backward(BaseDeltaStates &input_delta_states,
-                             BaseDeltaStates &output_delta_states,
-                             BaseTempStates &temp_states, bool state_udapte)
-/**/
-{
-    // New poitner will point to the same memory location when casting
-    BackwardStateCuda *cu_next_bwd_states =
-        dynamic_cast<BackwardStateCuda *>(this->bwd_states.get());
-    DeltaStateCuda *cu_input_delta_states =
-        dynamic_cast<DeltaStateCuda *>(&input_delta_states);
-    DeltaStateCuda *cu_output_delta_states =
-        dynamic_cast<DeltaStateCuda *>(&output_delta_states);
+def custom_collate_fn(batch):
+    # batch is a list of tuples (image, label)
+    batch_images, batch_labels = zip(*batch)
 
-    // Initialization
-    int batch_size = input_delta_states.block_size;
-    unsigned int num_threads = this->num_cuda_threads;
+    # Convert to a single tensor and then to numpy
+    batch_images = torch.stack(batch_images)
+    batch_labels = torch.tensor(batch_labels)
 
-    // Launch kernel
-    if (state_udapte) {
-        int woho = this->out_width * this->out_height;
-        int wihi = this->in_width * this->in_height;
-        int pad_out_idx = woho * this->out_channels * batch_size + 1;
-        if (overlap) {
-            int num_in_states = this->in_width * this->in_height *
-                                this->in_channels * batch_size;
-            unsigned int grid_size =
-                (num_in_states + num_threads - 1) / num_threads;
+    # Flatten images and labels to 1D
+    batch_images = batch_images.numpy().reshape(len(batch_images), -1).flatten()
+    batch_labels = batch_labels.numpy().flatten()
 
-            avgpool2d_bwd_overlapped_delta_z_cuda<<<grid_size, num_threads>>>(
-                cu_next_bwd_states->d_jcb, cu_input_delta_states->d_delta_mu,
-                cu_input_delta_states->d_delta_var, this->d_z_ud_idx, woho,
-                wihi, this->kernel_size, this->col_z_ud, num_in_states,
-                pad_out_idx, cu_output_delta_states->d_delta_mu,
-                cu_output_delta_states->d_delta_var);
+    return batch_images, batch_labels
 
-        } else {
-            int kiwo = this->kernel_size * this->out_width;
-            int nums = wihi * this->in_channels * batch_size / kiwo;
-            unsigned int grid_row = (kiwo + num_threads - 1) / num_threads;
-            unsigned int grid_col = (nums + num_threads - 1) / num_threads;
-            dim3 dim_grid(grid_col, grid_row);
-            dim3 dim_block(num_threads, num_threads);
 
-            avgpool2d_bwd_delta_z_cuda<<<dim_grid, dim_block>>>(
-                cu_next_bwd_states->d_jcb, cu_input_delta_states->d_delta_mu,
-                cu_input_delta_states->d_delta_var, this->out_width,
-                this->kernel_size, nums, cu_output_delta_states->d_delta_mu,
-                cu_output_delta_states->d_delta_var);
-        }
-    }
-}
+def tagi_trainer(
+    batch_size: int, num_epochs: int, device: str = "cpu", sigma_v: float = 2.0
+):
+    # Data loading and preprocessing
+    transform = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+    )
 
-void AvgPool2dCuda::lazy_index_init()
-/*
- */
-{
-    if (this->kernel_size == this->stride ||
-        this->kernel_size == this->in_width) {
-        this->overlap = false;
-    }
+    train_dataset = datasets.MNIST(
+        root=DATA_FOLDER, train=True, transform=transform, download=True
+    )
+    test_dataset = datasets.MNIST(
+        root=DATA_FOLDER, train=False, transform=transform, download=True
+    )
 
-    int pad_idx_in = -1;
-    int pad_idx_out = -1;
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=1,
+        collate_fn=custom_collate_fn,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=1,
+        collate_fn=custom_collate_fn,
+    )
 
-    auto idx = get_pool_index(this->kernel_size, this->stride, this->in_width,
-                              this->in_height, this->out_width,
-                              this->out_height, this->padding,
-                              this->padding_type, pad_idx_in, pad_idx_out);
+    utils = Utils()
 
-    this->pool_idx = idx.pool_idx;
-    this->z_ud_idx = idx.z_ud_idx;
-    this->row_zw = idx.w;
-    this->col_z_ud = idx.h;
+    # Hierachical Softmax
+    metric = HRCSoftmaxMetric(num_classes=10)
+    net = TAGI_FNN
+    net.to_device(device)
+    # net.set_threads(16)
+    out_updater = OutputUpdater(net.device)
 
-    // Allocate memory for indices and send them to cuda device
-    this->allocate_avgpool2d_index();
-    this->avgpool2d_index_to_device();
-}
+    # Training
+    error_rates = []
+    pbar = tqdm(range(num_epochs), desc="Training Progress")
 
-void AvgPool2dCuda::allocate_avgpool2d_index()
-/*
- */
-{
-    cudaMalloc(&this->d_pool_idx, this->pool_idx.size() * sizeof(int));
-    cudaMalloc(&this->d_z_ud_idx, this->z_ud_idx.size() * sizeof(int));
-    CHECK_LAST_CUDA_ERROR();
-}
+    for epoch in pbar:
+        # count = 0
 
-void AvgPool2dCuda::avgpool2d_index_to_device()
-/*
- */
-{
-    cudaMemcpy(this->d_pool_idx, this->pool_idx.data(),
-               this->pool_idx.size() * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(this->d_z_ud_idx, this->z_ud_idx.data(),
-               this->z_ud_idx.size() * sizeof(int), cudaMemcpyHostToDevice);
+        # Decaying observation's variance
+        sigma_v = exponential_scheduler(
+            curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
+        )
+        var_y = np.full(
+            (batch_size * metric.hrc_softmax.num_obs,), sigma_v**2, dtype=np.float32
+        )
+        for x, labels in train_loader:
+            # Feedforward and backward pass
+            m_pred, v_pred = net(x)
 
-    cudaError_t error = cudaGetLastError();
-    CHECK_LAST_CUDA_ERROR();
-}
+            # Update output layers based on targets
+            y, y_idx, _ = utils.label_to_obs(labels=labels, num_classes=10)
+            out_updater.update_using_indices(
+                output_states=net.output_z_buffer,
+                mu_obs=y,
+                var_obs=var_y,
+                selected_idx=y_idx,
+                delta_states=net.input_delta_z_buffer,
+            )
 
-void AvgPool2dCuda::preinit_layer() {
-    if (this->pool_idx.size() == 0) {
-        this->lazy_index_init();
-    }
-}
+            # Update parameters
+            net.backward()
+            net.step()
 
-////////////////////////////////////////////////////////////////////////////////
-// CUDA Kernels
-////////////////////////////////////////////////////////////////////////////////
-__global__ void avgpool2d_fwd_overlapped_mean_var_cuda(
-    float const *mu_a, float const *var_a, int const *a_idx, int woho, int wihi,
-    int ki, int k, int pad_idx, float *mu_z, float *var_z)
-/*Compute product mean & variance WA for average pooling for the case where
-there is the overlap when sliding kernel size.
-*/
-{
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    float sum_mu_z = 0;
-    float sum_var_z = 0;
-    int a_idx_tmp = 0;
-    int ki2 = ki * ki;
-    if (col < k) {
-        for (int i = 0; i < ki2; i++) {
-            a_idx_tmp = a_idx[col % woho + woho * i];
-            if (a_idx_tmp > -1) {
-                a_idx_tmp += (col / woho) * wihi;
-                // index in a_idx starts at 1
-                sum_mu_z += mu_a[a_idx_tmp - 1];
-                sum_var_z += var_a[a_idx_tmp - 1];
-            }
-        }
-        mu_z[col] = sum_mu_z / ki2;
-        var_z[col] = sum_var_z / (ki2 * ki2);
-    }
-}
+            # Training metric
+            error_rate = metric.error_rate(m_pred, v_pred, labels)
+            error_rates.append(error_rate)
 
-__global__ void avgpool2d_fwd_mean_var_cuda(float const *mu_a,
-                                            float const *var_a,
-                                            int const *a_idx, int woho,
-                                            int wihi, int ki, int k,
-                                            float *mu_z, float *var_z)
-/* Compute product mean & variance WA for average pooling for the case there
-is no overlap when sliding kernel size.
-*/
-{
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    float sum_mu_z = 0;
-    float sum_var_z = 0;
-    int a_idx_tmp = 0;
-    int ki2 = ki * ki;
-    if (col < k) {
-        for (int i = 0; i < ki2; i++) {
-            // index in a_idx starts at 1
-            a_idx_tmp = a_idx[col % woho + woho * i] + (col / woho) * wihi - 1;
-            sum_mu_z += mu_a[a_idx_tmp];
-            sum_var_z += var_a[a_idx_tmp];
-        }
-        mu_z[col] = sum_mu_z / ki2;
-        var_z[col] = sum_var_z / (ki2 * ki2);
-    }
-}
+        # Averaged error
+        avg_error_rate = sum(error_rates[-100:])
 
-__global__ void avgpool2d_bwd_overlapped_delta_z_cuda(
-    float const *jcb, float const *delta_mu_out, float const *delta_var_out,
-    int const *z_ud_idx, int woho, int wihi, int ki, int n, int k, int pad_idx,
-    float *delta_mu, float *delta_var)
-/* Compute updated quantities for the mean and variance of hidden states for
- average pooling layer. Note that this case the kernel size overlap each other
- when scaning images.
- */
-{
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    float sum_delta_mu = 0;
-    float sum_delta_var = 0;
-    int z_idx_tmp = 0;
-    int ki2 = ki * ki;
-    if (col < k) {
-        for (int i = 0; i < n; i++) {
-            z_idx_tmp = z_ud_idx[col % wihi + wihi * i];
-            if (z_idx_tmp > -1) {
-                z_idx_tmp += (col / wihi) * woho;
-                sum_delta_mu += delta_mu_out[z_idx_tmp - 1];
-                sum_delta_var += delta_var_out[z_idx_tmp - 1];
-            }
-        }
-        delta_mu[col] = sum_delta_mu * jcb[col] / ki2;
-        delta_var[col] = sum_delta_var * jcb[col] * jcb[col] / (ki2 * ki2);
-    }
-}
+        # Testing
+        test_error_rates = []
+        for x, labels in test_loader:
 
-__global__ void avgpool2d_bwd_delta_z_cuda(float const *jcb,
-                                           float const *delta_mu_out,
-                                           float const *delta_var_out, int wo,
-                                           int ki, int k, float *delta_mu,
-                                           float *delta_var)
-/* Compute updated quantities for the mean and variance of hidden states for
- average pooling layer.
+            m_pred, v_pred = net(x)
 
- */
-{
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    int ki2 = ki * ki;
-    int m = ki * wo;
-    if (col < k && row < m)  // k = wihi * fi * B / (k*wo); m = k*wo
-    {
-        delta_mu[row + col * m] =
-            delta_mu_out[row / ki + (col / ki) * wo] * jcb[row + col * m] / ki2;
+            # Training metric
+            error_rate = metric.error_rate(m_pred, v_pred, labels)
+            test_error_rates.append(error_rate)
 
-        delta_var[row + col * m] = delta_var_out[row / ki + (col / ki) * wo] *
-                                   jcb[row + col * m] * jcb[row + col * m] /
-                                   (ki2 * ki2);
-    }
-}
+        test_error_rate = sum(test_error_rates) / len(test_error_rates)
+        pbar.set_description(
+            f"Epoch {epoch + 1}/{num_epochs} | training error: {avg_error_rate:.2f}% | test error: {test_error_rate * 100:.2f}%",
+            refresh=True,
+        )
+    print("Training complete.")
+
+
+def torch_trainer(batch_size: int, num_epochs: int, device: str = "cpu"):
+    # Hyperparameters
+    learning_rate = 0.01
+
+    # torch.set_float32_matmul_precision("high")
+
+    # Data loading and preprocessing
+    transform = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
+    )
+
+    train_dataset = datasets.MNIST(
+        root=DATA_FOLDER, train=True, transform=transform, download=True
+    )
+    test_dataset = datasets.MNIST(
+        root=DATA_FOLDER, train=False, transform=transform, download=True
+    )
+
+    train_loader = DataLoader(
+        dataset=train_dataset, batch_size=batch_size, shuffle=True
+    )
+    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
+
+    # Initialize the model, loss function, and optimizer
+    torch_device = torch.device(device)
+    if "cuda" in device and not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is not available. Please check your CUDA installation."
+        )
+    model = TorchFNN().to(torch_device)
+    # model = torch.compile(model, mode="reduce-overhead")
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(), lr=learning_rate)
+
+    # Training loop
+    pbar = tqdm(range(num_epochs), desc="Training Progress")
+    error_rates = []
+    for epoch in pbar:
+        model.train()
+        for _, (data, target) in enumerate(train_loader):
+            data = data.to(torch_device)
+            target = target.to(torch_device)
+
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, target)
+
+            loss.backward()
+            optimizer.step()
+
+            pred = output.argmax(dim=1, keepdim=True)
+            train_correct = pred.eq(target.view_as(pred)).sum().item()
+            error_rates.append((1.0 - (train_correct / data.shape[0])))
+
+        # Averaged error
+        avg_error_rate = sum(error_rates[-100:])
+
+        # Evaluate the model on the test set
+        model.eval()
+        test_loss = 0
+        correct = 0
+        with torch.no_grad():
+            for data, target in test_loader:
+                data = data.to(torch_device)
+                target = target.to(torch_device)
+                output = model(data)
+
+                test_loss += criterion(output, target).item()
+                pred = output.argmax(dim=1, keepdim=True)
+                correct += pred.eq(target.view_as(pred)).sum().item()
+
+        test_loss /= len(test_loader.dataset)
+        test_error_rate = (1.0 - correct / len(test_loader.dataset)) * 100
+        pbar.set_description(
+            f"Epoch# {epoch/num_epochs}| training error: {avg_error_rate:.2f}% | Test error: {test_error_rate: .2f}%"
+        )
+
+
+def main(
+    framework: str = "tagi",
+    batch_size: int = 256,
+    epochs: int = 20,
+    device: str = "cuda",
+):
+    if framework == "torch":
+        torch_trainer(batch_size=batch_size, num_epochs=epochs, device=device)
+    elif framework == "tagi":
+        tagi_trainer(batch_size=batch_size, num_epochs=epochs, device=device)
+    else:
+        raise RuntimeError(f"Invalid Framework: {framework}")
+
+
+if __name__ == "__main__":
+    fire.Fire(main)
