@@ -621,23 +621,24 @@ class GlobalTimeSeriesDataloader:
         if self.idx_as_feature:
             idx_to_add = np.zeros((x.shape[0], 1))
             idx_to_add[:, 0] = self.ts_idx
-            x = np.concatenate((x, idx_to_add), axis=1)  # TODO: fix time series index is not scaled in this case
+            x = np.concatenate((x, idx_to_add), axis=1)
 
-        # TODO: Add scaling method for time series index as a feature
         # standardize covariates
         if self.scale_covariates is True:
-            if self.covariate_means is None and self.covariate_stds is None:
+            if self.global_scale == 'deepAR':
+                if self.covariate_means is None:
+                    self.covariate_means = 1 + np.nanmean(x, axis=0)
                 for col in range(1, self.num_features):
                     column_to_scale = x[:, col]
-                    mean, std = Normalizer.compute_mean_std(column_to_scale)
-                    x[:, col] = Normalizer.standardize(column_to_scale, mean, std)
-                self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
-                self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
+                    x[:, col] = column_to_scale / self.covariate_means[col]
             else:
+                if self.covariate_means is None and self.covariate_stds is None:
+                    self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
+                    self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
                 for col in range(1, self.num_features):
                     column_to_scale = x[:, col]
                     x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
-                                                       self.covariate_stds[col])
+                                                    self.covariate_stds[col])
 
         # scale the observations using time series dependent scaling factors
         if self.global_scale is not None:

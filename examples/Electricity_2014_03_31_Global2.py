@@ -19,7 +19,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -67,7 +67,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
         # store covariate means and stds
         covar_means[ts] = train_dtl_.covariate_means
-        covar_stds[ts] = train_dtl_.covariate_stds
+        # covar_stds[ts] = train_dtl_.covariate_stds
 
         val_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/electricity/electricity_2014_03_31_val.csv",
@@ -85,7 +85,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
             scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
-            covariate_stds=covar_stds[ts],
+            # covariate_stds=covar_stds[ts],
             # idx_as_feature=True,
         )
 
@@ -102,9 +102,11 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
-    # net.to_device("cuda")
+    net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
@@ -116,7 +118,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
     # -------------------------------------------------------------------------#
     # calculate the weights for each time series
-    weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
+    # weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
 
     # Training
     mses = []
@@ -128,16 +130,16 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
     mse_optim = 1E100
     epoch_optim = 1
     early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
-    patience = 5
+    patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False, weighted_sampling=True, weights=weights)
+        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True) #, weighted_sampling=True, weights=weights)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -295,7 +297,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
             scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
-            covariate_stds=covar_stds[ts],
+            # covariate_stds=covar_stds[ts],
             # idx_as_feature=True,
         )
 
@@ -337,7 +339,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
         #     mu_preds, mean_train[ts], std_train[ts]
         # )
         # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-        #
+
         # y_test = normalizer.unstandardize(
         #     y_test, mean_train[ts], std_train[ts]
         # )
@@ -373,7 +375,7 @@ def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 2, lstm_no
 
     # rename the directory
     out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_ar"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_ar_AFR"
     os.rename(out_dir, out_dir_)
 
 
@@ -382,10 +384,10 @@ def concat_ts_sample(data, data_add):
     x_combined = np.concatenate((data.dataset["value"][0], data_add.dataset["value"][0]), axis=0)
     y_combined = np.concatenate((data.dataset["value"][1], data_add.dataset["value"][1]), axis=0)
     time_combined = np.concatenate((data.dataset["date_time"], data_add.dataset["date_time"]))
-    weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
+    # weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
-    data.dataset["weights"] = weights_combined
+    # data.dataset["weights"] = weights_combined
     return data
 
 

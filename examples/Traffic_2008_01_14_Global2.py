@@ -7,7 +7,6 @@ from tqdm import tqdm
 import pytagi.metric as metric
 from pytagi import exponential_scheduler
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
-from pytagi.tagi_utils import ForecastToolbox
 
 from examples.data_loader import GlobalTimeSeriesDataloader
 
@@ -19,7 +18,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -33,7 +32,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_
     input_seq_len = 24
     output_seq_len = 1
     seq_stride = 1
-    rolling_window = 24  # for rolling window predictions in the test set
+    rolling_window = 24 # for rolling window predictions in the test set
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
@@ -50,13 +49,14 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_
             num_features=num_features,
             stride=seq_stride,
             time_covariates=['hour_of_day', 'day_of_week'],
-            # scale_covariates=True,
+            scale_covariates=True,
             ts_idx=ts,
+            # idx_as_feature=True,
         )
 
         # store covariate means and stds
-        # covar_means[ts] = train_dtl_.covariate_means
-        # covar_stds[ts] = train_dtl_.covariate_stds
+        covar_means[ts] = train_dtl_.covariate_means
+        covar_stds[ts] = train_dtl_.covariate_stds
 
         val_dtl_ = GlobalTimeSeriesDataloader(
             x_file="data/traffic/traffic_2008_01_14_val.csv",
@@ -67,11 +67,11 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_
             num_features=num_features,
             stride=seq_stride,
             time_covariates=['hour_of_day', 'day_of_week'],
-            # scale_covariates=True,
-            # covariate_means=covar_means[ts],
-            # covariate_stds=covar_stds[ts],
+            scale_covariates=True,
+            covariate_means=covar_means[ts],
+            covariate_stds=covar_stds[ts],
             ts_idx=ts,
-
+            # idx_as_feature=True,
         )
 
         if ts == 0:
@@ -118,7 +118,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.03, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -195,28 +195,28 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_
         if epoch - epoch_optim > patience:
             break
     # -------------------------------------------------------------------------#
-        fig, ax1 = plt.subplots()
+        # fig, ax1 = plt.subplots()
 
-        # Set title for the plot
-        ax1.set_title('Validation Metrics', fontsize=16)
+        # # Set title for the plot
+        # ax1.set_title('Validation Metrics', fontsize=16)
 
-        # Plot MSE on primary y-axis
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('MSE', color='steelblue')
-        ax1.plot(mses_val, color='steelblue', label='MSE')
-        ax1.tick_params(axis='y', labelcolor='steelblue')
+        # # Plot MSE on primary y-axis
+        # ax1.set_xlabel('Epoch')
+        # ax1.set_ylabel('MSE', color='steelblue')
+        # ax1.plot(mses_val, color='steelblue', label='MSE')
+        # ax1.tick_params(axis='y', labelcolor='steelblue')
 
-        # Plot Log Likelihood on secondary y-axis
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Log Likelihood', color='indianred')
-        ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-        ax2.tick_params(axis='y', labelcolor='indianred')
+        # # Plot Log Likelihood on secondary y-axis
+        # ax2 = ax1.twinx()
+        # ax2.set_ylabel('Log Likelihood', color='indianred')
+        # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
+        # ax2.tick_params(axis='y', labelcolor='indianred')
 
-        # Adjust layout to make room for the title and legends
-        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        # # Adjust layout to make room for the title and legends
+        # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-        # Save the figure
-        fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+        # # Save the figure
+        # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
     # -------------------------------------------------------------------------#
     # Testing
     pbar = tqdm(ts_idx, desc="Testing Progress")
@@ -235,10 +235,11 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_
             num_features=num_features,
             stride=seq_stride,
             time_covariates=['hour_of_day', 'day_of_week'],
-            # scale_covariates=True,
-            # covariate_means=covar_means[ts],
-            # covariate_stds=covar_stds[ts],
+            scale_covariates=True,
+            covariate_means=covar_means[ts],
+            covariate_stds=covar_stds[ts],
             ts_idx=ts,
+            # idx_as_feature=True,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -303,7 +304,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = 0.5, lstm_
 
     # rename the directory
     out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_AFR"
     os.rename(out_dir, out_dir_)
 
 

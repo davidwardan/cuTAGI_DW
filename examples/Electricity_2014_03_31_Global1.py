@@ -21,7 +21,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
@@ -43,9 +43,11 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
-    # net.to_device("cuda")
+    net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
@@ -66,7 +68,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
     mse_optim = 1E100
     epoch_optim = 1
     early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
-    patience = 5
+    patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
     global_log_lik = []
@@ -83,7 +85,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 
@@ -198,15 +200,15 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
             x_val = np.array(x_val)
 
             # Unscale the predictions
-            # mu_preds = mu_preds * factors[ts]
-            # std_preds = std_preds * factors[ts]**0.5
-            # y_val = y_val * factors[ts]
+            mu_preds = mu_preds * factors[ts]
+            std_preds = std_preds * factors[ts]
+            y_val = y_val * factors[ts]
 
             # mu_preds = normalizer.unstandardize(
             #     mu_preds, mean_train[ts], std_train[ts]
             # )
             # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-            #
+
             # y_val = normalizer.unstandardize(
             #     y_val, mean_train[ts], std_train[ts]
             # )
@@ -349,7 +351,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
         #     mu_preds, mean_train[ts], std_train[ts]
         # )
         # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-        #
+
         # y_test = normalizer.unstandardize(
         #     y_test, mean_train[ts], std_train[ts]
         # )
@@ -385,7 +387,7 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2, lstm_no
 
     # rename the directory
     out_dir_ = ("david/output/electricity_" + str(epoch_optim) + "_"
-                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_ar")
+                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_ar_AFR")
     os.rename(out_dir, out_dir_)
 
 

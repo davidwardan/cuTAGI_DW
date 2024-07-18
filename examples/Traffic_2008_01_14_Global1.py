@@ -20,7 +20,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 100, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
@@ -41,11 +41,11 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
         LSTM(num_features, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        # LSTM(40, 40, input_seq_len),
+        # LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
-    # net.to_device("cuda")
-    net.set_threads(8)
+    net.to_device("cuda")
+    # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
@@ -64,13 +64,16 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
     log_lik_optim = -1E100
     mse_optim = 1E100
     epoch_optim = 1
-    early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
-    patience = 3
+    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
+    patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
     global_log_lik = []
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
+
+    covar_means = [0] * nb_ts
+    covar_stds = [1.0] * nb_ts
 
     for epoch in pbar:
 
@@ -91,7 +94,13 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 stride=seq_stride,
                 ts_idx=ts,
                 time_covariates=['hour_of_day', 'day_of_week'],
+                scale_covariates=True,
             )
+
+            # store covariate means and stds
+            covar_means[ts] = train_dtl.covariate_means
+            covar_stds[ts] = train_dtl.covariate_stds
+
             batch_iter = train_dtl.create_data_loader(batch_size)
 
             mse = []
@@ -131,6 +140,9 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                 stride=seq_stride,
                 ts_idx=ts,
                 time_covariates=['hour_of_day', 'day_of_week'],
+                scale_covariates=True,
+                covariate_means=covar_means[ts],
+                covariate_stds=covar_stds[ts],
             )
 
             val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
@@ -174,28 +186,28 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
                          sigma_v=f"{sigma_v:.4f}")
 
         #-------------------------------------------------------------------------#
-        fig, ax1 = plt.subplots()
+        # fig, ax1 = plt.subplots()
 
-        # Set title for the plot
-        ax1.set_title('Validation Metrics', fontsize=16)
+        # # Set title for the plot
+        # ax1.set_title('Validation Metrics', fontsize=16)
 
-        # Plot MSE on primary y-axis
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('MSE', color='steelblue')
-        ax1.plot(mses_val, color='steelblue', label='MSE')
-        ax1.tick_params(axis='y', labelcolor='steelblue')
+        # # Plot MSE on primary y-axis
+        # ax1.set_xlabel('Epoch')
+        # ax1.set_ylabel('MSE', color='steelblue')
+        # ax1.plot(mses_val, color='steelblue', label='MSE')
+        # ax1.tick_params(axis='y', labelcolor='steelblue')
 
-        # Plot Log Likelihood on secondary y-axis
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Log Likelihood', color='indianred')
-        ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-        ax2.tick_params(axis='y', labelcolor='indianred')
+        # # Plot Log Likelihood on secondary y-axis
+        # ax2 = ax1.twinx()
+        # ax2.set_ylabel('Log Likelihood', color='indianred')
+        # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
+        # ax2.tick_params(axis='y', labelcolor='indianred')
 
-        # Adjust layout to make room for the title and legends
-        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        # # Adjust layout to make room for the title and legends
+        # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-        # Save the figure
-        fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+        # # Save the figure
+        # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
         #-------------------------------------------------------------------------#
 
         # early-stopping
@@ -235,6 +247,9 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
             stride=seq_stride,
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
+            scale_covariates=True,
+            covariate_means=covar_means[ts],
+            covariate_stds=covar_stds[ts],
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -299,7 +314,7 @@ def main(num_epochs: int = 20, batch_size: int = 16, sigma_v: float = 0.5, lstm_
 
     # rename the directory
     out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_AFR"
     os.rename(out_dir, out_dir_)
 
 
