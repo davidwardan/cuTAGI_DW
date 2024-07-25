@@ -19,7 +19,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -56,7 +56,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
             time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             # idx_as_feature=True,
-            scale_covariates=True,
+            # scale_covariates=True,
         )
 
         # Store scaling factors----------------------#
@@ -66,7 +66,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         # -------------------------------------------#
 
         # store covariate means and stds
-        covar_means[ts] = train_dtl_.covariate_means
+        # covar_means[ts] = train_dtl_.covariate_means
         # covar_stds[ts] = train_dtl_.covariate_stds
 
         val_dtl_ = GlobalTimeSeriesDataloader(
@@ -83,8 +83,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
             time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             scale_i=factors[ts],
-            scale_covariates=True,
-            covariate_means=covar_means[ts],
+            # scale_covariates=True,
+            # covariate_means=covar_means[ts],
             # covariate_stds=covar_stds[ts],
             # idx_as_feature=True,
         )
@@ -101,9 +101,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         LSTM(num_features, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+        # LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+        # LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
     net.to_device("cuda")
@@ -112,7 +111,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
 
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
-               + "_" + str(lstm_nodes) + "_method2_ar")
+               + "_" + str(lstm_nodes) + "_method2_gs")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -135,7 +134,9 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True) #, weighted_sampling=True, weights=weights)
+
+        # batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True, weighted_sampling=True, weights=weights, num_samples=550000)
+        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
@@ -224,7 +225,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         ll_val.append(log_lik_val)
 
         # Progress bar
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}")
+        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}", sigma_v=f"{sigma_v:.4f}")
 
         # early-stopping
         if early_stopping_criteria == 'mse':
@@ -295,8 +296,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
             time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             scale_i=factors[ts],
-            scale_covariates=True,
-            covariate_means=covar_means[ts],
+            # scale_covariates=True,
+            # covariate_means=covar_means[ts],
             # covariate_stds=covar_stds[ts],
             # idx_as_feature=True,
         )
@@ -375,7 +376,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
 
     # rename the directory
     out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_ar_AFR"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_gs"
     os.rename(out_dir, out_dir_)
 
 

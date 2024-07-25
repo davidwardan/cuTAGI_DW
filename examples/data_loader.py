@@ -562,10 +562,12 @@ class GlobalTimeSeriesDataloader:
             shuffle: bool = True,
             weighted_sampling: bool = False,
             weights: Optional[np.ndarray] = None,
+            num_samples: Optional[int] = None,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         """
         Generator function to yield batches of data.
         """
+
         num_data = input_data.shape[0]
         indices = np.arange(num_data)
         if shuffle:
@@ -577,7 +579,11 @@ class GlobalTimeSeriesDataloader:
                 raise ValueError("Weights must be provided for weighted sampling.")
             if weights.shape[0] != num_data:
                 raise ValueError("Weights array must be the same length as the number of data points.")
-            indices = np.random.choice(indices, size=num_data, replace=True, p=weights)
+            if num_samples is None:
+                indices = np.random.choice(indices, size=num_data, replace=True, p=weights)
+            else:
+                indices = np.random.choice(indices, size=num_samples, replace=True, p=weights)
+                num_data = num_samples
 
         for start_idx in range(0, num_data, batch_size):
             # if start_idx + batch_size > num_data:
@@ -625,20 +631,20 @@ class GlobalTimeSeriesDataloader:
 
         # standardize covariates
         if self.scale_covariates is True:
-            if self.global_scale == 'deepAR':
-                if self.covariate_means is None:
-                    self.covariate_means = 1 + np.nanmean(x, axis=0)
-                for col in range(1, self.num_features):
-                    column_to_scale = x[:, col]
-                    x[:, col] = column_to_scale / self.covariate_means[col]
-            else:
-                if self.covariate_means is None and self.covariate_stds is None:
-                    self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
-                    self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
-                for col in range(1, self.num_features):
-                    column_to_scale = x[:, col]
-                    x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
-                                                    self.covariate_stds[col])
+            # if self.global_scale == 'deepAR':
+            #     if self.covariate_means is None:
+            #         self.covariate_means = 1 + np.nanmean(x, axis=0)
+            #     for col in range(1, self.num_features):
+            #         column_to_scale = x[:, col]
+            #         x[:, col] = column_to_scale / (1 + self.covariate_means[col])
+            # else:
+            if self.covariate_means is None and self.covariate_stds is None:
+                self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
+                self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
+            for col in range(1, self.num_features):
+                column_to_scale = x[:, col]
+                x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
+                                                self.covariate_stds[col])
 
         # scale the observations using time series dependent scaling factors
         if self.global_scale is not None:
@@ -676,5 +682,5 @@ class GlobalTimeSeriesDataloader:
         return dataset
 
     def create_data_loader(self, batch_size: int, shuffle: bool = True, weighted_sampling: bool = False,
-                           weights: Optional[np.ndarray] = None):
-        return self.batch_generator(*self.dataset["value"], batch_size, shuffle, weighted_sampling, weights)
+                           weights: Optional[np.ndarray] = None, num_samples: Optional[int] = None):
+        return self.batch_generator(*self.dataset["value"], batch_size, shuffle, weighted_sampling, weights, num_samples)

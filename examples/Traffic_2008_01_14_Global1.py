@@ -20,7 +20,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 100, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 150, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
@@ -41,7 +41,6 @@ def main(num_epochs: int = 100, batch_size: int = 16, sigma_v: float = 0.5, lstm
         LSTM(num_features, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        # LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
     net.to_device("cuda")
@@ -314,7 +313,7 @@ def main(num_epochs: int = 100, batch_size: int = 16, sigma_v: float = 0.5, lstm
 
     # rename the directory
     out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_AFR"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1"
     os.rename(out_dir, out_dir_)
 
 

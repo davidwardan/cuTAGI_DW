@@ -42,9 +42,6 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         LSTM(num_features, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
     net.to_device("cuda")
@@ -85,7 +82,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.1, decaying_factor=0.7, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
 

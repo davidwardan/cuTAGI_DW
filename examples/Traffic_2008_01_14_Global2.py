@@ -18,7 +18,7 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 60, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
