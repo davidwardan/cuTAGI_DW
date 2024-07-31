@@ -3,6 +3,7 @@ import sys
 import fire
 import numpy as np
 from tqdm import tqdm
+import shutil
 
 import pytagi.metric as metric
 from pytagi import exponential_scheduler
@@ -18,14 +19,14 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
     """
 
     # Dataset
-    nb_ts = 963  # for electricity 370 and 963 for traffic
+    nb_ts = 963 # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 3
@@ -114,7 +115,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
+        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
@@ -179,21 +180,29 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm
         pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}",
                          sigma_v=f"{sigma_v:.4f}")
 
+        # create a directory to save the model
+        if not os.path.exists("best_model1/"):
+            os.makedirs("best_model1/")
+
         # early-stopping
         if early_stopping_criteria == 'mse':
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv("best_model1/")
+                # net_optim = net
         elif early_stopping_criteria == 'log_lik':
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv("best_model1/")
+                # net_optim = net
         if epoch - epoch_optim > patience:
             break
+
+        print(type(net_optim))
     # -------------------------------------------------------------------------#
         # fig, ax1 = plt.subplots()
 
@@ -218,6 +227,17 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm
         # # Save the figure
         # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
     # -------------------------------------------------------------------------#
+    # save validation metrics into csv
+    df = np.array([mses_val, ll_val]).T
+    np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
+    # -------------------------------------------------------------------------#
+    # load the optimal net
+    net.load_csv("best_model1/")  # load optimal net
+    shutil.rmtree("best_model1/") # remove the directory
+
+    # save the model
+    net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
+
     # Testing
     pbar = tqdm(ts_idx, desc="Testing Progress")
 
@@ -250,7 +270,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm
         y_test = []
         x_test = []
 
-        net = net_optim
+        # net = net_optim
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
@@ -282,9 +302,6 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm
     np.savetxt(out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
 
     # -------------------------------------------------------------------------#
-    # save the model
-    net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
-
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)
@@ -304,7 +321,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 0.5, lstm
 
     # rename the directory
     out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_AFR"
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_seed3"
     os.rename(out_dir, out_dir_)
 
 
