@@ -1,6 +1,7 @@
 # Temporary import. It will be removed in the final vserion
 import os
 import sys
+import shutil
 
 # Add the 'build' directory to sys.path in one line
 sys.path.append(
@@ -180,25 +181,32 @@ def main(num_epochs: int = 50, batch_size: int = 16, sigma_v: float = 2):
                 refresh=True,
             )
 
+            # create a directory to save the model
+            if not os.path.exists("best_model/"):
+                os.makedirs("best_model/")
+
             # early-stopping
             if early_stopping_criteria == 'mse':
                 if mse_val<mse_optim:
                     mse_optim = mse_val
                     log_lik_optim = log_lik_val
                     epoch_optim = epoch
-                    net_optim = net
+                    net.save_csv("best_model/")
+                    # net_optim = net
             elif early_stopping_criteria == 'log_lik':
                 if log_lik_val>log_lik_optim:
                     mse_optim = mse_val
                     log_lik_optim = log_lik_val
                     epoch_optim = epoch
-                    net_optim = net
+                    net.save_csv("best_model/")
+                    # net_optim = net
             if epoch-epoch_optim > patience:
                 break
 
         # -------------------------------------------------------------------------#
         # Testing
-        net = net_optim     # load optimal net
+        net.load_csv("best_model/")  # load optimal net
+        shutil.rmtree("best_model/") # remove the directory
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
         test_batch_iter = test_dtl.create_data_loader(1, shuffle=False)
 

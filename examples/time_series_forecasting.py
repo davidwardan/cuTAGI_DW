@@ -81,7 +81,7 @@ def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 1):
 
         for x, y in batch_iter:
             # Feed forward
-            m_pred, _ = net(x)
+            m_pred, _ = net(x, )
 
             # Update output layer
             out_updater.update(

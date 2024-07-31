@@ -1,6 +1,7 @@
 # import libraries
 import os
 import sys
+import shutil
 
 import fire
 import numpy as np
@@ -254,6 +255,9 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
         # plt.close(fig)
         #-------------------------------------------------------------------------#
+        # create a directory to save the model
+        if not os.path.exists("best_model/"):
+            os.makedirs("best_model/")
 
         # early-stopping
         if early_stopping_criteria == 'mse':
@@ -261,13 +265,15 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv("best_model/")
+                # net_optim = net
         elif early_stopping_criteria == 'log_lik':
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv("best_model/")
+                # net_optim = net
         if epoch - epoch_optim > patience:
             break
 
@@ -278,6 +284,9 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
     df = np.array([mses_val, ll_val]).T
     np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
     # -------------------------------------------------------------------------#
+    net.load_csv("best_model/")  # load optimal net
+    shutil.rmtree("best_model/") # remove the directory
+
     # save the model
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
 
@@ -317,7 +326,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         y_test = []
         x_test = []
 
-        net = net_optim
+        # net = net_optim
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):

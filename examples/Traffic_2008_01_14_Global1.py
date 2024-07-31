@@ -1,6 +1,7 @@
 # import libraries
 import os
 import sys
+import shutil
 
 import fire
 import numpy as np
@@ -65,7 +66,6 @@ def main(num_epochs: int = 150, batch_size: int = 64, sigma_v: float = 0.5, lstm
     epoch_optim = 1
     early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
     patience = 10
-    net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
     global_log_lik = []
 
@@ -208,6 +208,9 @@ def main(num_epochs: int = 150, batch_size: int = 64, sigma_v: float = 0.5, lstm
         # # Save the figure
         # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
         #-------------------------------------------------------------------------#
+        # create a directory to save the model
+        if not os.path.exists("best_model/"):
+            os.makedirs("best_model/")
 
         # early-stopping
         if early_stopping_criteria == 'mse':
@@ -215,19 +218,32 @@ def main(num_epochs: int = 150, batch_size: int = 64, sigma_v: float = 0.5, lstm
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv('best_model/')
+                # net_optim = net
         elif early_stopping_criteria == 'log_lik':
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv('best_model/')
+                # net_optim = net
         if epoch - epoch_optim > patience:
             break
 
         # shuffle ts_idx
         np.random.shuffle(ts_idx)
     # -------------------------------------------------------------------------#
+    # save validation metrics into csv
+    df = np.array([mses_val, ll_val]).T
+    np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
+    # -------------------------------------------------------------------------#
+    # load the optimal net
+    net.load_csv("best_model/")  # load optimal net
+    shutil.rmtree("best_model/") # remove the directory
+
+    # save the model
+    net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
+
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
 
@@ -259,7 +275,7 @@ def main(num_epochs: int = 150, batch_size: int = 64, sigma_v: float = 0.5, lstm
         y_test = []
         x_test = []
 
-        net = net_optim
+        # net = net_optim
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
@@ -291,9 +307,6 @@ def main(num_epochs: int = 150, batch_size: int = 64, sigma_v: float = 0.5, lstm
     np.savetxt(out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
 
     # -------------------------------------------------------------------------#
-    # save the model
-    net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
-
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)

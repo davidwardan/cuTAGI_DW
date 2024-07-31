@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import fire
 import numpy as np
@@ -45,8 +46,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
 
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/electricity/electricity_2014_03_31_train.csv",
-            date_time_file="data/electricity/electricity_2014_03_31_train_datetime.csv",
+            x_file="data/electricity/elec_deepAR/electricity_train_data.csv",
+            date_time_file="data/electricity/elec_deepAR/electricity_train_time.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -55,7 +56,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             ts_idx=ts,
             time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
-            # idx_as_feature=True,
+            idx_as_feature=True,
             # scale_covariates=True,
         )
 
@@ -70,8 +71,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
         # covar_stds[ts] = train_dtl_.covariate_stds
 
         val_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/electricity/electricity_2014_03_31_val.csv",
-            date_time_file="data/electricity/electricity_2014_03_31_val_datetime.csv",
+            x_file="data/electricity/elec_deepAR/electricity_val_data.csv",
+            date_time_file="data/electricity/elec_deepAR/electricity_val_time.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -86,7 +87,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             # scale_covariates=True,
             # covariate_means=covar_means[ts],
             # covariate_stds=covar_stds[ts],
-            # idx_as_feature=True,
+            idx_as_feature=True,
         )
 
         if ts == 0:
@@ -117,7 +118,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
 
     # -------------------------------------------------------------------------#
     # calculate the weights for each time series
-    # weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
+    weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
 
     # Training
     mses = []
@@ -135,8 +136,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
 
-        # batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True, weighted_sampling=True, weights=weights, num_samples=550000)
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
+        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True, weighted_sampling=True, weights=weights, num_samples=500000)
+        # batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
@@ -178,8 +179,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             mses.append(mse)
 
         # -------------------------------------------------------------------------#
-        # Validation
-        val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
+        # # Validation
+        val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=True)
 
         mu_preds = []
         var_preds = []
@@ -226,6 +227,11 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
 
         # Progress bar
         pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}", sigma_v=f"{sigma_v:.4f}")
+        # pbar.set_postfix(mse=f"{np.mean(mses):.4f}", sigma_v=f"{sigma_v:.4f}")
+
+        # create a directory to save the model
+        if not os.path.exists("best_model/"):
+            os.makedirs("best_model/")
 
         # early-stopping
         if early_stopping_criteria == 'mse':
@@ -233,13 +239,15 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv("best_model/")
+                # net_optim = net
         elif early_stopping_criteria == 'log_lik':
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net_optim = net
+                net.save_csv("best_model/")
+                # net_optim = net
         if epoch - epoch_optim > patience:
             break
 
@@ -271,20 +279,25 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
     df = np.array([mses_val, ll_val]).T
     np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
     # -------------------------------------------------------------------------#
+    # load optimal model
+    net.load_csv("best_model/")  # load optimal net
+    shutil.rmtree("best_model/") # remove the directory
+
     # save the model
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
 
     # Testing
     pbar = tqdm(ts_idx, desc="Testing Progress")
 
-    ytestPd = np.full((168, nb_ts), np.nan)
-    SytestPd = np.full((168, nb_ts), np.nan)
-    ytestTr = np.full((168, nb_ts), np.nan)
+    ytestPd = np.full((144, nb_ts), np.nan)
+    SytestPd = np.full((144, nb_ts), np.nan)
+    ytestTr = np.full((144, nb_ts), np.nan)
+
     for ts in pbar:
 
         test_dtl = GlobalTimeSeriesDataloader(
-            x_file="data/electricity/electricity_2014_03_31_test.csv",
-            date_time_file="data/electricity/electricity_2014_03_31_test_datetime.csv",
+            x_file="data/electricity/elec_deepAR/electricity_test_data.csv",
+            date_time_file="data/electricity/elec_deepAR/electricity_test_time.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -299,7 +312,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             # scale_covariates=True,
             # covariate_means=covar_means[ts],
             # covariate_stds=covar_stds[ts],
-            # idx_as_feature=True,
+            idx_as_feature=True,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -310,7 +323,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
         y_test = []
         x_test = []
 
-        net = net_optim
+        # net = net_optim
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
@@ -375,8 +388,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
         f.write(f'global_scale:    {test_dtl.global_scale}\n')
 
     # rename the directory
-    out_dir_ = "david/output/electricity_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_gs"
+    out_dir_ = "david/output/electricity_" + str(epoch) + "_" + str(batch_size) + "_" + str(
+        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_benchmark"
     os.rename(out_dir, out_dir_)
 
 
@@ -385,10 +398,10 @@ def concat_ts_sample(data, data_add):
     x_combined = np.concatenate((data.dataset["value"][0], data_add.dataset["value"][0]), axis=0)
     y_combined = np.concatenate((data.dataset["value"][1], data_add.dataset["value"][1]), axis=0)
     time_combined = np.concatenate((data.dataset["date_time"], data_add.dataset["date_time"]))
-    # weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
+    weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
-    # data.dataset["weights"] = weights_combined
+    data.dataset["weights"] = weights_combined
     return data
 
 
