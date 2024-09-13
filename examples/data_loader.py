@@ -546,3 +546,212 @@ class TimeSeriesDataloader:
 
 #     def create_data_loader(self, batch_size: int, shuffle: bool = True):
 #         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
+
+class GlobalTimeSeriesDataloader:
+    """Similar to TimeSeriesDataloader but with global normalization"""
+
+    def __init__(
+            self,
+            x_file: str,
+            date_time_file: str,
+            output_col: np.ndarray,
+            input_seq_len: int,
+            output_seq_len: int,
+            num_features: int,
+            stride: int,
+            ts_idx: Optional[int] = 0,
+            x_mean: Optional[np.ndarray] = None,
+            x_std: Optional[np.ndarray] = None,
+            time_covariates: Optional[str] = None,
+            scale_i: Optional[float] = None,
+            global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
+            idx_as_feature: Optional[bool] = False,
+            min_max_scaler: Optional[list] = None,
+            scale_covariates: Optional[bool] = False,
+            covariate_means: Optional[np.ndarray] = None,
+            covariate_stds: Optional[np.ndarray] = None,
+            embedding_dim: Optional[int] = None,
+            embedding: Optional[np.ndarray] = None,
+
+    ) -> None:
+        self.x_file = x_file
+        self.date_time_file = date_time_file
+        self.output_col = output_col
+        self.input_seq_len = input_seq_len
+        self.output_seq_len = output_seq_len
+        self.num_features = num_features
+        self.stride = stride
+        self.ts_idx = ts_idx  # add time series index when data having multiple ts
+        self.time_covariates = time_covariates  # for adding time covariates
+        self.scale_i = scale_i  # scaling factor for ith time series
+        self.global_scale = global_scale
+        self.x_mean = x_mean
+        self.x_std = x_std
+        self.idx_as_feature = idx_as_feature
+        self.min_max_scaler = min_max_scaler
+        self.scale_covariates = scale_covariates
+        self.covariate_means = covariate_means
+        self.covariate_stds = covariate_stds
+        self.embedding_dim = embedding_dim
+        self.embedding = embedding
+        self.dataset = self.process_data()
+
+    @staticmethod
+    def load_data_from_csv(data_file: str) -> ndarray:
+        """Load data from csv file"""
+
+        data = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
+
+        return data.values
+
+    @staticmethod
+    def batch_generator(
+            input_data: np.ndarray,
+            output_data: np.ndarray,
+            batch_size: int,
+            shuffle: bool = True,
+            weighted_sampling: bool = False,
+            weights: Optional[np.ndarray] = None,
+            num_samples: Optional[int] = None,
+    ) -> Generator[Tuple[np.ndarray, ...], None, None]:
+        """
+        Generator function to yield batches of data.
+        """
+
+        num_data = input_data.shape[0]
+        indices = np.arange(num_data)
+        if shuffle:
+            np.random.shuffle(indices)
+
+        # TODO: Implement weighted sampling
+        if weighted_sampling:
+            if weights is None:
+                raise ValueError("Weights must be provided for weighted sampling.")
+            if weights.shape[0] != num_data:
+                raise ValueError("Weights array must be the same length as the number of data points.")
+            if num_samples is None:
+                indices = np.random.choice(indices, size=num_data, replace=True, p=weights)
+            else:
+                indices = np.random.choice(indices, size=num_samples, replace=True, p=weights)
+                num_data = num_samples
+
+        for start_idx in range(0, num_data, batch_size):
+            # if start_idx + batch_size > num_data:
+            #     continue
+            end_idx = min(start_idx + batch_size, num_data)
+            idx = indices[start_idx:end_idx]
+            yield input_data[idx].flatten(), output_data[idx].flatten()
+
+    def process_data(self) -> dict:
+        """Process time series"""
+        # Initialization
+        utils = Utils()
+
+        # Load data
+        x = self.load_data_from_csv(self.x_file)
+        x = x[:, self.ts_idx:self.ts_idx + 1]  # choose time series column
+        date_time = self.load_data_from_csv(self.date_time_file)
+
+        # Add time covariates
+        if self.time_covariates is not None:
+            date_time = np.array(date_time, dtype='datetime64')
+            for time_cov in self.time_covariates:
+                if time_cov == 'hour_of_day':
+                    hour_of_day = date_time.astype('datetime64[h]').astype(int) % 24
+                    x = np.concatenate((x, hour_of_day), axis=1)
+                elif time_cov == 'day_of_week':
+                    day_of_week = date_time.astype('datetime64[D]').astype(int) % 7
+                    x = np.concatenate((x, day_of_week), axis=1)
+                elif time_cov == 'week_of_year':
+                    week_of_year = date_time.astype('datetime64[W]').astype(int) % 52 + 1
+                    x = np.concatenate((x, week_of_year), axis=1)
+                elif time_cov == 'month_of_year':
+                    month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
+                    x = np.concatenate((x, month_of_year), axis=1)
+                elif time_cov == 'quarter_of_year':
+                    month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
+                    quarter_of_year = (month_of_year - 1) // 3 + 1
+                    x = np.concatenate((x, quarter_of_year), axis=1)
+
+        # TODO: add index of feature as one-hot encoding
+        # Add time series index as a feature
+        if self.idx_as_feature:
+            idx_to_add = np.zeros((x.shape[0], 1))
+            idx_to_add[:, 0] = self.ts_idx
+            x = np.concatenate((x, idx_to_add), axis=1)
+
+        # standardize covariates
+        if self.scale_covariates is True:
+            # if self.global_scale == 'deepAR':
+            #     if self.covariate_means is None:
+            #         self.covariate_means = 1 + np.nanmean(x, axis=0)
+            #     for col in range(1, self.num_features):
+            #         column_to_scale = x[:, col]
+            #         x[:, col] = column_to_scale / (1 + self.covariate_means[col])
+            # else:
+            if self.covariate_means is None and self.covariate_stds is None:
+                self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
+                self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
+            for col in range(1, self.num_features):
+                column_to_scale = x[:, col]
+                x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
+                                                   self.covariate_stds[col])
+
+        # scale the observations using time series dependent scaling factors
+        if self.global_scale is not None:
+            if self.global_scale == 'deepAR':
+                if self.scale_i is None:
+                    self.scale_i = 1 + np.nanmean(x[:, 0])
+                x[:, 0] = x[:, 0] / np.array(self.scale_i)
+
+            elif self.global_scale == 'standard':
+                if self.x_mean is None and self.x_std is None:
+                    self.x_mean, self.x_std = Normalizer.compute_mean_std(x[:, 0])
+                x[:, 0] = Normalizer.standardize(data=x[:, 0], mu=self.x_mean, std=self.x_std)
+
+        # Create rolling windows
+        x_rolled, y_rolled = utils.create_rolling_window(
+            data=x,
+            output_col=self.output_col,
+            input_seq_len=self.input_seq_len,
+            output_seq_len=self.output_seq_len,
+            num_features=self.num_features,
+            stride=self.stride,
+        )
+
+        # TODO: optimize the embedding code
+        # Create embedding for time series index
+        if self.embedding_dim is not None or self.embedding is not None:
+            if self.embedding_dim is not None and self.embedding is None:
+                self.embedding = np.random.normal(0.0, 1.0, size=self.embedding_dim)
+            x_rolled = self.roll_embedding(x_rolled, self.embedding)
+
+        # Dataloader
+        dataset = {}
+        dataset["value"] = (x_rolled, y_rolled)
+
+        # NOTE: Datetime is saved for the visualization purpose
+        dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
+
+        # store weights for weighted sampling. Default is uniform sampling
+        if self.global_scale == 'deepAR':
+            dataset["weights"] = self.scale_i * np.ones(x_rolled.shape[0])
+
+        return dataset
+
+    def roll_embedding(self, x_rolled: np.ndarray, embedding: np.ndarray) -> np.ndarray:
+        # shape: (num_data, input_seq_len * num_features + embedding_dim)
+        to_add = np.tile(embedding, (x_rolled.shape[0], 1))
+        col_idx = [i for i in range(0, x_rolled.shape[1], self.num_features)]
+        new_x_rolled = np.zeros((x_rolled.shape[0], (self.num_features + len(embedding)) * self.input_seq_len))
+        j = 0
+        for i in col_idx:
+            to_concat = np.concatenate((x_rolled[:, i:i + self.num_features], to_add), axis=1)
+            new_x_rolled[:, j:j + len(embedding) + self.num_features] = to_concat
+            j += len(embedding) + self.num_features
+        return np.float32(new_x_rolled)
+
+    def create_data_loader(self, batch_size: int, shuffle: bool = True, weighted_sampling: bool = False,
+                           weights: Optional[np.ndarray] = None, num_samples: Optional[int] = None):
+        return self.batch_generator(*self.dataset["value"], batch_size, shuffle, weighted_sampling, weights,
+                                    num_samples)
