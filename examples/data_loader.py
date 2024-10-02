@@ -597,7 +597,7 @@ class GlobalTimeSeriesDataloader:
         self.dataset = self.process_data()
 
     @staticmethod
-    def load_data_from_csv(data_file: str) -> ndarray:
+    def load_data_from_csv(data_file: str) -> np.ndarray:
         """Load data from csv file"""
 
         data = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
