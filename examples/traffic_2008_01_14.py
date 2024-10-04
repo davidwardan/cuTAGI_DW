@@ -9,12 +9,12 @@ from tqdm import tqdm
 import pytagi.metric as metric
 from pytagi import Normalizer as normalizer
 from pytagi import exponential_scheduler
-from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
+from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 
 from examples.data_loader import TimeSeriesDataloader
 
 
-def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = 2):
+def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = None):
     """Run training for time-series forecasting model"""
     # Dataset
     output_col = [0]
@@ -27,13 +27,21 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = 2):
     patience = 10
 
     # Network
-    net = Sequential(
-        LSTM(num_features, 40, input_seq_len),
-        LSTM(40, 40, input_seq_len),
-        LSTM(40, 40, input_seq_len),
-        Linear(40 * input_seq_len, 1),
-    )
-    net.to_device("cuda")
+    if sigma_v is None:
+        net = Sequential(
+            LSTM(num_features, 40, input_seq_len),
+            LSTM(40, 40, input_seq_len),
+            LSTM(40, 40, input_seq_len),
+            Linear(40 * input_seq_len, 2), EvenExp()
+        )
+    else:
+        net = Sequential(
+            LSTM(num_features, 40, input_seq_len),
+            LSTM(40, 40, input_seq_len),
+            LSTM(40, 40, input_seq_len),
+            Linear(40 * input_seq_len, 1),
+        )
+    # net.to_device("cuda")
     # net.set_threads(12)
     out_updater = OutputUpdater(net.device)
 
@@ -97,24 +105,33 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = 2):
         for epoch in pbar:
             batch_iter = train_dtl.create_data_loader(batch_size, False)
 
-            # Decaying observation's variance
-            sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
-            )
-            var_y = np.full(
-                (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
-            )
+            if sigma_v is not None:
+                # Decaying observation's variance
+                sigma_v = exponential_scheduler(
+                    curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
+                )
+                var_y = np.full(
+                    (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
+                )
             for x, y in batch_iter:
                 # Feed forward
                 m_pred, _ = net(x)
 
-                # Update output layer
-                out_updater.update(
-                    output_states=net.output_z_buffer,
-                    mu_obs=y,
-                    var_obs=var_y,
-                    delta_states=net.input_delta_z_buffer,
-                )
+                if sigma_v is not None:
+                    # Update output layer
+                    out_updater.update(
+                        output_states=net.output_z_buffer,
+                        mu_obs=y,
+                        var_obs=var_y,
+                        delta_states=net.input_delta_z_buffer,
+                    )
+                else:
+                    # Update output layer
+                    out_updater.update_heteros(
+                        output_states=net.output_z_buffer,
+                        mu_obs=y,
+                        delta_states=net.input_delta_z_buffer,
+                    )
 
                 # Feed backward
                 net.backward()
@@ -127,6 +144,11 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = 2):
                 obs = normalizer.unstandardize(
                     y, train_dtl.x_mean[output_col], train_dtl.x_std[output_col]
                 )
+
+                if sigma_v is None:
+                    # Even positions correspond to Z_out
+                    pred = pred[::2]
+
                 mse = metric.mse(pred, obs)
                 mses.append(mse)
 
@@ -142,8 +164,15 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = 2):
                 # Predicion
                 m_pred, v_pred = net(x)
 
-                mu_preds.extend(m_pred)
-                var_preds.extend(v_pred + sigma_v**2)
+                if sigma_v is None:
+                    # Even positions correspond to Z_out and odd positions to V
+                    var_preds.extend(v_pred[::2] + m_pred[1::2])
+
+                    mu_preds.extend(m_pred[::2])
+
+                else:
+                    mu_preds.extend(m_pred)
+                    var_preds.extend(v_pred + sigma_v**2)
                 x_val.extend(x)
                 y_val.extend(y)
 
@@ -212,8 +241,15 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = 2):
             # Predicion
             m_pred, v_pred = net(x)
 
-            mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v**2)
+            if sigma_v is None:
+                # Even positions correspond to Z_out and odd positions to V
+                var_preds.extend(v_pred[::2] + m_pred[1::2])
+
+                mu_preds.extend(m_pred[::2])
+
+            else:
+                mu_preds.extend(m_pred)
+                var_preds.extend(v_pred + sigma_v ** 2)
             x_test.extend(x)
             y_test.extend(y)
 
@@ -235,8 +271,8 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = 2):
         ytestPd[:, ts] = mu_preds.flatten()
         SytestPd[:, ts] = std_preds.flatten() ** 2
 
-    # np.savetxt("traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    # np.savetxt("traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
+    np.savetxt("dw_out/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
+    np.savetxt("dw_out/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
     # Compute log-likelihood
     # mse = metric.mse(mu_preds, y_test)
     # log_lik = metric.log_likelihood(
@@ -442,4 +478,4 @@ class PredictionViz:
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire(main())
