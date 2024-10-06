@@ -781,13 +781,17 @@ Sequential::get_input_states()
 {
     // Check if input_state_update is enabled
     if (!this->input_state_update) {
-        throw std::invalid_argument("Error in file: " + std::string(__FILE__) +
-                                    " at line: " + std::to_string(__LINE__) +
-                                    ". input_state_update is set to False");
+        std::ostringstream error_message;
+        error_message << "input_state_update is set to False. "
+                            "Set input_state_update to True before calling "
+                            "get_input_states().";
+
+        throw std::runtime_error(error_message.str());
     }
 
-    // Define the slice input states size
-    const size_t end_index = this->layers.front()->get_input_size() * this->input_z_buffer->block_size;
+    // Define the slice start and size (replace with actual logic to compute input size)
+    const size_t input_size = this->layers.front()->get_input_size() * this->input_z_buffer->block_size;
+    const size_t end_index = std::min(input_size, this->output_delta_z_buffer->delta_mu.size());
 
     // Slice delta_mu and delta_var
     std::vector<float> delta_mu_slice(
@@ -810,4 +814,3 @@ Sequential::get_input_states()
 
     return {py_delta_mu, py_delta_var};
 }
-
