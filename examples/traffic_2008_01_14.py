@@ -14,7 +14,7 @@ from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 from examples.data_loader import TimeSeriesDataloader
 
 
-def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = None):
+def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = None):
     """Run training for time-series forecasting model"""
     # Dataset
     output_col = [0]
@@ -25,6 +25,7 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = None):
     rolling_window = 24  # for rolling window predictions in the test set
     early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
     patience = 10
+    np.random.seed(42) # for shuffling the batches
 
     # Network
     if sigma_v is None:
@@ -41,7 +42,7 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = None):
             LSTM(40, 40, input_seq_len),
             Linear(40 * input_seq_len, 1),
         )
-    # net.to_device("cuda")
+    net.to_device("cuda")
     # net.set_threads(12)
     out_updater = OutputUpdater(net.device)
 
@@ -50,6 +51,7 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = None):
     ts_idx = np.arange(0, nb_ts)  # time series no.
     ytestPd = np.full((168, nb_ts), np.nan)
     SytestPd = np.full((168, nb_ts), np.nan)
+    ytrue = np.full((168, nb_ts), np.nan)
     for ts in ts_idx:
         # options for early stopping
         log_lik_optim = -1e100
@@ -268,11 +270,13 @@ def main(num_epochs: int = 10, batch_size: int = 16, sigma_v: float = None):
         )
 
         # save test predicitons for each time series
+        ytrue[ :, ts] = y_test.flatten()
         ytestPd[:, ts] = mu_preds.flatten()
         SytestPd[:, ts] = std_preds.flatten() ** 2
 
     np.savetxt("dw_out/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
     np.savetxt("dw_out/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
+    np.savetxt("dw_out/traffic_2008_01_14_ytrue_pyTAGI.csv", ytrue, delimiter=",")
     # Compute log-likelihood
     # mse = metric.mse(mu_preds, y_test)
     # log_lik = metric.log_likelihood(
@@ -478,4 +482,4 @@ class PredictionViz:
 
 
 if __name__ == "__main__":
-    fire.Fire(main())
+    fire.Fire(main(sigma_v=2.0))
