@@ -23,19 +23,28 @@ class TimeSeriesEmbeddings:
     Class to handle embedding operations with mean and variance.
     """
 
-    def __init__(self, embedding_dim: tuple):
+    def __init__(self, embedding_dim: tuple, encoding_type: str = "normal"):
         self.embedding_dim = embedding_dim
-        self.mu_embedding = np.random.randn(*embedding_dim)
-        self.var_embedding = np.full(embedding_dim, 1.0)
+        if encoding_type == "normal":
+            self.mu_embedding = np.random.randn(*embedding_dim)
+            self.var_embedding = np.full(embedding_dim, 1.0)
+        elif encoding_type == "onehot":
+            epsilon = 1e-6
+            self.mu_embedding = np.full(embedding_dim, epsilon)
+            np.fill_diagonal(self.mu_embedding, 1.0)
+            self.var_embedding = np.ones(embedding_dim)
+        else:
+            raise ValueError("Encoding type not supported.")
 
     def update(self, idx: int, mu_delta: np.ndarray, var_delta: np.ndarray):
-        self.mu_embedding[idx] = mu_delta
-        self.var_embedding[idx] = var_delta
+        self.mu_embedding[idx] = self.mu_embedding[idx] + mu_delta
+        self.var_embedding[idx] = self.var_embedding[idx] + var_delta
 
     def get_embedding(self, idx: int) -> tuple:
         return self.mu_embedding[idx], self.var_embedding[idx]
 
 
+# TODO: Create a EmbeddingHandler class to handle the embeddings (build, reduce, input)
 def build_vector(x: int, num_features_len: int, embedding_dim: int) -> np.ndarray:
     vector = np.zeros(x)
     cycle_length = num_features_len + embedding_dim
@@ -60,6 +69,29 @@ def reduce_vector(x: np.ndarray, vector: np.ndarray, embedding_dim: int) -> np.n
     return x.reshape(-1, embedding_dim)
 
 
+def input_embeddings(x, embeddings, num_features, embedding_dim):
+    """
+    Reads embeddings into the input vector.
+    """
+    x_var = x.copy()
+    counter = 0
+    last_idx = 0
+
+    for item in x:
+        if counter % num_features == 0 and counter != 0 and counter + last_idx < len(x):
+            idx = int(x[counter + last_idx])
+            embed_x, embed_var = embeddings.get_embedding(idx)
+            (x[counter + last_idx:counter + last_idx + embedding_dim],
+             x_var[counter + last_idx:counter + last_idx + embedding_dim]) = (embed_x.tolist(),
+                                                                              embed_var.tolist())
+            last_idx = counter + embedding_dim + last_idx
+            counter = 0
+        else:
+            counter += 1
+
+    return np.array(x, dtype=np.float32), np.array(x_var, dtype=np.float32)
+
+
 def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
@@ -76,7 +108,7 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
-    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
+    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim), encoding_type='onehot')  # initialize embeddings
 
     # Network
     net = Sequential(
@@ -118,6 +150,8 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
     covar_means = [0] * nb_ts
     covar_stds = [1.0] * nb_ts
 
+    w_dir = '/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW'
+
     for epoch in pbar:
 
         # Decaying observation's variance
@@ -128,8 +162,8 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
 
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
-                x_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_train.csv",
-                date_time_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_train_datetime.csv",
+                x_file=w_dir + "/data/traffic/traffic_2008_01_14_train.csv",
+                date_time_file=w_dir + "/data/traffic/traffic_2008_01_14_train_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
@@ -157,25 +191,7 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
                 x_ts_idx = np.mean(x_ts_idx, axis=1).tolist()
 
                 # replace the embedding section with the actual embedding
-                x = x.tolist()
-                x_var = x.copy()
-                counter = 0
-                last_idx = 0
-                for item in x:
-                    if counter % num_features == 0 and counter != 0 and counter + last_idx < len(x):
-                        idx = int(x[counter + last_idx])
-                        embed_x, embed_var = embeddings.get_embedding(idx)
-                        (x[counter + last_idx:counter + last_idx + embedding_dim],
-                         x_var[counter + last_idx:counter + last_idx + embedding_dim]) = (embed_x.tolist(),
-                                                                                          embed_var.tolist())
-                        last_idx = counter + embedding_dim + last_idx
-                        counter = 0
-                    else:
-                        counter += 1
-
-                # convert to numpy array and float32 type for binding
-                x = np.array(x, dtype=np.float32)
-                x_var = np.array(x_var, dtype=np.float32)
+                x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
 
                 # only leave variance for the embedding section
                 x_var = x_var * zero_vector
@@ -199,8 +215,8 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
                 (mu_delta, var_delta) = net.get_input_states()
 
                 # update the embedding
-                x_update = x + mu_delta * x_var
-                var_update = x_var + x_var * var_delta * x_var
+                x_update = mu_delta * x_var
+                var_update = x_var * var_delta * x_var
 
                 # reduce the vector to get only embeddings
                 x_update = reduce_vector(x_update, zero_vector, embedding_dim)
@@ -224,8 +240,8 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
             embed_mu, embed_var = embeddings.get_embedding(ts)
 
             val_dtl = GlobalTimeSeriesDataloader(
-                x_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_val.csv",
-                date_time_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_val_datetime.csv",
+                x_file=w_dir + "/data/traffic/traffic_2008_01_14_val.csv",
+                date_time_file=w_dir + "/data/traffic/traffic_2008_01_14_val_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
@@ -247,8 +263,6 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
             x_val = []
 
             for x, y in val_batch_iter:
-                # build a vector with length of x and have 0 values everywhere and 1 where the embedding is stored
-
                 # Prediction
                 m_pred, v_pred = net(x)
 
@@ -316,8 +330,8 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
         embed_mu, embed_var = embeddings.get_embedding(ts)
 
         test_dtl = GlobalTimeSeriesDataloader(
-            x_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_test.csv",
-            date_time_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_test_datetime.csv",
+            x_file=w_dir + "/data/traffic/traffic_2008_01_14_test.csv",
+            date_time_file=w_dir + "/data/traffic/traffic_2008_01_14_test_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
