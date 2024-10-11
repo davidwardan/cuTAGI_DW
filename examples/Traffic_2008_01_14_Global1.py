@@ -92,23 +92,23 @@ def input_embeddings(x, embeddings, num_features, embedding_dim):
     return np.array(x, dtype=np.float32), np.array(x_var, dtype=np.float32)
 
 
-def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 1, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
-    embedding_dim = 5  # dimension of the embedding
-    nb_ts = 963  # for electricity 370 and 963 for traffic
+    embedding_dim = 2  # dimension of the embedding
+    nb_ts = 10  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
     output_col = [0]
     num_features = 3
-    input_seq_len = 24
+    input_seq_len = 5
     output_seq_len = 1
     seq_stride = 1
-    rolling_window = 24  # for rolling window predictions in the test set
-    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim), encoding_type='onehot')  # initialize embeddings
+    rolling_window = 5  # for rolling window predictions in the test set
+    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
 
     # Network
     net = Sequential(
@@ -223,11 +223,11 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
                 var_update = reduce_vector(var_update, zero_vector, embedding_dim)
 
                 # store the updated embedding
-                david = 0
+                vec_loc = 0
                 for ts_idx_ in x_ts_idx:
                     ts_idx_ = int(ts_idx_)
-                    embeddings.update(ts_idx_, x_update[david], var_update[david])
-                    david += 1
+                    embeddings.update(ts_idx_, x_update[vec_loc], var_update[vec_loc])
+                    vec_loc += 1
 
                 # Compute MSE
                 mse.append(metric.mse(m_pred, y))
@@ -360,7 +360,7 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
             # Rolling window predictions
             RW_idx = RW_idx_ % rolling_window
             if RW_idx > 0:
-                x[-RW_idx * num_features::num_features] = mu_preds[-RW_idx:]
+                x[-RW_idx * (num_features + embedding_dim)::(num_features + embedding_dim)] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)
