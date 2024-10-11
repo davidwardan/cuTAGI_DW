@@ -47,7 +47,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = None):
     out_updater = OutputUpdater(net.device)
 
     # Loop over each time series in the benchmark
-    nb_ts = 963
+    nb_ts = 370
     ts_idx = np.arange(0, nb_ts)  # time series no.
     ytestPd = np.full((168, nb_ts), np.nan)
     SytestPd = np.full((168, nb_ts), np.nan)
@@ -59,8 +59,8 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = None):
         epoch_optim = 1
 
         train_dtl = TimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_train.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_train_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_train.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_train_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -70,8 +70,8 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = None):
             time_covariates=["hour_of_day", "day_of_week"],
         )
         val_dtl = TimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_val.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_val_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_val.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_val_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -83,8 +83,8 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = None):
             time_covariates=["hour_of_day", "day_of_week"],
         )
         test_dtl = TimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_test.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_test_datetime.csv",
+            x_file="data/electricity/electricity_2014_03_31_test.csv",
+            date_time_file="data/electricity/electricity_2014_03_31_test_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -223,7 +223,7 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = None):
 
         # -------------------------------------------------------------------------#
         # Testing
-        net.load_state_dict(sate_optim)  # load optimal net
+        net.load_state_dict(sate_optim) # load optimal net
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
         test_batch_iter = test_dtl.create_data_loader(1, shuffle=False)
 
@@ -279,9 +279,9 @@ def main(num_epochs: int = 50, batch_size: int = 64, sigma_v: float = None):
     else:
         timestamp = "heteros"
 
-    np.savetxt(f"dw_out/traffic_2008_01_14_ytestPd_pyTAGI_{timestamp}.csv", ytestPd, delimiter=",")
-    np.savetxt(f"dw_out/traffic_2008_01_14_SytestPd_pyTAGI_{timestamp}.csv", SytestPd, delimiter=",")
-    np.savetxt(f"dw_out/traffic_2008_01_14_ytrue_pyTAGI_{timestamp}.csv", ytrue, delimiter=",")
+    np.savetxt(f"dw_out/electricity_2014_03_31_ytestPd_pyTAGI_{timestamp}.csv", ytestPd, delimiter=",")
+    np.savetxt(f"dw_out/electricity_2014_03_31_SytestPd_pyTAGI_{timestamp}.csv", SytestPd, delimiter=",")
+    np.savetxt(f"dw_out/electricity_2014_03_31_ytrue_pyTAGI_{timestamp}.csv", ytrue, delimiter=",")
     # Compute log-likelihood
     # mse = metric.mse(mu_preds, y_test)
     # log_lik = metric.log_likelihood(
