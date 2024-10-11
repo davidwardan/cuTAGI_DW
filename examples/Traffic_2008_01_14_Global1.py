@@ -1,7 +1,6 @@
 # import libraries
 import os
 import sys
-import shutil
 
 import fire
 import numpy as np
@@ -13,21 +12,61 @@ from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 
 from examples.data_loader import GlobalTimeSeriesDataloader
 
-import matplotlib.pyplot as plt
-
 # Add the 'build' directory to sys.path in one line
 sys.path.append(
     os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "build"))
 )
 
 
-def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_nodes: int = 40):
+class TimeSeriesEmbeddings:
+    """
+    Class to handle embedding operations with mean and variance.
+    """
+
+    def __init__(self, embedding_dim: tuple):
+        self.embedding_dim = embedding_dim
+        self.mu_embedding = np.random.randn(*embedding_dim)
+        self.var_embedding = np.full(embedding_dim, 1.0)
+
+    def update(self, idx: int, mu_delta: np.ndarray, var_delta: np.ndarray):
+        self.mu_embedding[idx] = mu_delta
+        self.var_embedding[idx] = var_delta
+
+    def get_embedding(self, idx: int) -> tuple:
+        return self.mu_embedding[idx], self.var_embedding[idx]
+
+
+def build_vector(x: int, num_features_len: int, embedding_dim: int) -> np.ndarray:
+    vector = np.zeros(x)
+    cycle_length = num_features_len + embedding_dim
+
+    # Iterate through the vector in steps of the cycle length
+    for i in range(0, x, cycle_length):
+        # Find the starting position of the embedding section in the current cycle
+        embedding_start = i + num_features_len
+
+        # Ensure the embedding section doesn't go out of bounds
+        if embedding_start < x:
+            # Set the values of the embedding section to ones
+            end_position = min(embedding_start + embedding_dim, x)
+            vector[embedding_start:end_position] = np.ones(end_position - embedding_start)
+
+    return vector
+
+
+def reduce_vector(x: np.ndarray, vector: np.ndarray, embedding_dim: int) -> np.ndarray:
+    x = (x + 1) * vector
+    x = x[x != 0] - 1  # remove zeros and reset index
+    return x.reshape(-1, embedding_dim)
+
+
+def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
-    embedding_dim = 10
+    embedding_dim = 5  # dimension of the embedding
     nb_ts = 963  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
@@ -37,6 +76,7 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
+    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
 
     # Network
     net = Sequential(
@@ -52,8 +92,8 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
     # input state update
     net.input_state_update = True
 
-    # Create output directory
-    out_dir = ("david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
+    # Create an output directory
+    out_dir = ("dw_out/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
                + "_" + str(lstm_nodes) + "_method1")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -77,7 +117,6 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
 
     covar_means = [0] * nb_ts
     covar_stds = [1.0] * nb_ts
-    embeddings = [0] * nb_ts
 
     for epoch in pbar:
 
@@ -89,8 +128,8 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
 
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
-                x_file="data/traffic/traffic_2008_01_14_train.csv",
-                date_time_file="data/traffic/traffic_2008_01_14_train_datetime.csv",
+                x_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_train.csv",
+                date_time_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_train_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
@@ -102,9 +141,6 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
                 embedding_dim=embedding_dim,
             )
 
-            # save embeddings
-            embeddings[ts] = train_dtl.embedding
-
             # store covariate means and stds
             covar_means[ts] = train_dtl.covariate_means
             covar_stds[ts] = train_dtl.covariate_stds
@@ -113,8 +149,39 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
 
             mse = []
             for x, y in batch_iter:
+                # build a zero vector with the same length as x with 1 where the embedding is stored
+                zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+                # get the indices of the time series stored in the embedding
+                x_ts_idx = reduce_vector(x, zero_vector, embedding_dim)
+                # reduce the vector to get only the indices (needed if embedding_dim > 1)
+                x_ts_idx = np.mean(x_ts_idx, axis=1).tolist()
+
+                # replace the embedding section with the actual embedding
+                x = x.tolist()
+                x_var = x.copy()
+                counter = 0
+                last_idx = 0
+                for item in x:
+                    if counter % num_features == 0 and counter != 0 and counter + last_idx < len(x):
+                        idx = int(x[counter + last_idx])
+                        embed_x, embed_var = embeddings.get_embedding(idx)
+                        (x[counter + last_idx:counter + last_idx + embedding_dim],
+                         x_var[counter + last_idx:counter + last_idx + embedding_dim]) = (embed_x.tolist(),
+                                                                                          embed_var.tolist())
+                        last_idx = counter + embedding_dim + last_idx
+                        counter = 0
+                    else:
+                        counter += 1
+
+                # convert to numpy array and float32 type for binding
+                x = np.array(x, dtype=np.float32)
+                x_var = np.array(x_var, dtype=np.float32)
+
+                # only leave variance for the embedding section
+                x_var = x_var * zero_vector
+
                 # Feed forward
-                m_pred, _ = net(x)
+                m_pred, _ = net(x, x_var)
 
                 # Update output layer
                 out_updater.update(
@@ -128,19 +195,37 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
                 net.backward()
                 net.step()
 
+                # get the updated input state
+                (mu_delta, var_delta) = net.get_input_states()
+
+                # update the embedding
+                x_update = x + mu_delta * x_var
+                var_update = x_var + x_var * var_delta * x_var
+
+                # reduce the vector to get only embeddings
+                x_update = reduce_vector(x_update, zero_vector, embedding_dim)
+                var_update = reduce_vector(var_update, zero_vector, embedding_dim)
+
+                # store the updated embedding
+                david = 0
+                for ts_idx_ in x_ts_idx:
+                    ts_idx_ = int(ts_idx_)
+                    embeddings.update(ts_idx_, x_update[david], var_update[david])
+                    david += 1
+
                 # Compute MSE
                 mse.append(metric.mse(m_pred, y))
             mses.append(np.mean(mse))
 
         #-------------------------------------------------------------------------#
         # validation
-
         # define validation progress inside the training progress
         for ts in ts_idx:
+            embed_mu, embed_var = embeddings.get_embedding(ts)
 
             val_dtl = GlobalTimeSeriesDataloader(
-                x_file="data/traffic/traffic_2008_01_14_val.csv",
-                date_time_file="data/traffic/traffic_2008_01_14_val_datetime.csv",
+                x_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_val.csv",
+                date_time_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_val_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
@@ -151,7 +236,7 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
                 scale_covariates=True,
                 covariate_means=covar_means[ts],
                 covariate_stds=covar_stds[ts],
-                embedding=embeddings[ts],
+                embedding=embed_mu,
             )
 
             val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
@@ -162,6 +247,8 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
             x_val = []
 
             for x, y in val_batch_iter:
+                # build a vector with length of x and have 0 values everywhere and 1 where the embedding is stored
+
                 # Prediction
                 m_pred, v_pred = net(x)
 
@@ -183,7 +270,6 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
 
             global_mse.append(mse_val)
             global_log_lik.append(log_lik_val)
-        #
 
         mse_val = np.mean(global_mse)
         log_lik_val = np.mean(global_log_lik)
@@ -194,62 +280,28 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
         pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}",
                          sigma_v=f"{sigma_v:.4f}")
 
-        #-------------------------------------------------------------------------#
-        # fig, ax1 = plt.subplots()
-
-        # # Set title for the plot
-        # ax1.set_title('Validation Metrics', fontsize=16)
-
-        # # Plot MSE on primary y-axis
-        # ax1.set_xlabel('Epoch')
-        # ax1.set_ylabel('MSE', color='steelblue')
-        # ax1.plot(mses_val, color='steelblue', label='MSE')
-        # ax1.tick_params(axis='y', labelcolor='steelblue')
-
-        # # Plot Log Likelihood on secondary y-axis
-        # ax2 = ax1.twinx()
-        # ax2.set_ylabel('Log Likelihood', color='indianred')
-        # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-        # ax2.tick_params(axis='y', labelcolor='indianred')
-
-        # # Adjust layout to make room for the title and legends
-        # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-        # # Save the figure
-        # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
-        #-------------------------------------------------------------------------#
-        # create a directory to save the model
-        if not os.path.exists("best_model/"):
-            os.makedirs("best_model/")
-
         # early-stopping
         if early_stopping_criteria == 'mse':
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net.save_csv('best_model/')
-                # net_optim = net
+                net_optim = net.get_state_dict()
         elif early_stopping_criteria == 'log_lik':
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net.save_csv('best_model/')
-                # net_optim = net
+                net_optim = net.get_state_dict()
         if epoch - epoch_optim > patience:
             break
 
         # shuffle ts_idx
         np.random.shuffle(ts_idx)
-    # -------------------------------------------------------------------------#
+
     # save validation metrics into csv
     df = np.array([mses_val, ll_val]).T
     np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
-    # -------------------------------------------------------------------------#
-    # load the optimal net
-    net.load_csv("best_model/")  # load optimal net
-    shutil.rmtree("best_model/")  # remove the directory
 
     # save the model
     net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
@@ -261,10 +313,11 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
     SytestPd = np.full((168, nb_ts), np.nan)
     ytestTr = np.full((168, nb_ts), np.nan)
     for ts in pbar:
+        embed_mu, embed_var = embeddings.get_embedding(ts)
 
         test_dtl = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_2008_01_14_test.csv",
-            date_time_file="data/traffic/traffic_2008_01_14_test_datetime.csv",
+            x_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_test.csv",
+            date_time_file="/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW/data/traffic/traffic_2008_01_14_test_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -275,7 +328,7 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
-            # embedding=embeddings[ts],
+            embedding=embed_mu,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -286,7 +339,7 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
         y_test = []
         x_test = []
 
-        # net = net_optim
+        net.load_state_dict(net_optim)  # load optimal net
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
@@ -322,7 +375,6 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)
     RMSE_tagi = metric.computeRMSE(ytestTr, ytestPd)
-    # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct
 
     # save metrics into a text file
     with open(out_dir + "/metrics.txt", "w") as f:
@@ -333,10 +385,9 @@ def main(num_epochs: int = 150, batch_size: int = 8, sigma_v: float = 0.5, lstm_
         f.write(f'Batch size:    {batch_size}\n')
         f.write(f'Sigma_v:    {sigma_v}\n')
         f.write(f'LSTM nodes:    {lstm_nodes}\n')
-        # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
+    out_dir_ = "dw_out/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
         round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1"
     os.rename(out_dir, out_dir_)
 
