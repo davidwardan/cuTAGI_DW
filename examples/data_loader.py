@@ -719,11 +719,10 @@ class GlobalTimeSeriesDataloader:
             stride=self.stride,
         )
 
-        # TODO: optimize the embedding code
         # Create embedding for time series index
         if self.embedding_dim is not None or self.embedding is not None:
             if self.embedding_dim is not None and self.embedding is None:
-                self.embedding = np.random.normal(0.0, 1.0, size=self.embedding_dim)
+                self.embedding = np.full((self.embedding_dim,), self.ts_idx)
             x_rolled = self.roll_embedding(x_rolled, self.embedding)
 
         # Dataloader
@@ -739,6 +738,7 @@ class GlobalTimeSeriesDataloader:
 
         return dataset
 
+    # TODO: optimize the embedding code
     def roll_embedding(self, x_rolled: np.ndarray, embedding: np.ndarray) -> np.ndarray:
         # shape: (num_data, input_seq_len * num_features + embedding_dim)
         to_add = np.tile(embedding, (x_rolled.shape[0], 1))
