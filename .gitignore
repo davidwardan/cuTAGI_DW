@@ -40,3 +40,4 @@ wandb/
 !test/fnn_heteros/data/*.csv
 !test/lstm/data/*.csv
 !data/toy_time_series_smoother/*.csv
+nohup.out

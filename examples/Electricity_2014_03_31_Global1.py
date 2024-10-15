@@ -1,7 +1,6 @@
 # import libraries
 import os
 import sys
-import shutil
 
 import fire
 import numpy as np
@@ -13,6 +12,7 @@ from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 from pytagi import Normalizer as normalizer
 
 from examples.data_loader import GlobalTimeSeriesDataloader
+from examples.embedding import *
 
 import matplotlib.pyplot as plt
 
@@ -22,12 +22,13 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
+    embedding_dim = 5  # dimension of the embedding
     nb_ts = 370  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
@@ -37,10 +38,11 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
+    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
 
     # Network
     net = Sequential(
-        LSTM(num_features, lstm_nodes, input_seq_len),
+        LSTM((num_features + embedding_dim), lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
@@ -49,9 +51,12 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
+    # input state update
+    net.input_state_update = True
+
     # Create output directory
     out_dir = ("david/output/electricity_" + str(num_epochs)
-               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1_ar")
+               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -97,10 +102,10 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
-                # idx_as_feature=True,
                 time_covariates=['hour_of_day', 'day_of_week'],
                 global_scale='deepAR',
                 scale_covariates=True,
+                embedding_dim=embedding_dim,
             )
 
             # Store scaling factors----------------------#
@@ -118,8 +123,21 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
 
             mse = []
             for x, y in batch_iter:
+                # build a zero vector with the same length as x with 1 where the embedding is stored
+                zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+                # get the indices of the time series stored in the embedding
+                x_ts_idx = reduce_vector(x, zero_vector, embedding_dim)
+                # reduce the vector to get only the indices (needed if embedding_dim > 1)
+                x_ts_idx = np.mean(x_ts_idx, axis=1).tolist()
+
+                # replace the embedding section with the actual embedding
+                x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
+
+                # only leave variance for the embedding section
+                x_var = x_var * zero_vector
+
                 # Feed forward
-                m_pred, _ = net(x)
+                m_pred, _ = net(x, x_var)
 
                 # Update output layer
                 out_updater.update(
@@ -133,21 +151,26 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
                 net.backward()
                 net.step()
 
-                # unscale the predictions
-                # pred = m_pred * factors[ts]
-                # obs = y * factors[ts]
-                # pred = normalizer.unstandardize(
-                #     m_pred, mean_train[ts], std_train[ts]
-                # )
-                # obs = normalizer.unstandardize(
-                #     y, mean_train[ts], std_train[ts]
-                # )
+                # get the updated input state
+                (mu_delta, var_delta) = net.get_input_states()
 
-                pred = m_pred
-                obs = y
+                # update the embedding
+                x_update = mu_delta * x_var
+                var_update = x_var * var_delta * x_var
+
+                # reduce the vector to get only embeddings
+                x_update = reduce_vector(x_update, zero_vector, embedding_dim)
+                var_update = reduce_vector(var_update, zero_vector, embedding_dim)
+
+                # store the updated embedding
+                vec_loc = 0
+                for ts_idx_ in x_ts_idx:
+                    ts_idx_ = int(ts_idx_)
+                    embeddings.update(ts_idx_, x_update[vec_loc], var_update[vec_loc])
+                    vec_loc += 1
 
                 # Compute MSE
-                mse.append(metric.mse(pred, obs))
+                mse.append(metric.mse(m_pred, y))
             mses.append(np.mean(mse))
 
         #-------------------------------------------------------------------------#
@@ -155,6 +178,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
 
         # define validation progress inside the training progress
         for ts in ts_idx:
+            embed_mu, embed_var = embeddings.get_embedding(ts)
 
             val_dtl = GlobalTimeSeriesDataloader(
                 x_file="data/electricity/electricity_2014_03_31_val.csv",
@@ -170,10 +194,10 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
                 time_covariates=['hour_of_day', 'day_of_week'],
                 global_scale='deepAR',
                 scale_i=factors[ts],
-                # idx_as_feature=True,
                 scale_covariates=True,
                 covariate_means=covar_means[ts],
                 covariate_stds=covar_stds[ts],
+                embedding=embed_mu,
             )
 
             val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
@@ -230,65 +254,35 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}"
                                                                                            f", sigma_v={sigma_v:.4f}")
 
-        #-------------------------------------------------------------------------#
-        # fig, ax1 = plt.subplots()
-        #
-        # # Set title for the plot
-        # ax1.set_title('Validation Metrics', fontsize=16)
-        #
-        # # Plot MSE on primary y-axis
-        # ax1.set_xlabel('Epoch')
-        # ax1.set_ylabel('MSE', color='steelblue')
-        # ax1.plot(mses_val, color='steelblue', label='MSE')
-        # ax1.tick_params(axis='y', labelcolor='steelblue')
-        #
-        # # Plot Log Likelihood on secondary y-axis
-        # ax2 = ax1.twinx()
-        # ax2.set_ylabel('Log Likelihood', color='indianred')
-        # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-        # ax2.tick_params(axis='y', labelcolor='indianred')
-        #
-        # # Adjust layout to make room for the title and legends
-        # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-        #
-        # # Save the figure
-        # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
-        # plt.close(fig)
-        #-------------------------------------------------------------------------#
-        # create a directory to save the model
-        if not os.path.exists("best_model/"):
-            os.makedirs("best_model/")
-
         # early-stopping
         if early_stopping_criteria == 'mse':
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net.save_csv("best_model/")
-                # net_optim = net
+                net_optim = net.get_state_dict()
         elif early_stopping_criteria == 'log_lik':
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net.save_csv("best_model/")
-                # net_optim = net
+                net_optim = net.get_state_dict()
         if epoch - epoch_optim > patience:
             break
 
         # shuffle ts_idx
         np.random.shuffle(ts_idx)
-    # -------------------------------------------------------------------------#
+
     # save validation metrics into csv
     df = np.array([mses_val, ll_val]).T
     np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
-    # -------------------------------------------------------------------------#
-    net.load_csv("best_model/")  # load optimal net
-    shutil.rmtree("best_model/") # remove the directory
 
     # save the model
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
+
+    # save the embeddings
+    np.savetxt(out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=",")
+    np.savetxt(out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=",")
 
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
@@ -309,7 +303,6 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
             ts_idx=ts,
             # x_mean=mean_train[ts],
             # x_std=std_train[ts],
-            # idx_as_feature=True,
             time_covariates=['hour_of_day', 'day_of_week'],
             global_scale='deepAR',
             scale_i=factors[ts],
@@ -326,14 +319,14 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
         y_test = []
         x_test = []
 
-        # net = net_optim
+        net.load_state_dict(net_optim)  # load optimal net
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
             RW_idx = RW_idx_ % rolling_window
             if RW_idx > 0:
-                x[-RW_idx * num_features::num_features] = mu_preds[-RW_idx:]
+                x[-RW_idx * (num_features + embedding_dim)::(num_features + embedding_dim)] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)
@@ -393,7 +386,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 2, lstm_n
 
     # rename the directory
     out_dir_ = ("david/output/electricity_" + str(epoch_optim) + "_"
-                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1_ar_AFR")
+                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1")
     os.rename(out_dir, out_dir_)
 
 
