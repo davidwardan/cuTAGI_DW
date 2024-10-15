@@ -11,103 +11,29 @@ from pytagi import exponential_scheduler
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 
 from examples.data_loader import GlobalTimeSeriesDataloader
+from examples.embedding import *
 
 # Add the 'build' directory to sys.path in one line
 sys.path.append(
     os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "build"))
 )
 
-
-class TimeSeriesEmbeddings:
-    """
-    Class to handle embedding operations with mean and variance.
-    """
-
-    def __init__(self, embedding_dim: tuple, encoding_type: str = "normal"):
-        self.embedding_dim = embedding_dim
-        if encoding_type == "normal":
-            self.mu_embedding = np.random.randn(*embedding_dim)
-            self.var_embedding = np.full(embedding_dim, 1.0)
-        elif encoding_type == "onehot":
-            epsilon = 1e-6
-            self.mu_embedding = np.full(embedding_dim, epsilon)
-            np.fill_diagonal(self.mu_embedding, 1.0)
-            self.var_embedding = np.ones(embedding_dim)
-        else:
-            raise ValueError("Encoding type not supported.")
-
-    def update(self, idx: int, mu_delta: np.ndarray, var_delta: np.ndarray):
-        self.mu_embedding[idx] = self.mu_embedding[idx] + mu_delta
-        self.var_embedding[idx] = self.var_embedding[idx] + var_delta
-
-    def get_embedding(self, idx: int) -> tuple:
-        return self.mu_embedding[idx], self.var_embedding[idx]
-
-
-# TODO: Create a EmbeddingHandler class to handle the embeddings (build, reduce, input)
-def build_vector(x: int, num_features_len: int, embedding_dim: int) -> np.ndarray:
-    vector = np.zeros(x)
-    cycle_length = num_features_len + embedding_dim
-
-    # Iterate through the vector in steps of the cycle length
-    for i in range(0, x, cycle_length):
-        # Find the starting position of the embedding section in the current cycle
-        embedding_start = i + num_features_len
-
-        # Ensure the embedding section doesn't go out of bounds
-        if embedding_start < x:
-            # Set the values of the embedding section to ones
-            end_position = min(embedding_start + embedding_dim, x)
-            vector[embedding_start:end_position] = np.ones(end_position - embedding_start)
-
-    return vector
-
-
-def reduce_vector(x: np.ndarray, vector: np.ndarray, embedding_dim: int) -> np.ndarray:
-    x = (x + 1) * vector
-    x = x[x != 0] - 1  # remove zeros and reset index
-    return x.reshape(-1, embedding_dim)
-
-
-def input_embeddings(x, embeddings, num_features, embedding_dim):
-    """
-    Reads embeddings into the input vector.
-    """
-    x_var = x.copy()
-    counter = 0
-    last_idx = 0
-
-    for item in x:
-        if counter % num_features == 0 and counter != 0 and counter + last_idx < len(x):
-            idx = int(x[counter + last_idx])
-            embed_x, embed_var = embeddings.get_embedding(idx)
-            (x[counter + last_idx:counter + last_idx + embedding_dim],
-             x_var[counter + last_idx:counter + last_idx + embedding_dim]) = (embed_x.tolist(),
-                                                                              embed_var.tolist())
-            last_idx = counter + embedding_dim + last_idx
-            counter = 0
-        else:
-            counter += 1
-
-    return np.array(x, dtype=np.float32), np.array(x_var, dtype=np.float32)
-
-
-def main(num_epochs: int = 1, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
-    embedding_dim = 2  # dimension of the embedding
-    nb_ts = 10  # for electricity 370 and 963 for traffic
+    embedding_dim = 5  # dimension of the embedding
+    nb_ts = 963  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
     output_col = [0]
     num_features = 3
-    input_seq_len = 5
+    input_seq_len = 24
     output_seq_len = 1
     seq_stride = 1
-    rolling_window = 5  # for rolling window predictions in the test set
+    rolling_window = 24  # for rolling window predictions in the test set
     embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
 
     # Network
@@ -117,7 +43,7 @@ def main(num_epochs: int = 1, batch_size: int = 64, sigma_v: float = 0.5, lstm_n
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
-    # net.to_device("cuda")
+    net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
@@ -150,7 +76,7 @@ def main(num_epochs: int = 1, batch_size: int = 64, sigma_v: float = 0.5, lstm_n
     covar_means = [0] * nb_ts
     covar_stds = [1.0] * nb_ts
 
-    w_dir = '/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW'
+    w_dir =  '.' #'/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW'
 
     for epoch in pbar:
 
@@ -179,7 +105,7 @@ def main(num_epochs: int = 1, batch_size: int = 64, sigma_v: float = 0.5, lstm_n
             covar_means[ts] = train_dtl.covariate_means
             covar_stds[ts] = train_dtl.covariate_stds
 
-            batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False)
+            batch_iter = train_dtl.create_data_loader(batch_size)
 
             mse = []
             for x, y in batch_iter:
@@ -319,6 +245,10 @@ def main(num_epochs: int = 1, batch_size: int = 64, sigma_v: float = 0.5, lstm_n
 
     # save the model
     net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
+
+    # save the embeddings
+    np.savetxt(out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=",")
+    np.savetxt(out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=",")
 
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
