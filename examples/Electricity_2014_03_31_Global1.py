@@ -55,7 +55,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
     net.input_state_update = True
 
     # Create output directory
-    out_dir = ("david/output/electricity_" + str(num_epochs)
+    out_dir = ("dw_out/electricity_" + str(num_epochs)
                + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1")
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -70,7 +70,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
     log_lik_optim = -1E100
     mse_optim = 1E100
     epoch_optim = 1
-    early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
+    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
@@ -222,9 +222,9 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
             x_val = np.array(x_val)
 
             # Unscale the predictions
-            mu_preds = mu_preds * factors[ts]
-            std_preds = std_preds * factors[ts]
-            y_val = y_val * factors[ts]
+            # mu_preds = mu_preds * factors[ts]
+            # std_preds = std_preds * factors[ts]
+            # y_val = y_val * factors[ts]
 
             # mu_preds = normalizer.unstandardize(
             #     mu_preds, mean_train[ts], std_train[ts]
@@ -291,6 +291,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
     SytestPd = np.full((168, nb_ts), np.nan)
     ytestTr = np.full((168, nb_ts), np.nan)
     for ts in pbar:
+        embed_mu, embed_var = embeddings.get_embedding(ts)
 
         test_dtl = GlobalTimeSeriesDataloader(
             x_file="data/electricity/electricity_2014_03_31_test.csv",
@@ -309,6 +310,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
+            embedding=embed_mu,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -364,8 +366,6 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
     np.savetxt(out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
     np.savetxt(out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
 
-    # -------------------------------------------------------------------------#
-
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)
@@ -385,7 +385,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
         f.write(f'global_scale:    {test_dtl.global_scale}\n')
 
     # rename the directory
-    out_dir_ = ("david/output/electricity_" + str(epoch_optim) + "_"
+    out_dir_ = ("dw_out/electricity_" + str(epoch_optim) + "_"
                 + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1")
     os.rename(out_dir, out_dir_)
 
