@@ -673,13 +673,6 @@ class GlobalTimeSeriesDataloader:
                     quarter_of_year = (month_of_year - 1) // 3 + 1
                     x = np.concatenate((x, quarter_of_year), axis=1)
 
-        # TODO: add index of feature as one-hot encoding
-        # Add time series index as a feature
-        if self.idx_as_feature:
-            idx_to_add = np.zeros((x.shape[0], 1))
-            idx_to_add[:, 0] = self.ts_idx
-            x = np.concatenate((x, idx_to_add), axis=1)
-
         # standardize covariates
         if self.scale_covariates is True:
             # if self.global_scale == 'deepAR':
