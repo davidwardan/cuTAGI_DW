@@ -5,18 +5,21 @@ class TimeSeriesEmbeddings:
     Class to handle embedding operations with mean and variance.
     """
 
-    def __init__(self, embedding_dim: tuple, encoding_type: str = "normal"):
+    def __init__(self, embedding_dim: tuple, encoding_type: str = None):
         self.embedding_dim = embedding_dim
         if encoding_type == "normal":
             self.mu_embedding = np.random.randn(*embedding_dim)
             self.var_embedding = np.full(embedding_dim, 1.0)
         elif encoding_type == "onehot":
             epsilon = 1e-6
+            if embedding_dim[0] != embedding_dim[1]:
+                raise ValueError("Dimensions of the embedding must be equal.")
             self.mu_embedding = np.full(embedding_dim, epsilon)
             np.fill_diagonal(self.mu_embedding, 1.0)
             self.var_embedding = np.ones(embedding_dim)
         else:
-            raise ValueError("Encoding type not supported.")
+            self.mu_embedding = np.full(embedding_dim, 1/(embedding_dim[1]))
+            self.var_embedding = np.ones(embedding_dim)
 
     def update(self, idx: int, mu_delta: np.ndarray, var_delta: np.ndarray):
         self.mu_embedding[idx] = self.mu_embedding[idx] + mu_delta
