@@ -22,13 +22,18 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_nodes: int = 40):
+def main(
+    num_epochs: int = 100,
+    batch_size: int = 32,
+    sigma_v: float = 2,
+    lstm_nodes: int = 40,
+):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
-    embedding_dim = 5  # dimension of the embedding
+    embedding_dim = 10  # dimension of the embedding
     nb_ts = 370  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
@@ -55,8 +60,17 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
     net.input_state_update = True
 
     # Create output directory
-    out_dir = ("dw_out/electricity_" + str(num_epochs)
-               + "_" + str(batch_size) + "_" + str(sigma_v) + "_" + str(lstm_nodes) + "_method1")
+    out_dir = (
+        "dw_out/electricity_"
+        + str(num_epochs)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(sigma_v)
+        + "_"
+        + str(lstm_nodes)
+        + "_method1"
+    )
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -67,10 +81,10 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
     ll_val = []  # to save log likelihood for plotting
 
     # options for early stopping
-    log_lik_optim = -1E100
-    mse_optim = 1E100
+    log_lik_optim = -1e100
+    mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
+    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
@@ -88,9 +102,9 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.1, decaying_factor=0.7, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.2, decaying_factor=0.99, curr_iter=epoch
         )
-        var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
+        var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
@@ -102,8 +116,8 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
-                time_covariates=['hour_of_day', 'day_of_week'],
-                global_scale='deepAR',
+                time_covariates=["hour_of_day", "day_of_week"],
+                global_scale="deepAR",
                 scale_covariates=True,
                 embedding_dim=embedding_dim,
             )
@@ -117,7 +131,6 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
             # store covariate means and stds
             covar_means[ts] = train_dtl.covariate_means
             covar_stds[ts] = train_dtl.covariate_stds
-
 
             batch_iter = train_dtl.create_data_loader(batch_size)
 
@@ -173,7 +186,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
                 mse.append(metric.mse(m_pred, y))
             mses.append(np.mean(mse))
 
-        #-------------------------------------------------------------------------#
+        # -------------------------------------------------------------------------#
         # validation
 
         # define validation progress inside the training progress
@@ -191,8 +204,8 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
                 ts_idx=ts,
                 # x_mean=mean_train[ts],
                 # x_std=std_train[ts],
-                time_covariates=['hour_of_day', 'day_of_week'],
-                global_scale='deepAR',
+                time_covariates=["hour_of_day", "day_of_week"],
+                global_scale="deepAR",
                 scale_i=factors[ts],
                 scale_covariates=True,
                 covariate_means=covar_means[ts],
@@ -212,7 +225,7 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
                 m_pred, v_pred = net(x)
 
                 mu_preds.extend(m_pred)
-                var_preds.extend(v_pred + sigma_v ** 2)
+                var_preds.extend(v_pred + sigma_v**2)
                 x_val.extend(x)
                 y_val.extend(y)
 
@@ -251,17 +264,20 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
         mses_val.append(mse_val)
         ll_val.append(log_lik_val)
 
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}"
-                                                                                           f", sigma_v={sigma_v:.4f}")
+        pbar.set_postfix(
+            mse=f"{np.mean(mses):.4f}",
+            mse_val=f"{mse_val:.4f}",
+            log_lik_val=f"{log_lik_val:.4f}" f", sigma_v={sigma_v:.4f}",
+        )
 
         # early-stopping
-        if early_stopping_criteria == 'mse':
+        if early_stopping_criteria == "mse":
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
                 net_optim = net.get_state_dict()
-        elif early_stopping_criteria == 'log_lik':
+        elif early_stopping_criteria == "log_lik":
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
@@ -281,8 +297,12 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
 
     # save the embeddings
-    np.savetxt(out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=",")
-    np.savetxt(out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=",")
+    np.savetxt(
+        out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=","
+    )
 
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
@@ -304,8 +324,8 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
             ts_idx=ts,
             # x_mean=mean_train[ts],
             # x_std=std_train[ts],
-            time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
+            time_covariates=["hour_of_day", "day_of_week"],
+            global_scale="deepAR",
             scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
@@ -328,13 +348,16 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
             # Rolling window predictions
             RW_idx = RW_idx_ % rolling_window
             if RW_idx > 0:
-                x[-RW_idx * (num_features + embedding_dim)::(num_features + embedding_dim)] = mu_preds[-RW_idx:]
+                x[
+                    -RW_idx
+                    * (num_features + embedding_dim) :: (num_features + embedding_dim)
+                ] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v ** 2)
+            var_preds.extend(v_pred + sigma_v**2)
             x_test.extend(x)
             y_test.extend(y)
 
@@ -362,9 +385,15 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(out_dir + "/electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    np.savetxt(out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
-    np.savetxt(out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
+    np.savetxt(
+        out_dir + "/electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=","
+    )
 
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
@@ -374,19 +403,28 @@ def main(num_epochs: int = 100, batch_size: int = 32, sigma_v: float = 2, lstm_n
 
     # save metrics into a text file
     with open(out_dir + "/electricity_2014_03_31_metrics.txt", "w") as f:
-        f.write(f'ND/p50:    {p50_tagi}\n')
-        f.write(f'p90:    {p90_tagi}\n')
-        f.write(f'RMSE:    {RMSE_tagi}\n')
+        f.write(f"ND/p50:    {p50_tagi}\n")
+        f.write(f"p90:    {p90_tagi}\n")
+        f.write(f"RMSE:    {RMSE_tagi}\n")
         # f.write(f'MASE:    {MASE_tagi}\n')
-        f.write(f'Epoch:    {epoch_optim}\n')
-        f.write(f'Batch size:    {batch_size}\n')
-        f.write(f'Sigma_v:    {sigma_v}\n')
-        f.write(f'LSTM nodes:    {lstm_nodes}\n')
-        f.write(f'global_scale:    {test_dtl.global_scale}\n')
+        f.write(f"Epoch:    {epoch_optim}\n")
+        f.write(f"Batch size:    {batch_size}\n")
+        f.write(f"Sigma_v:    {sigma_v}\n")
+        f.write(f"LSTM nodes:    {lstm_nodes}\n")
+        f.write(f"global_scale:    {test_dtl.global_scale}\n")
 
     # rename the directory
-    out_dir_ = ("dw_out/electricity_" + str(epoch_optim) + "_"
-                + str(batch_size) + "_" + str(round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1")
+    out_dir_ = (
+        "dw_out/electricity_"
+        + str(epoch_optim)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(round(sigma_v, 3))
+        + "_"
+        + str(lstm_nodes)
+        + "_method1"
+    )
     os.rename(out_dir, out_dir_)
 
 
