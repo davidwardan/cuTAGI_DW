@@ -4,7 +4,10 @@ from pytagi.nn import Linear, OutputUpdater, Sequential
 
 # Define function to calculate the posterior
 def calc_posterior(x, var_x, y, var_y):
-    return x + (var_x / (var_x + var_y)) * (y - x), (1 - var_x / (var_x + var_y)) * var_x
+    return (
+        x + (var_x / (var_x + var_y)) * (y - x),
+        (1 - var_x / (var_x + var_y)) * var_x,
+    )
 
 
 def main():
@@ -20,17 +23,27 @@ def main():
     # Calculate the posterior using the network
     net = Sequential(
         Linear(1, 1),
+        # Linear(1, 1),
     )
+    net.to_device("cuda")
     net.input_state_update = True
     out_updater = OutputUpdater(net.device)
 
     # Initialize the network with w=1, b=0, var_w=0, var_b=0
     state_dict = net.get_state_dict()
     for key in state_dict.keys():
-        state_dict[key]["mu_w"] = np.ones_like(state_dict[key]["mu_w"])  # reset the weights
-        state_dict[key]["mu_b"] = np.zeros_like(state_dict[key]["mu_b"])  # reset the bias
-        state_dict[key]["var_w"] = np.zeros_like(state_dict[key]["var_w"])  # variance of the weights = 0
-        state_dict[key]["var_b"] = np.zeros_like(state_dict[key]["var_b"])  # variance of the bias = 0
+        state_dict[key]["mu_w"] = np.ones_like(
+            state_dict[key]["mu_w"]
+        )  # reset the weights
+        state_dict[key]["mu_b"] = np.zeros_like(
+            state_dict[key]["mu_b"]
+        )  # reset the bias
+        state_dict[key]["var_w"] = np.zeros_like(
+            state_dict[key]["var_w"]
+        )  # variance of the weights = 0
+        state_dict[key]["var_b"] = np.zeros_like(
+            state_dict[key]["var_b"]
+        )  # variance of the bias = 0
     net.load_state_dict(state_dict)
 
     # Forward pass

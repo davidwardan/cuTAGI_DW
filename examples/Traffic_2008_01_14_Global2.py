@@ -19,21 +19,26 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm_nodes: int = 40):
+def main(
+    num_epochs: int = 100,
+    batch_size: int = 64,
+    sigma_v: float = 0.5,
+    lstm_nodes: int = 40,
+):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
     """
 
     # Dataset
-    nb_ts = 1 # for electricity 370 and 963 for traffic
+    nb_ts = 1  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 3
     input_seq_len = 24
     output_seq_len = 1
     seq_stride = 1
-    rolling_window = 24 # for rolling window predictions in the test set
+    rolling_window = 24  # for rolling window predictions in the test set
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
@@ -49,7 +54,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            time_covariates=['hour_of_day', 'day_of_week'],
+            time_covariates=["hour_of_day", "day_of_week"],
             scale_covariates=True,
             ts_idx=ts,
             # idx_as_feature=True,
@@ -67,7 +72,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            time_covariates=['hour_of_day', 'day_of_week'],
+            time_covariates=["hour_of_day", "day_of_week"],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
@@ -94,8 +99,17 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = ("david/output/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
-               + "_" + str(lstm_nodes) + "_method2")
+    out_dir = (
+        "david/output/traffic_"
+        + str(num_epochs)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(sigma_v)
+        + "_"
+        + str(lstm_nodes)
+        + "_method2"
+    )
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -106,10 +120,10 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
     ll_val = []  # to save log likelihood for plotting
 
     # options for early stopping
-    log_lik_optim = -1E100
-    mse_optim = 1E100
+    log_lik_optim = -1e100
+    mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
+    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
@@ -121,7 +135,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
         sigma_v = exponential_scheduler(
             curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
         )
-        var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
+        var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for x, y in batch_iter:
             # Feed forward
@@ -157,7 +171,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v ** 2)
+            var_preds.extend(v_pred + sigma_v**2)
             x_val.extend(x)
             y_val.extend(y)
 
@@ -177,22 +191,26 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
         ll_val.append(log_lik_val)
 
         # Progress bar
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}",
-                         sigma_v=f"{sigma_v:.4f}")
+        pbar.set_postfix(
+            mse=f"{np.mean(mses):.4f}",
+            mse_val=f"{mse_val:.4f}",
+            log_lik_val=f"{log_lik_val:.4f}",
+            sigma_v=f"{sigma_v:.4f}",
+        )
 
         # create a directory to save the model
         if not os.path.exists("best_model1/"):
             os.makedirs("best_model1/")
 
         # early-stopping
-        if early_stopping_criteria == 'mse':
+        if early_stopping_criteria == "mse":
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
                 net.save_csv("best_model1/")
                 # net_optim = net
-        elif early_stopping_criteria == 'log_lik':
+        elif early_stopping_criteria == "log_lik":
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
@@ -204,28 +222,28 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
 
         print(type(net_optim))
     # -------------------------------------------------------------------------#
-        # fig, ax1 = plt.subplots()
+    # fig, ax1 = plt.subplots()
 
-        # # Set title for the plot
-        # ax1.set_title('Validation Metrics', fontsize=16)
+    # # Set title for the plot
+    # ax1.set_title('Validation Metrics', fontsize=16)
 
-        # # Plot MSE on primary y-axis
-        # ax1.set_xlabel('Epoch')
-        # ax1.set_ylabel('MSE', color='steelblue')
-        # ax1.plot(mses_val, color='steelblue', label='MSE')
-        # ax1.tick_params(axis='y', labelcolor='steelblue')
+    # # Plot MSE on primary y-axis
+    # ax1.set_xlabel('Epoch')
+    # ax1.set_ylabel('MSE', color='steelblue')
+    # ax1.plot(mses_val, color='steelblue', label='MSE')
+    # ax1.tick_params(axis='y', labelcolor='steelblue')
 
-        # # Plot Log Likelihood on secondary y-axis
-        # ax2 = ax1.twinx()
-        # ax2.set_ylabel('Log Likelihood', color='indianred')
-        # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-        # ax2.tick_params(axis='y', labelcolor='indianred')
+    # # Plot Log Likelihood on secondary y-axis
+    # ax2 = ax1.twinx()
+    # ax2.set_ylabel('Log Likelihood', color='indianred')
+    # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
+    # ax2.tick_params(axis='y', labelcolor='indianred')
 
-        # # Adjust layout to make room for the title and legends
-        # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    # # Adjust layout to make room for the title and legends
+    # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-        # # Save the figure
-        # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
+    # # Save the figure
+    # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
     # -------------------------------------------------------------------------#
     # save validation metrics into csv
     df = np.array([mses_val, ll_val]).T
@@ -233,7 +251,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
     # -------------------------------------------------------------------------#
     # load the optimal net
     net.load_csv("best_model1/")  # load optimal net
-    shutil.rmtree("best_model1/") # remove the directory
+    shutil.rmtree("best_model1/")  # remove the directory
 
     # save the model
     net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
@@ -254,7 +272,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            time_covariates=['hour_of_day', 'day_of_week'],
+            time_covariates=["hour_of_day", "day_of_week"],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
@@ -277,13 +295,13 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
             # Rolling window predictions
             RW_idx = RW_idx_ % rolling_window
             if RW_idx > 0:
-                x[-RW_idx * num_features::num_features] = mu_preds[-RW_idx:]
+                x[-RW_idx * num_features :: num_features] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v ** 2)
+            var_preds.extend(v_pred + sigma_v**2)
             x_test.extend(x)
             y_test.extend(y)
 
@@ -297,9 +315,15 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
+    np.savetxt(
+        out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=","
+    )
 
     # -------------------------------------------------------------------------#
     # calculate metrics
@@ -310,25 +334,40 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 0.5, lstm
 
     # save metrics into a text file
     with open(out_dir + "/metrics.txt", "w") as f:
-        f.write(f'ND/p50:    {p50_tagi}\n')
-        f.write(f'p90:    {p90_tagi}\n')
-        f.write(f'RMSE:    {RMSE_tagi}\n')
-        f.write(f'Epoch:    {epoch_optim}\n')
-        f.write(f'Batch size:    {batch_size}\n')
-        f.write(f'Sigma_v:    {sigma_v}\n')
-        f.write(f'LSTM nodes:    {lstm_nodes}\n')
+        f.write(f"ND/p50:    {p50_tagi}\n")
+        f.write(f"p90:    {p90_tagi}\n")
+        f.write(f"RMSE:    {RMSE_tagi}\n")
+        f.write(f"Epoch:    {epoch_optim}\n")
+        f.write(f"Batch size:    {batch_size}\n")
+        f.write(f"Sigma_v:    {sigma_v}\n")
+        f.write(f"LSTM nodes:    {lstm_nodes}\n")
         # f.write(f'MASE:    {MASE_tagi}\n')
 
     # rename the directory
-    out_dir_ = "david/output/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_seed3"
+    out_dir_ = (
+        "david/output/traffic_"
+        + str(epoch_optim)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(round(sigma_v, 3))
+        + "_"
+        + str(lstm_nodes)
+        + "_method2_seed3"
+    )
     os.rename(out_dir, out_dir_)
 
 
 def concat_ts_sample(data, data_add):
-    x_combined = np.concatenate((data.dataset["value"][0], data_add.dataset["value"][0]), axis=0)
-    y_combined = np.concatenate((data.dataset["value"][1], data_add.dataset["value"][1]), axis=0)
-    time_combined = np.concatenate((data.dataset["date_time"], data_add.dataset["date_time"]))
+    x_combined = np.concatenate(
+        (data.dataset["value"][0], data_add.dataset["value"][0]), axis=0
+    )
+    y_combined = np.concatenate(
+        (data.dataset["value"][1], data_add.dataset["value"][1]), axis=0
+    )
+    time_combined = np.concatenate(
+        (data.dataset["date_time"], data_add.dataset["date_time"])
+    )
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
     return data
