@@ -20,7 +20,12 @@ sys.path.append(
 )
 
 
-def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_nodes: int = 40):
+def main(
+    num_epochs: int = 100,
+    batch_size: int = 64,
+    sigma_v: float = 1,
+    lstm_nodes: int = 40,
+):
     """
     Run training for a time-series forecasting global model.
     Training is done on shuffling batches from all series.
@@ -54,8 +59,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
+            time_covariates=["hour_of_day", "day_of_week"],
+            global_scale="deepAR",
             idx_as_feature=True,
             # scale_covariates=True,
         )
@@ -81,8 +86,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             ts_idx=ts,
             # x_mean=mean_train[ts],
             # x_std=std_train[ts],
-            time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
+            time_covariates=["hour_of_day", "day_of_week"],
+            global_scale="deepAR",
             scale_i=factors[ts],
             # scale_covariates=True,
             # covariate_means=covar_means[ts],
@@ -111,8 +116,17 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
     out_updater = OutputUpdater(net.device)
 
     # Create output directory
-    out_dir = ("david/output/electricity_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
-               + "_" + str(lstm_nodes) + "_method2_gs")
+    out_dir = (
+        "david/output/electricity_"
+        + str(num_epochs)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(sigma_v)
+        + "_"
+        + str(lstm_nodes)
+        + "_method2_gs"
+    )
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -126,24 +140,30 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
     ll_val = []  # to save log likelihood for plotting
 
     # options for early stopping
-    log_lik_optim = -1E100
-    mse_optim = 1E100
+    log_lik_optim = -1e100
+    mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = 'log_lik'  # 'log_lik' or 'mse'
+    early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
 
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True, weighted_sampling=True, weights=weights, num_samples=500000)
+        batch_iter = train_dtl.create_data_loader(
+            batch_size,
+            shuffle=True,
+            weighted_sampling=True,
+            weights=weights,
+            num_samples=500000,
+        )
         # batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
             curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
         )
-        var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
+        var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for x, y in batch_iter:
             # Feed forward
@@ -192,7 +212,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v ** 2)
+            var_preds.extend(v_pred + sigma_v**2)
             x_val.extend(x)
             y_val.extend(y)
 
@@ -226,7 +246,12 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
         ll_val.append(log_lik_val)
 
         # Progress bar
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}", sigma_v=f"{sigma_v:.4f}")
+        pbar.set_postfix(
+            mse=f"{np.mean(mses):.4f}",
+            mse_val=f"{mse_val:.4f}",
+            log_lik_val=f"{log_lik_val:.4f}",
+            sigma_v=f"{sigma_v:.4f}",
+        )
         # pbar.set_postfix(mse=f"{np.mean(mses):.4f}", sigma_v=f"{sigma_v:.4f}")
 
         # create a directory to save the model
@@ -234,14 +259,14 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             os.makedirs("best_model/")
 
         # early-stopping
-        if early_stopping_criteria == 'mse':
+        if early_stopping_criteria == "mse":
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
                 net.save_csv("best_model/")
                 # net_optim = net
-        elif early_stopping_criteria == 'log_lik':
+        elif early_stopping_criteria == "log_lik":
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
@@ -251,7 +276,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
         if epoch - epoch_optim > patience:
             break
 
-    #-------------------------------------------------------------------------#
+    # -------------------------------------------------------------------------#
     # fig, ax1 = plt.subplots()
     #
     # # Set title for the plot
@@ -281,7 +306,7 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
     # -------------------------------------------------------------------------#
     # load optimal model
     net.load_csv("best_model/")  # load optimal net
-    shutil.rmtree("best_model/") # remove the directory
+    shutil.rmtree("best_model/")  # remove the directory
 
     # save the model
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
@@ -306,8 +331,8 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             ts_idx=ts,
             # x_mean=mean_train[ts],
             # x_std=std_train[ts],
-            time_covariates=['hour_of_day', 'day_of_week'],
-            global_scale='deepAR',
+            time_covariates=["hour_of_day", "day_of_week"],
+            global_scale="deepAR",
             scale_i=factors[ts],
             # scale_covariates=True,
             # covariate_means=covar_means[ts],
@@ -330,13 +355,13 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
             # Rolling window predictions
             RW_idx = RW_idx_ % rolling_window
             if RW_idx > 0:
-                x[-RW_idx * num_features::num_features] = mu_preds[-RW_idx:]
+                x[-RW_idx * num_features :: num_features] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v ** 2)
+            var_preds.extend(v_pred + sigma_v**2)
             x_test.extend(x)
             y_test.extend(y)
 
@@ -363,9 +388,15 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(out_dir + "/electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    np.savetxt(out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
-    np.savetxt(out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
+    np.savetxt(
+        out_dir + "/electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=","
+    )
 
     # -------------------------------------------------------------------------#
 
@@ -377,35 +408,54 @@ def main(num_epochs: int = 100, batch_size: int = 64, sigma_v: float = 1, lstm_n
 
     # save metrics into a text file
     with open(out_dir + "/electricity_2014_03_31_metrics.txt", "w") as f:
-        f.write(f'ND/p50:    {p50_tagi}\n')
-        f.write(f'p90:    {p90_tagi}\n')
-        f.write(f'RMSE:    {RMSE_tagi}\n')
+        f.write(f"ND/p50:    {p50_tagi}\n")
+        f.write(f"p90:    {p90_tagi}\n")
+        f.write(f"RMSE:    {RMSE_tagi}\n")
         # f.write(f'MASE:    {MASE_tagi}\n')
-        f.write(f'Epoch:    {epoch_optim}\n')
-        f.write(f'Batch size:    {batch_size}\n')
-        f.write(f'Sigma_v:    {sigma_v}\n')
-        f.write(f'LSTM nodes:    {lstm_nodes}\n')
-        f.write(f'global_scale:    {test_dtl.global_scale}\n')
+        f.write(f"Epoch:    {epoch_optim}\n")
+        f.write(f"Batch size:    {batch_size}\n")
+        f.write(f"Sigma_v:    {sigma_v}\n")
+        f.write(f"LSTM nodes:    {lstm_nodes}\n")
+        f.write(f"global_scale:    {test_dtl.global_scale}\n")
 
     # rename the directory
-    out_dir_ = "david/output/electricity_" + str(epoch) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method2_benchmark"
+    out_dir_ = (
+        "david/output/electricity_"
+        + str(epoch)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(round(sigma_v, 3))
+        + "_"
+        + str(lstm_nodes)
+        + "_method2_benchmark"
+    )
     os.rename(out_dir, out_dir_)
 
 
 def concat_ts_sample(data, data_add):
     """Concatenate two time series samples"""
-    x_combined = np.concatenate((data.dataset["value"][0], data_add.dataset["value"][0]), axis=0)
-    y_combined = np.concatenate((data.dataset["value"][1], data_add.dataset["value"][1]), axis=0)
-    time_combined = np.concatenate((data.dataset["date_time"], data_add.dataset["date_time"]))
-    weights_combined = np.concatenate((data.dataset["weights"], data_add.dataset["weights"]))
+    x_combined = np.concatenate(
+        (data.dataset["value"][0], data_add.dataset["value"][0]), axis=0
+    )
+    y_combined = np.concatenate(
+        (data.dataset["value"][1], data_add.dataset["value"][1]), axis=0
+    )
+    time_combined = np.concatenate(
+        (data.dataset["date_time"], data_add.dataset["date_time"])
+    )
+    weights_combined = np.concatenate(
+        (data.dataset["weights"], data_add.dataset["weights"])
+    )
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
     data.dataset["weights"] = weights_combined
     return data
 
 
-def random_weighted_sampling(data: np.ndarray, weights: np.ndarray, num_samples: int) -> np.ndarray:
+def random_weighted_sampling(
+    data: np.ndarray, weights: np.ndarray, num_samples: int
+) -> np.ndarray:
     """Random-weighted sampling"""
     return np.random.choice(data, num_samples, p=weights)
 

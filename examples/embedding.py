@@ -1,5 +1,6 @@
 import numpy as np
 
+
 class TimeSeriesEmbeddings:
     """
     Class to handle embedding operations with mean and variance.
@@ -8,7 +9,7 @@ class TimeSeriesEmbeddings:
     def __init__(self, embedding_dim: tuple, encoding_type: str = None):
         self.embedding_dim = embedding_dim
         if encoding_type == "normal":
-            self.mu_embedding = np.random.randn(*embedding_dim)
+            self.mu_embedding = np.random.randn(*embedding_dim) / (embedding_dim[1])
             self.var_embedding = np.full(embedding_dim, 1.0)
         elif encoding_type == "onehot":
             epsilon = 1e-6
@@ -18,7 +19,7 @@ class TimeSeriesEmbeddings:
             np.fill_diagonal(self.mu_embedding, 1.0)
             self.var_embedding = np.ones(embedding_dim)
         else:
-            self.mu_embedding = np.full(embedding_dim, 1/(embedding_dim[1]))
+            self.mu_embedding = np.full(embedding_dim, 1 / (embedding_dim[1]))
             self.var_embedding = np.ones(embedding_dim)
 
     def update(self, idx: int, mu_delta: np.ndarray, var_delta: np.ndarray):
@@ -43,7 +44,9 @@ def build_vector(x: int, num_features_len: int, embedding_dim: int) -> np.ndarra
         if embedding_start < x:
             # Set the values of the embedding section to ones
             end_position = min(embedding_start + embedding_dim, x)
-            vector[embedding_start:end_position] = np.ones(end_position - embedding_start)
+            vector[embedding_start:end_position] = np.ones(
+                end_position - embedding_start
+            )
 
     return vector
 
@@ -66,9 +69,10 @@ def input_embeddings(x, embeddings, num_features, embedding_dim):
         if counter % num_features == 0 and counter != 0 and counter + last_idx < len(x):
             idx = int(x[counter + last_idx])
             embed_x, embed_var = embeddings.get_embedding(idx)
-            (x[counter + last_idx:counter + last_idx + embedding_dim],
-             x_var[counter + last_idx:counter + last_idx + embedding_dim]) = (embed_x.tolist(),
-                                                                              embed_var.tolist())
+            (
+                x[counter + last_idx : counter + last_idx + embedding_dim],
+                x_var[counter + last_idx : counter + last_idx + embedding_dim],
+            ) = (embed_x.tolist(), embed_var.tolist())
             last_idx = counter + embedding_dim + last_idx
             counter = 0
         else:

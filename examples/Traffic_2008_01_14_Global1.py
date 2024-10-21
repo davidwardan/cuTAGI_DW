@@ -18,7 +18,13 @@ sys.path.append(
     os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "build"))
 )
 
-def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm_nodes: int = 40):
+
+def main(
+    num_epochs: int = 150,
+    batch_size: int = 16,
+    sigma_v: float = 0.5,
+    lstm_nodes: int = 40,
+):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
@@ -51,8 +57,17 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
     net.input_state_update = True
 
     # Create an output directory
-    out_dir = ("dw_out/traffic_" + str(num_epochs) + "_" + str(batch_size) + "_" + str(sigma_v)
-               + "_" + str(lstm_nodes) + "_method1")
+    out_dir = (
+        "dw_out/traffic_"
+        + str(num_epochs)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(sigma_v)
+        + "_"
+        + str(lstm_nodes)
+        + "_method1"
+    )
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
@@ -63,10 +78,10 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
     ll_val = []  # to save log likelihood for plotting
 
     # options for early stopping
-    log_lik_optim = -1E100
-    mse_optim = 1E100
+    log_lik_optim = -1e100
+    mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = 'mse'  # 'log_lik' or 'mse'
+    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
     patience = 10
     global_mse = []
     global_log_lik = []
@@ -76,7 +91,7 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
     covar_means = [0] * nb_ts
     covar_stds = [1.0] * nb_ts
 
-    w_dir =  '.' #'/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW'
+    w_dir = "."  #'/Users/davidwardan/Library/CloudStorage/OneDrive-Personal/Projects/cuTAGI_DW'
 
     for epoch in pbar:
 
@@ -84,19 +99,20 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
         sigma_v = exponential_scheduler(
             curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
         )
-        var_y = np.full((batch_size * len(output_col),), sigma_v ** 2, dtype=np.float32)
+        var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for ts in ts_idx:
             train_dtl = GlobalTimeSeriesDataloader(
                 x_file=w_dir + "/data/traffic/traffic_2008_01_14_train.csv",
-                date_time_file=w_dir + "/data/traffic/traffic_2008_01_14_train_datetime.csv",
+                date_time_file=w_dir
+                + "/data/traffic/traffic_2008_01_14_train_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
-                time_covariates=['hour_of_day', 'day_of_week'],
+                time_covariates=["hour_of_day", "day_of_week"],
                 scale_covariates=True,
                 embedding_dim=embedding_dim,
             )
@@ -159,7 +175,7 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
                 mse.append(metric.mse(m_pred, y))
             mses.append(np.mean(mse))
 
-        #-------------------------------------------------------------------------#
+        # -------------------------------------------------------------------------#
         # validation
         # define validation progress inside the training progress
         for ts in ts_idx:
@@ -167,14 +183,15 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
 
             val_dtl = GlobalTimeSeriesDataloader(
                 x_file=w_dir + "/data/traffic/traffic_2008_01_14_val.csv",
-                date_time_file=w_dir + "/data/traffic/traffic_2008_01_14_val_datetime.csv",
+                date_time_file=w_dir
+                + "/data/traffic/traffic_2008_01_14_val_datetime.csv",
                 output_col=output_col,
                 input_seq_len=input_seq_len,
                 output_seq_len=output_seq_len,
                 num_features=num_features,
                 stride=seq_stride,
                 ts_idx=ts,
-                time_covariates=['hour_of_day', 'day_of_week'],
+                time_covariates=["hour_of_day", "day_of_week"],
                 scale_covariates=True,
                 covariate_means=covar_means[ts],
                 covariate_stds=covar_stds[ts],
@@ -193,7 +210,7 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
                 m_pred, v_pred = net(x)
 
                 mu_preds.extend(m_pred)
-                var_preds.extend(v_pred + sigma_v ** 2)
+                var_preds.extend(v_pred + sigma_v**2)
                 x_val.extend(x)
                 y_val.extend(y)
 
@@ -217,17 +234,21 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
         mses_val.append(mse_val)
         ll_val.append(log_lik_val)
 
-        pbar.set_postfix(mse=f"{np.mean(mses):.4f}", mse_val=f"{mse_val:.4f}", log_lik_val=f"{log_lik_val:.4f}",
-                         sigma_v=f"{sigma_v:.4f}")
+        pbar.set_postfix(
+            mse=f"{np.mean(mses):.4f}",
+            mse_val=f"{mse_val:.4f}",
+            log_lik_val=f"{log_lik_val:.4f}",
+            sigma_v=f"{sigma_v:.4f}",
+        )
 
         # early-stopping
-        if early_stopping_criteria == 'mse':
+        if early_stopping_criteria == "mse":
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
                 net_optim = net.get_state_dict()
-        elif early_stopping_criteria == 'log_lik':
+        elif early_stopping_criteria == "log_lik":
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
@@ -247,8 +268,12 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
     net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
 
     # save the embeddings
-    np.savetxt(out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=",")
-    np.savetxt(out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=",")
+    np.savetxt(
+        out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=","
+    )
 
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
@@ -268,7 +293,7 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            time_covariates=['hour_of_day', 'day_of_week'],
+            time_covariates=["hour_of_day", "day_of_week"],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
@@ -290,13 +315,16 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
             # Rolling window predictions
             RW_idx = RW_idx_ % rolling_window
             if RW_idx > 0:
-                x[-RW_idx * (num_features + embedding_dim)::(num_features + embedding_dim)] = mu_preds[-RW_idx:]
+                x[
+                    -RW_idx
+                    * (num_features + embedding_dim) :: (num_features + embedding_dim)
+                ] = mu_preds[-RW_idx:]
 
             # Prediction
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v ** 2)
+            var_preds.extend(v_pred + sigma_v**2)
             x_test.extend(x)
             y_test.extend(y)
 
@@ -310,9 +338,15 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=",")
-    np.savetxt(out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=",")
+    np.savetxt(
+        out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=","
+    )
+    np.savetxt(
+        out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=","
+    )
 
     # -------------------------------------------------------------------------#
     # calculate metrics
@@ -322,17 +356,26 @@ def main(num_epochs: int = 150, batch_size: int = 16, sigma_v: float = 0.5, lstm
 
     # save metrics into a text file
     with open(out_dir + "/metrics.txt", "w") as f:
-        f.write(f'ND/p50:    {p50_tagi}\n')
-        f.write(f'p90:    {p90_tagi}\n')
-        f.write(f'RMSE:    {RMSE_tagi}\n')
-        f.write(f'Epoch:    {epoch_optim}\n')
-        f.write(f'Batch size:    {batch_size}\n')
-        f.write(f'Sigma_v:    {sigma_v}\n')
-        f.write(f'LSTM nodes:    {lstm_nodes}\n')
+        f.write(f"ND/p50:    {p50_tagi}\n")
+        f.write(f"p90:    {p90_tagi}\n")
+        f.write(f"RMSE:    {RMSE_tagi}\n")
+        f.write(f"Epoch:    {epoch_optim}\n")
+        f.write(f"Batch size:    {batch_size}\n")
+        f.write(f"Sigma_v:    {sigma_v}\n")
+        f.write(f"LSTM nodes:    {lstm_nodes}\n")
 
     # rename the directory
-    out_dir_ = "dw_out/traffic_" + str(epoch_optim) + "_" + str(batch_size) + "_" + str(
-        round(sigma_v, 3)) + "_" + str(lstm_nodes) + "_method1"
+    out_dir_ = (
+        "dw_out/traffic_"
+        + str(epoch_optim)
+        + "_"
+        + str(batch_size)
+        + "_"
+        + str(round(sigma_v, 3))
+        + "_"
+        + str(lstm_nodes)
+        + "_method1"
+    )
     os.rename(out_dir, out_dir_)
 
 

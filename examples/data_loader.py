@@ -547,32 +547,32 @@ class TimeSeriesDataloader:
 #     def create_data_loader(self, batch_size: int, shuffle: bool = True):
 #         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
 
+
 class GlobalTimeSeriesDataloader:
     """Similar to TimeSeriesDataloader but with global normalization"""
 
     def __init__(
-            self,
-            x_file: str,
-            date_time_file: str,
-            output_col: np.ndarray,
-            input_seq_len: int,
-            output_seq_len: int,
-            num_features: int,
-            stride: int,
-            ts_idx: Optional[int] = 0,
-            x_mean: Optional[np.ndarray] = None,
-            x_std: Optional[np.ndarray] = None,
-            time_covariates: Optional[str] = None,
-            scale_i: Optional[float] = None,
-            global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
-            idx_as_feature: Optional[bool] = False,
-            min_max_scaler: Optional[list] = None,
-            scale_covariates: Optional[bool] = False,
-            covariate_means: Optional[np.ndarray] = None,
-            covariate_stds: Optional[np.ndarray] = None,
-            embedding_dim: Optional[int] = None,
-            embedding: Optional[np.ndarray] = None,
-
+        self,
+        x_file: str,
+        date_time_file: str,
+        output_col: np.ndarray,
+        input_seq_len: int,
+        output_seq_len: int,
+        num_features: int,
+        stride: int,
+        ts_idx: Optional[int] = 0,
+        x_mean: Optional[np.ndarray] = None,
+        x_std: Optional[np.ndarray] = None,
+        time_covariates: Optional[str] = None,
+        scale_i: Optional[float] = None,
+        global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
+        idx_as_feature: Optional[bool] = False,
+        min_max_scaler: Optional[list] = None,
+        scale_covariates: Optional[bool] = False,
+        covariate_means: Optional[np.ndarray] = None,
+        covariate_stds: Optional[np.ndarray] = None,
+        embedding_dim: Optional[int] = None,
+        embedding: Optional[np.ndarray] = None,
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -606,13 +606,13 @@ class GlobalTimeSeriesDataloader:
 
     @staticmethod
     def batch_generator(
-            input_data: np.ndarray,
-            output_data: np.ndarray,
-            batch_size: int,
-            shuffle: bool = True,
-            weighted_sampling: bool = False,
-            weights: Optional[np.ndarray] = None,
-            num_samples: Optional[int] = None,
+        input_data: np.ndarray,
+        output_data: np.ndarray,
+        batch_size: int,
+        shuffle: bool = True,
+        weighted_sampling: bool = False,
+        weights: Optional[np.ndarray] = None,
+        num_samples: Optional[int] = None,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         """
         Generator function to yield batches of data.
@@ -628,11 +628,17 @@ class GlobalTimeSeriesDataloader:
             if weights is None:
                 raise ValueError("Weights must be provided for weighted sampling.")
             if weights.shape[0] != num_data:
-                raise ValueError("Weights array must be the same length as the number of data points.")
+                raise ValueError(
+                    "Weights array must be the same length as the number of data points."
+                )
             if num_samples is None:
-                indices = np.random.choice(indices, size=num_data, replace=True, p=weights)
+                indices = np.random.choice(
+                    indices, size=num_data, replace=True, p=weights
+                )
             else:
-                indices = np.random.choice(indices, size=num_samples, replace=True, p=weights)
+                indices = np.random.choice(
+                    indices, size=num_samples, replace=True, p=weights
+                )
                 num_data = num_samples
 
         for start_idx in range(0, num_data, batch_size):
@@ -649,27 +655,33 @@ class GlobalTimeSeriesDataloader:
 
         # Load data
         x = self.load_data_from_csv(self.x_file)
-        x = x[:, self.ts_idx:self.ts_idx + 1]  # choose time series column
+        x = x[:, self.ts_idx : self.ts_idx + 1]  # choose time series column
         date_time = self.load_data_from_csv(self.date_time_file)
 
         # Add time covariates
         if self.time_covariates is not None:
-            date_time = np.array(date_time, dtype='datetime64')
+            date_time = np.array(date_time, dtype="datetime64")
             for time_cov in self.time_covariates:
-                if time_cov == 'hour_of_day':
-                    hour_of_day = date_time.astype('datetime64[h]').astype(int) % 24
+                if time_cov == "hour_of_day":
+                    hour_of_day = date_time.astype("datetime64[h]").astype(int) % 24
                     x = np.concatenate((x, hour_of_day), axis=1)
-                elif time_cov == 'day_of_week':
-                    day_of_week = date_time.astype('datetime64[D]').astype(int) % 7
+                elif time_cov == "day_of_week":
+                    day_of_week = date_time.astype("datetime64[D]").astype(int) % 7
                     x = np.concatenate((x, day_of_week), axis=1)
-                elif time_cov == 'week_of_year':
-                    week_of_year = date_time.astype('datetime64[W]').astype(int) % 52 + 1
+                elif time_cov == "week_of_year":
+                    week_of_year = (
+                        date_time.astype("datetime64[W]").astype(int) % 52 + 1
+                    )
                     x = np.concatenate((x, week_of_year), axis=1)
-                elif time_cov == 'month_of_year':
-                    month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
+                elif time_cov == "month_of_year":
+                    month_of_year = (
+                        date_time.astype("datetime64[M]").astype(int) % 12 + 1
+                    )
                     x = np.concatenate((x, month_of_year), axis=1)
-                elif time_cov == 'quarter_of_year':
-                    month_of_year = date_time.astype('datetime64[M]').astype(int) % 12 + 1
+                elif time_cov == "quarter_of_year":
+                    month_of_year = (
+                        date_time.astype("datetime64[M]").astype(int) % 12 + 1
+                    )
                     quarter_of_year = (month_of_year - 1) // 3 + 1
                     x = np.concatenate((x, quarter_of_year), axis=1)
 
@@ -683,24 +695,31 @@ class GlobalTimeSeriesDataloader:
             #         x[:, col] = column_to_scale / (1 + self.covariate_means[col])
             # else:
             if self.covariate_means is None and self.covariate_stds is None:
-                self.covariate_means = np.nanmean(x, axis=0)  # store the mean for scaling the test data
-                self.covariate_stds = np.nanstd(x, axis=0)  # store the std for scaling the test data
+                self.covariate_means = np.nanmean(
+                    x, axis=0
+                )  # store the mean for scaling the test data
+                self.covariate_stds = np.nanstd(
+                    x, axis=0
+                )  # store the std for scaling the test data
             for col in range(1, self.num_features):
                 column_to_scale = x[:, col]
-                x[:, col] = Normalizer.standardize(column_to_scale, self.covariate_means[col],
-                                                   self.covariate_stds[col])
+                x[:, col] = Normalizer.standardize(
+                    column_to_scale, self.covariate_means[col], self.covariate_stds[col]
+                )
 
         # scale the observations using time series dependent scaling factors
         if self.global_scale is not None:
-            if self.global_scale == 'deepAR':
+            if self.global_scale == "deepAR":
                 if self.scale_i is None:
                     self.scale_i = 1 + np.nanmean(x[:, 0])
                 x[:, 0] = x[:, 0] / np.array(self.scale_i)
 
-            elif self.global_scale == 'standard':
+            elif self.global_scale == "standard":
                 if self.x_mean is None and self.x_std is None:
                     self.x_mean, self.x_std = Normalizer.compute_mean_std(x[:, 0])
-                x[:, 0] = Normalizer.standardize(data=x[:, 0], mu=self.x_mean, std=self.x_std)
+                x[:, 0] = Normalizer.standardize(
+                    data=x[:, 0], mu=self.x_mean, std=self.x_std
+                )
 
         # Create rolling windows
         x_rolled, y_rolled = utils.create_rolling_window(
@@ -726,7 +745,7 @@ class GlobalTimeSeriesDataloader:
         dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
 
         # store weights for weighted sampling. Default is uniform sampling
-        if self.global_scale == 'deepAR':
+        if self.global_scale == "deepAR":
             dataset["weights"] = self.scale_i * np.ones(x_rolled.shape[0])
 
         return dataset
@@ -736,15 +755,34 @@ class GlobalTimeSeriesDataloader:
         # shape: (num_data, input_seq_len * num_features + embedding_dim)
         to_add = np.tile(embedding, (x_rolled.shape[0], 1))
         col_idx = [i for i in range(0, x_rolled.shape[1], self.num_features)]
-        new_x_rolled = np.zeros((x_rolled.shape[0], (self.num_features + len(embedding)) * self.input_seq_len))
+        new_x_rolled = np.zeros(
+            (
+                x_rolled.shape[0],
+                (self.num_features + len(embedding)) * self.input_seq_len,
+            )
+        )
         j = 0
         for i in col_idx:
-            to_concat = np.concatenate((x_rolled[:, i:i + self.num_features], to_add), axis=1)
-            new_x_rolled[:, j:j + len(embedding) + self.num_features] = to_concat
+            to_concat = np.concatenate(
+                (x_rolled[:, i : i + self.num_features], to_add), axis=1
+            )
+            new_x_rolled[:, j : j + len(embedding) + self.num_features] = to_concat
             j += len(embedding) + self.num_features
         return np.float32(new_x_rolled)
 
-    def create_data_loader(self, batch_size: int, shuffle: bool = True, weighted_sampling: bool = False,
-                           weights: Optional[np.ndarray] = None, num_samples: Optional[int] = None):
-        return self.batch_generator(*self.dataset["value"], batch_size, shuffle, weighted_sampling, weights,
-                                    num_samples)
+    def create_data_loader(
+        self,
+        batch_size: int,
+        shuffle: bool = True,
+        weighted_sampling: bool = False,
+        weights: Optional[np.ndarray] = None,
+        num_samples: Optional[int] = None,
+    ):
+        return self.batch_generator(
+            *self.dataset["value"],
+            batch_size,
+            shuffle,
+            weighted_sampling,
+            weights,
+            num_samples
+        )
