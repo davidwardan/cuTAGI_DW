@@ -40,3 +40,5 @@ test_model/
 !test/lstm/data/*.csv
 !data/toy_time_series_smoother/*.csv
 nohup.out
+
+dw_out/.
