@@ -29,6 +29,9 @@ class TimeSeriesEmbeddings:
     def get_embedding(self, idx: int) -> tuple:
         return self.mu_embedding[idx], self.var_embedding[idx]
 
+    def save(self, out_dir: str):
+        np.savetxt(out_dir + "/embeddings_mu.csv", self.mu_embedding, delimiter=",")
+        np.savetxt(out_dir + "/embeddings_var.csv", self.var_embedding, delimiter=",")
 
 # TODO: Create a EmbeddingHandler class to handle the embeddings (build, reduce, input)
 def build_vector(x: int, num_features_len: int, embedding_dim: int) -> np.ndarray:
