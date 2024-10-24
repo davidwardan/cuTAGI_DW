@@ -31,4 +31,5 @@ test_model/
 !data/toy_time_series_smoother/*.csv
 nohup.out
 
-dw_out/.
+dw_out/
+data/toy_embedding/
