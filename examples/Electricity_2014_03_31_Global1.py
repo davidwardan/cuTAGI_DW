@@ -297,12 +297,7 @@ def main(
     net.save_csv(out_dir + "/param/electricity_2014_03_31_net_pyTAGI.csv")
 
     # save the embeddings
-    np.savetxt(
-        out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=","
-    )
-    np.savetxt(
-        out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=","
-    )
+    embeddings.save(out_dir)
 
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
@@ -385,15 +380,9 @@ def main(
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(
-        out_dir + "/electricity_2014_03_31_ytestPd_pyTAGI.csv", ytestPd, delimiter=","
-    )
-    np.savetxt(
-        out_dir + "/electricity_2014_03_31_SytestPd_pyTAGI.csv", SytestPd, delimiter=","
-    )
-    np.savetxt(
-        out_dir + "/electricity_2014_03_31_ytestTr_pyTAGI.csv", ytestTr, delimiter=","
-    )
+    np.savetxt(out_dir + "/ytestPd.csv", ytestPd, delimiter=",")
+    np.savetxt(out_dir + "/SytestPd.csv", SytestPd, delimiter=",")
+    np.savetxt(out_dir + "/ytestTr.csv", ytestTr, delimiter=",")
 
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
