@@ -268,12 +268,7 @@ def main(
     net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
 
     # save the embeddings
-    np.savetxt(
-        out_dir + "/embeddings_mu_pyTAGI.csv", embeddings.mu_embedding, delimiter=","
-    )
-    np.savetxt(
-        out_dir + "/embeddings_var_pyTAGI.csv", embeddings.var_embedding, delimiter=","
-    )
+    embeddings.save(out_dir)
 
     # Testing
     pbar = tqdm(ts_idx_test, desc="Testing Progress")
@@ -339,13 +334,13 @@ def main(
         ytestTr[:, ts] = y_test.flatten()
 
     np.savetxt(
-        out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=","
+        out_dir + "/ytestPd.csv", ytestPd, delimiter=","
     )
     np.savetxt(
-        out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=","
+        out_dir + "/SytestPd.csv", SytestPd, delimiter=","
     )
     np.savetxt(
-        out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=","
+        out_dir + "/ytestTr.csv", ytestTr, delimiter=","
     )
 
     # -------------------------------------------------------------------------#

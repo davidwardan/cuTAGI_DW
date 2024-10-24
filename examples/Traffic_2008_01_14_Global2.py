@@ -10,6 +10,7 @@ from pytagi import exponential_scheduler
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 
 from examples.data_loader import GlobalTimeSeriesDataloader
+from examples.embedding import *
 
 import matplotlib.pyplot as plt
 
@@ -24,6 +25,7 @@ def main(
     batch_size: int = 64,
     sigma_v: float = 0.5,
     lstm_nodes: int = 40,
+    embedding_dim: int = 10,
 ):
     """
     Run training for a time-series forecasting global model.
@@ -39,6 +41,7 @@ def main(
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
+    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
@@ -57,7 +60,7 @@ def main(
             time_covariates=["hour_of_day", "day_of_week"],
             scale_covariates=True,
             ts_idx=ts,
-            # idx_as_feature=True,
+            embedding_dim=embedding_dim,
         )
 
         # store covariate means and stds
@@ -77,7 +80,7 @@ def main(
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
             ts_idx=ts,
-            # idx_as_feature=True,
+            embedding_dim=embedding_dim,
         )
 
         if ts == 0:
@@ -89,7 +92,7 @@ def main(
 
     # Network
     net = Sequential(
-        LSTM(num_features, lstm_nodes, input_seq_len),
+        LSTM((num_features + embedding_dim), lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
@@ -138,8 +141,21 @@ def main(
         var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for x, y in batch_iter:
+            # build a zero vector with the same length as x with 1 where the embedding is stored
+            zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+            # get the indices of the time series stored in the embedding
+            x_ts_idx = reduce_vector(x, zero_vector, embedding_dim)
+            # reduce the vector to get only the indices (needed if embedding_dim > 1)
+            x_ts_idx = np.mean(x_ts_idx, axis=1).tolist()
+
+            # replace the embedding section with the actual embedding
+            x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
+
+            # only leave variance for the embedding section
+            x_var = x_var * zero_vector
+
             # Feed forward
-            m_pred, _ = net(x)
+            m_pred, _ = net(x, x_var)
 
             # Update output layer
             out_updater.update(
@@ -152,6 +168,24 @@ def main(
             # Feed backward
             net.backward()
             net.step()
+
+            # get the updated input state
+            (mu_delta, var_delta) = net.get_input_states()
+
+            # update the embedding
+            x_update = mu_delta * x_var
+            var_update = x_var * var_delta * x_var
+
+            # reduce the vector to get only embeddings
+            x_update = reduce_vector(x_update, zero_vector, embedding_dim)
+            var_update = reduce_vector(var_update, zero_vector, embedding_dim)
+
+            # store the updated embedding
+            vec_loc = 0
+            for ts_idx_ in x_ts_idx:
+                ts_idx_ = int(ts_idx_)
+                embeddings.update(ts_idx_, x_update[vec_loc], var_update[vec_loc])
+                vec_loc += 1
 
             # Training metric
             mse = metric.mse(m_pred, y)
@@ -167,8 +201,15 @@ def main(
         x_val = []
 
         for x, y in val_batch_iter:
+            # replace the embedding section with the actual embedding
+            x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
+            zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+
+            # only leave variance for the embedding section
+            x_var = x_var * zero_vector
+
             # Prediction
-            m_pred, v_pred = net(x)
+            m_pred, v_pred = net(x, x_var)
 
             mu_preds.extend(m_pred)
             var_preds.extend(v_pred + sigma_v**2)
@@ -198,63 +239,34 @@ def main(
             sigma_v=f"{sigma_v:.4f}",
         )
 
-        # create a directory to save the model
-        if not os.path.exists("best_model1/"):
-            os.makedirs("best_model1/")
-
         # early-stopping
         if early_stopping_criteria == "mse":
             if mse_val < mse_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net.save_csv("best_model1/")
-                # net_optim = net
+                net_optim = net.get_state_dict()
         elif early_stopping_criteria == "log_lik":
             if log_lik_val > log_lik_optim:
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
-                net.save_csv("best_model1/")
-                # net_optim = net
+                net_optim = net.get_state_dict()
         if epoch - epoch_optim > patience:
             break
 
-        print(type(net_optim))
-    # -------------------------------------------------------------------------#
-    # fig, ax1 = plt.subplots()
-
-    # # Set title for the plot
-    # ax1.set_title('Validation Metrics', fontsize=16)
-
-    # # Plot MSE on primary y-axis
-    # ax1.set_xlabel('Epoch')
-    # ax1.set_ylabel('MSE', color='steelblue')
-    # ax1.plot(mses_val, color='steelblue', label='MSE')
-    # ax1.tick_params(axis='y', labelcolor='steelblue')
-
-    # # Plot Log Likelihood on secondary y-axis
-    # ax2 = ax1.twinx()
-    # ax2.set_ylabel('Log Likelihood', color='indianred')
-    # ax2.plot(ll_val, color='indianred', label='Log Likelihood')
-    # ax2.tick_params(axis='y', labelcolor='indianred')
-
-    # # Adjust layout to make room for the title and legends
-    # fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-
-    # # Save the figure
-    # fig.savefig(out_dir + "/validation_plot.png", dpi=300)
-    # -------------------------------------------------------------------------#
     # save validation metrics into csv
     df = np.array([mses_val, ll_val]).T
     np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
-    # -------------------------------------------------------------------------#
+
     # load the optimal net
-    net.load_csv("best_model1/")  # load optimal net
-    shutil.rmtree("best_model1/")  # remove the directory
+    net.load_state_dict(net_optim)
 
     # save the model
     net.save_csv(out_dir + "/param/traffic_2008_01_14_net_pyTAGI.csv")
+
+    # save the embeddings
+    embeddings.save(out_dir)
 
     # Testing
     pbar = tqdm(ts_idx, desc="Testing Progress")
@@ -277,7 +289,7 @@ def main(
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
             ts_idx=ts,
-            # idx_as_feature=True,
+            embedding_dim=embedding_dim,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -288,17 +300,25 @@ def main(
         y_test = []
         x_test = []
 
-        # net = net_optim
-
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
             # Rolling window predictions
             RW_idx = RW_idx_ % rolling_window
             if RW_idx > 0:
-                x[-RW_idx * num_features :: num_features] = mu_preds[-RW_idx:]
+                x[
+                    -RW_idx
+                    * (num_features + embedding_dim) :: (num_features + embedding_dim)
+                ] = mu_preds[-RW_idx:]
+
+            # replace the embedding section with the actual embedding
+            x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
+            zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+
+            # only leave variance for the embedding section
+            x_var = x_var * zero_vector
 
             # Prediction
-            m_pred, v_pred = net(x)
+            m_pred, v_pred = net(x, x_var)
 
             mu_preds.extend(m_pred)
             var_preds.extend(v_pred + sigma_v**2)
@@ -316,13 +336,13 @@ def main(
         ytestTr[:, ts] = y_test.flatten()
 
     np.savetxt(
-        out_dir + "/traffic_2008_01_14_ytestPd_pyTAGI.csv", ytestPd, delimiter=","
+        out_dir + "/ytestPd.csv", ytestPd, delimiter=","
     )
     np.savetxt(
-        out_dir + "/traffic_2008_01_14_SytestPd_pyTAGI.csv", SytestPd, delimiter=","
+        out_dir + "/SytestPd.csv", SytestPd, delimiter=","
     )
     np.savetxt(
-        out_dir + "/traffic_2008_01_14_ytestTr_pyTAGI.csv", ytestTr, delimiter=","
+        out_dir + "/ytestTr.csv", ytestTr, delimiter=","
     )
 
     # -------------------------------------------------------------------------#
@@ -345,7 +365,7 @@ def main(
 
     # rename the directory
     out_dir_ = (
-        "david/output/traffic_"
+        "dw_out/traffic_"
         + str(epoch_optim)
         + "_"
         + str(batch_size)
@@ -353,7 +373,7 @@ def main(
         + str(round(sigma_v, 3))
         + "_"
         + str(lstm_nodes)
-        + "_method2_seed3"
+        + "_method2"
     )
     os.rename(out_dir, out_dir_)
 
