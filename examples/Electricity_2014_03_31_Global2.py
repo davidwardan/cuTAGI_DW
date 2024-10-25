@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 import fire
 import numpy as np
@@ -21,10 +20,10 @@ sys.path.append(
 
 def main(
     num_epochs: int = 100,
-    batch_size: int = 64,
-    sigma_v: float = 1,
+    batch_size: int = 32,
+    sigma_v: float = 0.2,
     lstm_nodes: int = 40,
-    embedding_dim: int = 10,
+    embedding_dim: int = 25,
 ):
     """
     Run training for a time-series forecasting global model.
@@ -40,7 +39,9 @@ def main(
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
-    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
+    embeddings = TimeSeriesEmbeddings(
+        (nb_ts, embedding_dim), "normal"
+    )  # initialize embeddings
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
@@ -114,9 +115,12 @@ def main(
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
+    # input state update
+    net.input_state_update = True
+
     # Create output directory
     out_dir = (
-        "david/output/electricity_"
+        "out/electricity_"
         + str(num_epochs)
         + "_"
         + str(batch_size)
@@ -156,12 +160,11 @@ def main(
             # weights=weights,
             # num_samples=500000,
         )
-        # batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
 
         # Decaying observation's variance
-        sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
-        )
+        # sigma_v = exponential_scheduler(
+        #     curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
+        # )
         var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for x, y in batch_iter:
@@ -307,7 +310,6 @@ def main(
         if epoch - epoch_optim > patience:
             break
 
-
     # save validation metrics into csv
     df = np.array([mses_val, ll_val]).T
     np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
@@ -432,7 +434,7 @@ def main(
 
     # rename the directory
     out_dir_ = (
-        "dw_out/electricity_"
+        "out/electricity_"
         + str(epoch)
         + "_"
         + str(batch_size)
@@ -440,7 +442,10 @@ def main(
         + str(round(sigma_v, 3))
         + "_"
         + str(lstm_nodes)
-        + "_method2"
+        + "_method2_seed"
+        + str(np.random.randint(50))
+
+
     )
     os.rename(out_dir, out_dir_)
 

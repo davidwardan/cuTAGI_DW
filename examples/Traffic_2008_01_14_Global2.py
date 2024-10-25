@@ -22,10 +22,10 @@ sys.path.append(
 
 def main(
     num_epochs: int = 100,
-    batch_size: int = 64,
-    sigma_v: float = 0.5,
+    batch_size: int = 32,
+    sigma_v: float = 0.02,
     lstm_nodes: int = 40,
-    embedding_dim: int = 10,
+    embedding_dim: int = 25,
 ):
     """
     Run training for a time-series forecasting global model.
@@ -33,7 +33,7 @@ def main(
     """
 
     # Dataset
-    nb_ts = 1  # for electricity 370 and 963 for traffic
+    nb_ts = 963  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 3
@@ -41,7 +41,9 @@ def main(
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
-    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
+    embeddings = TimeSeriesEmbeddings(
+        (nb_ts, embedding_dim), "noraml"
+    )  # initialize embeddings
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
@@ -97,13 +99,16 @@ def main(
         LSTM(lstm_nodes, lstm_nodes, input_seq_len),
         Linear(lstm_nodes * input_seq_len, 1),
     )
-    # net.to_device("cuda")
+    net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
+    # input state update
+    net.input_state_update = True
+
     # Create output directory
     out_dir = (
-        "david/output/traffic_"
+        "out/traffic_"
         + str(num_epochs)
         + "_"
         + str(batch_size)
@@ -126,18 +131,18 @@ def main(
     log_lik_optim = -1e100
     mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
+    early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
-        batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False)
+        batch_iter = train_dtl.create_data_loader(batch_size)
 
         # Decaying observation's variance
-        sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
-        )
+        # sigma_v = exponential_scheduler(
+        #     curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
+        # )
         var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for x, y in batch_iter:
@@ -335,15 +340,9 @@ def main(
         SytestPd[:, ts] = std_preds.flatten() ** 2
         ytestTr[:, ts] = y_test.flatten()
 
-    np.savetxt(
-        out_dir + "/ytestPd.csv", ytestPd, delimiter=","
-    )
-    np.savetxt(
-        out_dir + "/SytestPd.csv", SytestPd, delimiter=","
-    )
-    np.savetxt(
-        out_dir + "/ytestTr.csv", ytestTr, delimiter=","
-    )
+    np.savetxt(out_dir + "/ytestPd.csv", ytestPd, delimiter=",")
+    np.savetxt(out_dir + "/SytestPd.csv", SytestPd, delimiter=",")
+    np.savetxt(out_dir + "/ytestTr.csv", ytestTr, delimiter=",")
 
     # -------------------------------------------------------------------------#
     # calculate metrics
@@ -365,7 +364,7 @@ def main(
 
     # rename the directory
     out_dir_ = (
-        "dw_out/traffic_"
+        "out/traffic_"
         + str(epoch_optim)
         + "_"
         + str(batch_size)
