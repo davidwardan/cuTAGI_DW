@@ -14,8 +14,6 @@ from pytagi import Normalizer as normalizer
 from examples.data_loader import GlobalTimeSeriesDataloader
 from examples.embedding import *
 
-import matplotlib.pyplot as plt
-
 # Add the 'build' directory to sys.path in one line
 sys.path.append(
     os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "build"))
@@ -25,15 +23,15 @@ sys.path.append(
 def main(
     num_epochs: int = 100,
     batch_size: int = 32,
-    sigma_v: float = 2,
+    sigma_v: float = 0.2,
     lstm_nodes: int = 40,
+    embedding_dim: int = 25,
 ):
     """
     Run training for a time-series forecasting global model.
     Training is done on one complete time series at a time.
     """
     # Dataset
-    embedding_dim = 10  # dimension of the embedding
     nb_ts = 370  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     ts_idx_test = np.arange(0, nb_ts)  # unshuffled ts_idx for testing
@@ -43,7 +41,9 @@ def main(
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
-    embeddings = TimeSeriesEmbeddings((nb_ts, embedding_dim))  # initialize embeddings
+    embeddings = TimeSeriesEmbeddings(
+        (nb_ts, embedding_dim), "normal"
+    )  # initialize embeddings
 
     # Network
     net = Sequential(
@@ -61,7 +61,7 @@ def main(
 
     # Create output directory
     out_dir = (
-        "dw_out/electricity_"
+        "out/electricity_"
         + str(num_epochs)
         + "_"
         + str(batch_size)
@@ -84,7 +84,7 @@ def main(
     log_lik_optim = -1e100
     mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
+    early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
     global_mse = []
@@ -101,9 +101,9 @@ def main(
     for epoch in pbar:
 
         # Decaying observation's variance
-        sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.2, decaying_factor=0.99, curr_iter=epoch
-        )
+        # sigma_v = exponential_scheduler(
+        #     curr_v=sigma_v, min_v=0.2, decaying_factor=0.99, curr_iter=epoch
+        # )
         var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for ts in ts_idx:
@@ -404,7 +404,7 @@ def main(
 
     # rename the directory
     out_dir_ = (
-        "dw_out/electricity_"
+        "out/electricity_"
         + str(epoch_optim)
         + "_"
         + str(batch_size)
