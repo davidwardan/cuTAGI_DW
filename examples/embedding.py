@@ -9,7 +9,7 @@ class TimeSeriesEmbeddings:
     def __init__(self, embedding_dim: tuple, encoding_type: str = None):
         self.embedding_dim = embedding_dim
         if encoding_type == "normal":
-            self.mu_embedding = np.random.randn(*embedding_dim) / (embedding_dim[1])
+            self.mu_embedding = np.random.randn(*embedding_dim)
             self.var_embedding = np.full(embedding_dim, 1.0)
         elif encoding_type == "onehot":
             epsilon = 1e-6
