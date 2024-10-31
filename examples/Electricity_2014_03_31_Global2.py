@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 import pytagi.metric as metric
 from pytagi import exponential_scheduler
-from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
+from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 from pytagi import Normalizer as normalizer
 
 from examples.data_loader import GlobalTimeSeriesDataloader
@@ -105,12 +105,21 @@ def main(
             val_dtl = concat_ts_sample(val_dtl, val_dtl_)
 
     # Network
-    net = Sequential(
-        LSTM((num_features + embedding_dim), lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        LSTM(lstm_nodes, lstm_nodes, input_seq_len),
-        Linear(lstm_nodes * input_seq_len, 1),
-    )
+    if sigma_v is None:
+        net = Sequential(
+            LSTM((num_features + embedding_dim), lstm_nodes, input_seq_len),
+            LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+            LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+            Linear(lstm_nodes * input_seq_len, 2),
+            EvenExp(),
+        )
+    else:
+        net = Sequential(
+            LSTM((num_features + embedding_dim), lstm_nodes, input_seq_len),
+            LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+            LSTM(lstm_nodes, lstm_nodes, input_seq_len),
+            Linear(lstm_nodes * input_seq_len, 1),
+        )
     net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
@@ -146,7 +155,7 @@ def main(
     log_lik_optim = -1e100
     mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
+    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
@@ -161,11 +170,14 @@ def main(
             # num_samples=500000,
         )
 
-        # Decaying observation's variance
-        # sigma_v = exponential_scheduler(
-        #     curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
-        # )
-        var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
+        if sigma_v != None:
+            # Decaying observation's variance
+            sigma_v = exponential_scheduler(
+                curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
+            )
+            var_y = np.full(
+                (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
+            )
 
         for x, y in batch_iter:
             # build a zero vector with the same length as x with 1 where the embedding is stored
@@ -184,13 +196,22 @@ def main(
             # Feed forward
             m_pred, _ = net(x, x_var)
 
-            # Update output layer
-            out_updater.update(
-                output_states=net.output_z_buffer,
-                mu_obs=y,
-                var_obs=var_y,
-                delta_states=net.input_delta_z_buffer,
-            )
+            if sigma_v is None:
+                m_pred = m_pred[::2]  # Even positions
+                # Update output layer
+                out_updater.update_heteros(
+                    output_states=net.output_z_buffer,
+                    mu_obs=y,
+                    delta_states=net.input_delta_z_buffer,
+                )
+            else:
+                # Update output layer
+                out_updater.update(
+                    output_states=net.output_z_buffer,
+                    mu_obs=y,
+                    var_obs=var_y,
+                    delta_states=net.input_delta_z_buffer,
+                )
 
             # Feed backward
             net.backward()
@@ -251,8 +272,13 @@ def main(
             # Prediction
             m_pred, v_pred = net(x, x_var)
 
-            mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v**2)
+            if sigma_v is None:
+                mu_preds.extend(m_pred[::2])
+                var_preds.extend(v_pred[::2] + m_pred[1::2])
+            else:
+                mu_preds.extend(m_pred)
+                var_preds.extend(v_pred + sigma_v**2)
+
             x_val.extend(x)
             y_val.extend(y)
 
@@ -290,7 +316,6 @@ def main(
             mse=f"{np.mean(mses):.4f}",
             mse_val=f"{mse_val:.4f}",
             log_lik_val=f"{log_lik_val:.4f}",
-            sigma_v=f"{sigma_v:.4f}",
         )
         # pbar.set_postfix(mse=f"{np.mean(mses):.4f}", sigma_v=f"{sigma_v:.4f}")
 
@@ -382,8 +407,13 @@ def main(
             # Prediction
             m_pred, v_pred = net(x, x_var)
 
-            mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v**2)
+            if sigma_v is None:
+                mu_preds.extend(m_pred[::2])
+                var_preds.extend(v_pred[::2] + m_pred[1::2])
+            else:
+                mu_preds.extend(m_pred)
+                var_preds.extend(v_pred + sigma_v**2)
+
             x_test.extend(x)
             y_test.extend(y)
 
@@ -444,8 +474,6 @@ def main(
         + str(lstm_nodes)
         + "_method2_seed"
         + str(np.random.randint(50))
-
-
     )
     os.rename(out_dir, out_dir_)
 
@@ -478,4 +506,4 @@ def random_weighted_sampling(
 
 
 if __name__ == "__main__":
-    fire.Fire(main)
+    fire.Fire(main(sigma_v=None))
