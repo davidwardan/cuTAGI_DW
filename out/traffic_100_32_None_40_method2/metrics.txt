@@ -1,7 +1,0 @@
-ND/p50:    0.32486623028009387
-p90:    0.2803386323415328
-RMSE:    0.034640378206430886
-Epoch:    6
-Batch size:    32
-Sigma_v:    None
-LSTM nodes:    40

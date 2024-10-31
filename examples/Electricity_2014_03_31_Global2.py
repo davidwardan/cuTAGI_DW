@@ -20,10 +20,10 @@ sys.path.append(
 
 def main(
     num_epochs: int = 100,
-    batch_size: int = 32,
-    sigma_v: float = 0.2,
+    batch_size: int = 16,
+    sigma_v: float = None,
     lstm_nodes: int = 40,
-    embedding_dim: int = 25,
+    embedding_dim: int = 10,
 ):
     """
     Run training for a time-series forecasting global model.
@@ -134,8 +134,6 @@ def main(
         + "_"
         + str(batch_size)
         + "_"
-        + str(sigma_v)
-        + "_"
         + str(lstm_nodes)
         + "_method2"
     )
@@ -155,8 +153,8 @@ def main(
     log_lik_optim = -1e100
     mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
-    patience = 10
+    early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
+    patience = 15
     net_optim = []  # to save optimal net at the optimal epoch
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
@@ -426,14 +424,9 @@ def main(
         mu_preds = mu_preds * factors[ts]
         std_preds = std_preds * factors[ts]
         y_test = y_test * factors[ts]
-        # mu_preds = normalizer.unstandardize(
-        #     mu_preds, mean_train[ts], std_train[ts]
-        # )
+        # mu_preds = normalizer.unstandardize(mu_preds, mean_train[ts], std_train[ts])
         # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-
-        # y_test = normalizer.unstandardize(
-        #     y_test, mean_train[ts], std_train[ts]
-        # )
+        # y_test = normalizer.unstandardize(y_test, mean_train[ts], std_train[ts])
 
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
@@ -469,11 +462,8 @@ def main(
         + "_"
         + str(batch_size)
         + "_"
-        + str(round(sigma_v, 3))
-        + "_"
         + str(lstm_nodes)
-        + "_method2_seed"
-        + str(np.random.randint(50))
+        + "_method2"
     )
     os.rename(out_dir, out_dir_)
 
@@ -506,4 +496,4 @@ def random_weighted_sampling(
 
 
 if __name__ == "__main__":
-    fire.Fire(main(sigma_v=None))
+    fire.Fire(main)

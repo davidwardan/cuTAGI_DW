@@ -21,7 +21,7 @@ sys.path.append(
 def main(
     num_epochs: int = 100,
     batch_size: int = 32,
-    sigma_v: float = 0.02,
+    sigma_v: float = None,
     lstm_nodes: int = 40,
     embedding_dim: int = 25,
 ):
@@ -119,8 +119,6 @@ def main(
         + str(num_epochs)
         + "_"
         + str(batch_size)
-        + "_"
-        + str(sigma_v)
         + "_"
         + str(lstm_nodes)
         + "_method2"
@@ -397,8 +395,6 @@ def main(
         + "_"
         + str(batch_size)
         + "_"
-        + str(round(sigma_v, 3))
-        + "_"
         + str(lstm_nodes)
         + "_method2"
     )
@@ -421,4 +417,4 @@ def concat_ts_sample(data, data_add):
 
 
 if __name__ == "__main__":
-    fire.Fire(main(sigma_v=None))
+    fire.Fire(main(sigma_v=0.02))

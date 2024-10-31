@@ -47,5 +47,5 @@ CLAUDE.md
 !data/toy_time_series_smoother/*.csv
 nohup.out
 
-dw_out/
+out/
 data/toy_embedding/
