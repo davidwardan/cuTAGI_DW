@@ -3,10 +3,9 @@ import sys
 import fire
 import numpy as np
 from tqdm import tqdm
-import shutil
 
 import pytagi.metric as metric
-from pytagi import exponential_scheduler
+from pytagi import exponential_scheduler, manual_seed
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 
 from examples.data_loader import GlobalTimeSeriesDataloader
@@ -24,6 +23,7 @@ def main(
     sigma_v: float = None,
     lstm_nodes: int = 40,
     embedding_dim: int = 25,
+    seed: int = 0,
 ):
     """
     Run training for a time-series forecasting global model.
@@ -42,6 +42,9 @@ def main(
     embeddings = TimeSeriesEmbeddings(
         (nb_ts, embedding_dim), "noraml"
     )  # initialize embeddings
+
+    # set seed for model initialization
+    manual_seed(seed)
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
@@ -126,7 +129,6 @@ def main(
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
-    # -------------------------------------------------------------------------#
     # Training
     mses = []
     mses_val = []  # to save mse_val for plotting
@@ -136,7 +138,7 @@ def main(
     log_lik_optim = -1e100
     mse_optim = 1e100
     epoch_optim = 1
-    early_stopping_criteria = "mse"  # 'log_lik' or 'mse'
+    early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
 
