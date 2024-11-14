@@ -7,7 +7,7 @@ import numpy as np
 from tqdm import tqdm
 
 import pytagi.metric as metric
-from pytagi import exponential_scheduler
+from pytagi import exponential_scheduler, manual_seed
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 
 from examples.data_loader import GlobalTimeSeriesDataloader
@@ -25,6 +25,7 @@ def main(
     sigma_v: float = 0.02,
     lstm_nodes: int = 40,
     embedding_dim: int = 25,
+    seed: int = 0,
 ):
     """
     Run training for a time-series forecasting global model.
@@ -43,6 +44,9 @@ def main(
     embeddings = TimeSeriesEmbeddings(
         (nb_ts, embedding_dim), "normal"
     )  # initialize embeddings
+
+    # set seed for model initialization
+    manual_seed(seed)
 
     # Network
     net = Sequential(
@@ -98,9 +102,9 @@ def main(
     for epoch in pbar:
 
         # Decaying observation's variance
-        # sigma_v = exponential_scheduler(
-        #     curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
-        # )
+        sigma_v = exponential_scheduler(
+            curr_v=sigma_v, min_v=0.01, decaying_factor=0.99, curr_iter=epoch
+        )
         var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
         for ts in ts_idx:
