@@ -7,6 +7,7 @@ from tqdm import tqdm
 import pytagi.metric as metric
 from pytagi import exponential_scheduler, manual_seed
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
+from pytagi import Normalizer as normalizer
 
 from examples.data_loader import GlobalTimeSeriesDataloader
 from examples.embedding import *
@@ -19,7 +20,7 @@ sys.path.append(
 
 def main(
     num_epochs: int = 100,
-    batch_size: int = 32,
+    batch_size: int = 16,
     sigma_v: float = None,
     lstm_nodes: int = 40,
     embedding_dim: int = 0,
@@ -31,16 +32,16 @@ def main(
     """
 
     # Dataset
-    nb_ts = 963  # for electricity 370 and 963 for traffic
+    nb_ts = 370  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 3
     input_seq_len = 168
-    output_seq_len = 1  # 24
+    output_seq_len = 1
     seq_stride = 1
     rolling_window = 24  # for rolling window predictions in the test set
     # embeddings = TimeSeriesEmbeddings(
-    #     (nb_ts, embedding_dim), "noraml"
+    #     (nb_ts, embedding_dim), "normal"
     # )  # initialize embeddings
 
     # set seed for model initialization
@@ -48,41 +49,55 @@ def main(
 
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
 
+    factors = [1.0] * nb_ts
+    mean_train = [0.0] * nb_ts
+    std_train = [1.0] * nb_ts
     covar_means = [0.0] * nb_ts
     covar_stds = [1.0] * nb_ts
 
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_DeepAR_train.csv",
-            date_time_file="data/traffic/traffic_DeepAR_train_datetime.csv",
+            x_file="data/electricity/electricity_DeepAR_train.csv",
+            date_time_file="data/electricity/electricity_DeepAR_train_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            time_covariates=["hour_of_day", "day_of_week"],
-            scale_covariates=True,
             ts_idx=ts,
+            time_covariates=["hour_of_day", "day_of_week"],
+            global_scale="deepAR",
+            scale_covariates=True,
             # embedding_dim=embedding_dim,
         )
+
+        # Store scaling factors----------------------#
+        factors[ts] = train_dtl_.scale_i
+        # mean_train[ts] = train_dtl_.x_mean
+        # std_train[ts] = train_dtl_.x_std
+        # -------------------------------------------#
 
         # store covariate means and stds
         covar_means[ts] = train_dtl_.covariate_means
         covar_stds[ts] = train_dtl_.covariate_stds
 
         val_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_DeepAR_val.csv",
-            date_time_file="data/traffic/traffic_DeepAR_val_datetime.csv",
+            x_file="data/electricity/electricity_DeepAR_val.csv",
+            date_time_file="data/electricity/electricity_DeepAR_val_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
+            ts_idx=ts,
+            # x_mean=mean_train[ts],
+            # x_std=std_train[ts],
             time_covariates=["hour_of_day", "day_of_week"],
+            global_scale="deepAR",
+            scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
-            ts_idx=ts,
             # embedding_dim=embedding_dim,
         )
 
@@ -118,7 +133,7 @@ def main(
 
     # Create output directory
     out_dir = (
-        "out/traffic_"
+        "out/electricity_"
         + str(num_epochs)
         + "_"
         + str(batch_size)
@@ -128,6 +143,10 @@ def main(
     )
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
+
+    # -------------------------------------------------------------------------#
+    # calculate the weights for each time series
+    # weights = train_dtl.dataset["weights"] / np.sum(train_dtl.dataset["weights"])
 
     # Training
     mses = []
@@ -144,9 +163,14 @@ def main(
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
+
         batch_iter = train_dtl.create_data_loader(
-            batch_size,  # num_samples=5e5
-        )  # use 500K samples
+            batch_size,
+            shuffle=True,
+            # weighted_sampling=True,
+            # weights=weights,
+            # num_samples=500000,
+        )
 
         if sigma_v != None:
             # Decaying observation's variance
@@ -165,14 +189,14 @@ def main(
             # # reduce the vector to get only the indices (needed if embedding_dim > 1)
             # x_ts_idx = np.mean(x_ts_idx, axis=1).tolist()
 
-            # # # replace the embedding section with the actual embedding
+            # # replace the embedding section with the actual embedding
             # x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
 
-            # # # only leave variance for the embedding section
+            # # only leave variance for the embedding section
             # x_var = x_var * zero_vector
 
             # Feed forward
-            m_pred, _ = net(x)#, x_var)
+            m_pred, _ = net(x)  # , x_var)
 
             if sigma_v is None:
                 m_pred = m_pred[::2]  # Even positions
@@ -195,31 +219,44 @@ def main(
             net.backward()
             net.step()
 
-            # # get the updated input state
+            # unscale the predictions
+            # pred = m_pred * factors[ts]
+            # obs = y * factors[ts]
+            # pred = normalizer.unstandardize(
+            #     m_pred, mean_train[ts], std_train[ts]
+            # )
+            # obs = normalizer.unstandardize(
+            #     y, mean_train[ts], std_train[ts]
+            # )
+
+            # get the updated input state
             # (mu_delta, var_delta) = net.get_input_states()
 
-            # # update the embedding
+            # update the embedding
             # x_update = mu_delta * x_var
             # var_update = x_var * var_delta * x_var
 
-            # # reduce the vector to get only embeddings
+            # reduce the vector to get only embeddings
             # x_update = reduce_vector(x_update, zero_vector, embedding_dim)
             # var_update = reduce_vector(var_update, zero_vector, embedding_dim)
 
-            # # # store the updated embedding
+            # store the updated embedding
             # vec_loc = 0
             # for ts_idx_ in x_ts_idx:
             #     ts_idx_ = int(ts_idx_)
             #     embeddings.update(ts_idx_, x_update[vec_loc], var_update[vec_loc])
             #     vec_loc += 1
 
+            pred = m_pred
+            obs = y
+
             # Training metric
-            mse = metric.mse(m_pred, y)
+            mse = metric.mse(pred, obs)
             mses.append(mse)
 
         # -------------------------------------------------------------------------#
-        # Validation
-        val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
+        # # Validation
+        val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=True)
 
         mu_preds = []
         var_preds = []
@@ -235,7 +272,7 @@ def main(
             # x_var = x_var * zero_vector
 
             # Prediction
-            m_pred, v_pred = net(x) #, x_var)
+            m_pred, v_pred = net(x)  # , x_var)
 
             if sigma_v is None:
                 mu_preds.extend(m_pred[::2])
@@ -251,6 +288,20 @@ def main(
         std_preds = np.array(var_preds) ** 0.5
         y_val = np.array(y_val)
         x_val = np.array(x_val)
+
+        # Unscale the predictions
+        # mu_preds = mu_preds * factors[ts]
+        # std_preds = std_preds * factors[ts] ** 0.5
+        # y_val = y_val * factors[ts]
+
+        # mu_preds = normalizer.unstandardize(
+        #     mu_preds, mean_train[ts], std_train[ts]
+        # )
+        # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+        #
+        # y_val = normalizer.unstandardize(
+        #     y_val, mean_train[ts], std_train[ts]
+        # )
 
         # Compute log-likelihood for validation set
         mse_val = metric.mse(mu_preds, y_val)
@@ -268,6 +319,7 @@ def main(
             mse_val=f"{mse_val:.4f}",
             log_lik_val=f"{log_lik_val:.4f}",
         )
+        # pbar.set_postfix(mse=f"{np.mean(mses):.4f}", sigma_v=f"{sigma_v:.4f}")
 
         # early-stopping
         if early_stopping_criteria == "mse":
@@ -289,11 +341,11 @@ def main(
     df = np.array([mses_val, ll_val]).T
     np.savetxt(out_dir + "/validation_metrics.csv", df, delimiter=",")
 
-    # load the optimal net
+    # load optimal model
     net.load_state_dict(net_optim)
 
     # save the model
-    net.save_csv(out_dir + "/param/traffic_DeepAR_net_pyTAGI.csv")
+    net.save_csv(out_dir + "/param/electricity_DeepAR_net_pyTAGI.csv")
 
     # save the embeddings
     # embeddings.save(out_dir)
@@ -304,21 +356,26 @@ def main(
     ytestPd = np.full((168, nb_ts), np.nan)
     SytestPd = np.full((168, nb_ts), np.nan)
     ytestTr = np.full((168, nb_ts), np.nan)
+
     for ts in pbar:
 
         test_dtl = GlobalTimeSeriesDataloader(
-            x_file="data/traffic/traffic_DeepAR_test.csv",
-            date_time_file="data/traffic/traffic_DeepAR_test_datetime.csv",
+            x_file="data/electricity/electricity_DeepAR_test.csv",
+            date_time_file="data/electricity/electricity_DeepAR_test_datetime.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
+            ts_idx=ts,
+            # x_mean=mean_train[ts],
+            # x_std=std_train[ts],
             time_covariates=["hour_of_day", "day_of_week"],
+            global_scale="deepAR",
+            scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
-            ts_idx=ts,
             # embedding_dim=embedding_dim,
         )
 
@@ -329,6 +386,8 @@ def main(
         var_preds = []
         y_test = []
         x_test = []
+
+        # net = net_optim
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
@@ -344,11 +403,11 @@ def main(
             # x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
             # zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
 
-            # # only leave variance for the embedding section
+            # only leave variance for the embedding section
             # x_var = x_var * zero_vector
 
             # Prediction
-            m_pred, v_pred = net(x)#, x_var)
+            m_pred, v_pred = net(x)  # , x_var)
 
             if sigma_v is None:
                 mu_preds.extend(m_pred[::2])
@@ -365,6 +424,14 @@ def main(
         y_test = np.array(y_test)
         x_test = np.array(x_test)
 
+        # Unscale the predictions
+        mu_preds = mu_preds * factors[ts]
+        std_preds = std_preds * factors[ts]
+        y_test = y_test * factors[ts]
+        # mu_preds = normalizer.unstandardize(mu_preds, mean_train[ts], std_train[ts])
+        # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+        # y_test = normalizer.unstandardize(y_test, mean_train[ts], std_train[ts])
+
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
         SytestPd[:, ts] = std_preds.flatten() ** 2
@@ -374,28 +441,28 @@ def main(
     np.savetxt(out_dir + "/SytestPd.csv", SytestPd, delimiter=",")
     np.savetxt(out_dir + "/ytestTr.csv", ytestTr, delimiter=",")
 
-    # -------------------------------------------------------------------------#
     # calculate metrics
     p50_tagi = metric.computeND(ytestTr, ytestPd)
     p90_tagi = metric.compute90QL(ytestTr, ytestPd, SytestPd)
     RMSE_tagi = metric.computeRMSE(ytestTr, ytestPd)
-    # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct
+    # MASE_tagi = metric.computeMASE(ytestTr, ytestPd, ytrain, seasonality) # TODO: check if ytrain is correct in MASE
 
     # save metrics into a text file
     with open(out_dir + "/metrics.txt", "w") as f:
         f.write(f"ND/p50:    {p50_tagi}\n")
         f.write(f"p90:    {p90_tagi}\n")
         f.write(f"RMSE:    {RMSE_tagi}\n")
+        # f.write(f'MASE:    {MASE_tagi}\n')
         f.write(f"Epoch:    {epoch_optim}\n")
         f.write(f"Batch size:    {batch_size}\n")
         f.write(f"Sigma_v:    {sigma_v}\n")
         f.write(f"LSTM nodes:    {lstm_nodes}\n")
-        # f.write(f'MASE:    {MASE_tagi}\n')
+        f.write(f"global_scale:    {test_dtl.global_scale}\n")
 
     # rename the directory
     out_dir_ = (
-        "out/traffic_"
-        + str(epoch_optim)
+        "out/electricity_"
+        + str(epoch)
         + "_"
         + str(batch_size)
         + "_"
@@ -406,6 +473,7 @@ def main(
 
 
 def concat_ts_sample(data, data_add):
+    """Concatenate two time series samples"""
     x_combined = np.concatenate(
         (data.dataset["value"][0], data_add.dataset["value"][0]), axis=0
     )
@@ -415,10 +483,21 @@ def concat_ts_sample(data, data_add):
     time_combined = np.concatenate(
         (data.dataset["date_time"], data_add.dataset["date_time"])
     )
+    # weights_combined = np.concatenate(
+    #     (data.dataset["weights"], data_add.dataset["weights"])
+    # )
     data.dataset["value"] = (x_combined, y_combined)
     data.dataset["date_time"] = time_combined
+    # data.dataset["weights"] = weights_combined
     return data
 
 
+def random_weighted_sampling(
+    data: np.ndarray, weights: np.ndarray, num_samples: int
+) -> np.ndarray:
+    """Random-weighted sampling"""
+    return np.random.choice(data, num_samples, p=weights)
+
+
 if __name__ == "__main__":
-    fire.Fire(main(sigma_v=0.02))
+    fire.Fire(main)
