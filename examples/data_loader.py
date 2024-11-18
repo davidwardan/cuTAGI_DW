@@ -610,7 +610,6 @@ class GlobalTimeSeriesDataloader:
         output_data: np.ndarray,
         batch_size: int,
         shuffle: bool = True,
-        weighted_sampling: bool = False,
         weights: Optional[np.ndarray] = None,
         num_samples: Optional[int] = None,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
@@ -623,23 +622,14 @@ class GlobalTimeSeriesDataloader:
         if shuffle:
             np.random.shuffle(indices)
 
-        # TODO: Implement weighted sampling
-        if weighted_sampling:
+        if num_samples is not None:
+            num_samples = min(num_data, num_samples)
             if weights is None:
-                raise ValueError("Weights must be provided for weighted sampling.")
-            if weights.shape[0] != num_data:
-                raise ValueError(
-                    "Weights array must be the same length as the number of data points."
-                )
-            if num_samples is None:
-                indices = np.random.choice(
-                    indices, size=num_data, replace=True, p=weights
-                )
+                indices = np.random.choice(indices, size=num_samples, replace=False)
             else:
                 indices = np.random.choice(
                     indices, size=num_samples, replace=True, p=weights
                 )
-                num_data = num_samples
 
         for start_idx in range(0, num_data, batch_size):
             # if start_idx + batch_size > num_data:
@@ -782,7 +772,6 @@ class GlobalTimeSeriesDataloader:
             *self.dataset["value"],
             batch_size,
             shuffle,
-            weighted_sampling,
             weights,
-            num_samples
+            num_samples,
         )
