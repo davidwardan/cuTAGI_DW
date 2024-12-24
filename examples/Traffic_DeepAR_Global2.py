@@ -24,6 +24,7 @@ def main(
     lstm_nodes: int = 40,
     embedding_dim: int = 0,
     seed: int = 0,
+    wandb: bool = False,
 ):
     """
     Run training for a time-series forecasting global model.
@@ -31,7 +32,7 @@ def main(
     """
 
     # Dataset
-    nb_ts = 963  # for electricity 370 and 963 for traffic
+    nb_ts = 5  # for electricity 370 and 963 for traffic
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 3
@@ -109,7 +110,7 @@ def main(
             LSTM(lstm_nodes, lstm_nodes, input_seq_len),
             Linear(lstm_nodes * input_seq_len, 1),
         )
-    net.to_device("cuda")
+    # net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
@@ -141,11 +142,33 @@ def main(
     early_stopping_criteria = "log_lik"  # 'log_lik' or 'mse'
     patience = 10
     net_optim = []  # to save optimal net at the optimal epoch
+    num_samples = 500000
+
+        # check wandb
+    if wandb:
+        # log in and provide api key
+        API_key = "b69f8ee26764e27349218607478e2e75b2f26c7c"
+        wandb.login(API_key)
+        wandb.init(
+            project="Traffic_deepAR_global",
+            config={
+                "num_epochs": num_epochs,
+                "batch_size": batch_size,
+                "sigma_v": sigma_v,
+                "lstm_nodes": lstm_nodes,
+                "embedding_dim": embedding_dim,
+                "seed": seed,
+                "input_seq_len": input_seq_len,
+                "num_features": num_features,
+                "early_stopping_criteria": early_stopping_criteria,
+                "num_samples": num_samples,
+            }
+        )
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
         batch_iter = train_dtl.create_data_loader(
-            batch_size,  # num_samples=5e5
+            batch_size, num_samples=num_samples
         )  # use 500K samples
 
         if sigma_v != None:
@@ -172,7 +195,7 @@ def main(
             # x_var = x_var * zero_vector
 
             # Feed forward
-            m_pred, _ = net(x)#, x_var)
+            m_pred, _ = net(x)  # , x_var)
 
             if sigma_v is None:
                 m_pred = m_pred[::2]  # Even positions
@@ -235,7 +258,7 @@ def main(
             # x_var = x_var * zero_vector
 
             # Prediction
-            m_pred, v_pred = net(x) #, x_var)
+            m_pred, v_pred = net(x)  # , x_var)
 
             if sigma_v is None:
                 mu_preds.extend(m_pred[::2])
@@ -264,10 +287,20 @@ def main(
 
         # Progress bar
         pbar.set_postfix(
-            mse=f"{np.mean(mses):.4f}",
-            mse_val=f"{mse_val:.4f}",
-            log_lik_val=f"{log_lik_val:.4f}",
+            mse=f"{np.mean(mses):.6f}",
+            mse_val=f"{mse_val:.6f}",
+            log_lik_val=f"{log_lik_val:.3f}",
         )
+
+        # check wandb
+        if wandb:
+            wandb.log(
+                {
+                    "mse": np.mean(mses),
+                    "mse_val": mse_val,
+                    "log_lik_val": log_lik_val,
+                }
+            )
 
         # early-stopping
         if early_stopping_criteria == "mse":
@@ -348,7 +381,7 @@ def main(
             # x_var = x_var * zero_vector
 
             # Prediction
-            m_pred, v_pred = net(x)#, x_var)
+            m_pred, v_pred = net(x)  # , x_var)
 
             if sigma_v is None:
                 mu_preds.extend(m_pred[::2])
@@ -421,4 +454,4 @@ def concat_ts_sample(data, data_add):
 
 
 if __name__ == "__main__":
-    fire.Fire(main(sigma_v=0.02))
+    fire.Fire(main(sigma_v=0.02), wandb=True)

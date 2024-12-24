@@ -625,18 +625,22 @@ class GlobalTimeSeriesDataloader:
         if num_samples is not None:
             num_samples = min(num_data, num_samples)
             if weights is None:
-                indices = np.random.choice(indices, size=num_samples, replace=False)
+                selected_indices = np.random.choice(indices, size=num_samples, replace=False)
             else:
-                indices = np.random.choice(
+                selected_indices = np.random.choice(
                     indices, size=num_samples, replace=True, p=weights
                 )
+        else:
+            selected_indices = indices
 
-        for start_idx in range(0, num_data, batch_size):
-            # if start_idx + batch_size > num_data:
-            #     continue
-            end_idx = min(start_idx + batch_size, num_data)
-            idx = indices[start_idx:end_idx]
-            yield input_data[idx].flatten(), output_data[idx].flatten()
+        # Calculate the number of batches
+        total_batches = int(np.ceil(len(selected_indices) / batch_size))
+
+        for batch_num in range(total_batches):
+            start_idx = batch_num * batch_size
+            end_idx = start_idx + batch_size
+            batch_indices = selected_indices[start_idx:end_idx]
+            yield input_data[batch_indices].flatten(), output_data[batch_indices].flatten()
 
     def process_data(self) -> dict:
         """Process time series"""
