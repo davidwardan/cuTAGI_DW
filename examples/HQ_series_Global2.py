@@ -19,11 +19,11 @@ sys.path.append(
 
 
 def main(
-    num_epochs: int = 1,
-    batch_size: int = 16,
-    sigma_v: float = None,
+    num_epochs: int = 200,
+    batch_size: int = 64,
+    sigma_v: float = 2,
     lstm_nodes: int = 40,
-    embedding_dim: int = 0,
+    embedding_dim: int = 2,
     seed: int = 0,
 ):
     """
@@ -32,7 +32,7 @@ def main(
     """
 
     # Dataset
-    nb_ts = 10
+    nb_ts = 31
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 2
@@ -40,9 +40,9 @@ def main(
     output_seq_len = 1
     seq_stride = 1
     rolling_window = 52  # for rolling window predictions in the test set
-    # embeddings = TimeSeriesEmbeddings(
-    #     (nb_ts, embedding_dim), "normal"
-    # )  # initialize embeddings
+    embeddings = TimeSeriesEmbeddings(
+        (nb_ts, embedding_dim), "normal"
+    )  # initialize embeddings
 
     # set seed for model initialization
     manual_seed(seed)
@@ -66,15 +66,15 @@ def main(
             stride=seq_stride,
             ts_idx=ts,
             time_covariates=["week_of_year"],
-            global_scale="deepAR",
+            global_scale="standard",
             scale_covariates=True,
-            # embedding_dim=embedding_dim,
+            embedding_dim=embedding_dim,
         )
 
         # Store scaling factors----------------------#
-        factors[ts] = train_dtl_.scale_i
-        # mean_train[ts] = train_dtl_.x_mean
-        # std_train[ts] = train_dtl_.x_std
+        # factors[ts] = train_dtl_.scale_i
+        mean_train[ts] = train_dtl_.x_mean
+        std_train[ts] = train_dtl_.x_std
         # -------------------------------------------#
 
         # store covariate means and stds
@@ -90,15 +90,15 @@ def main(
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            # x_mean=mean_train[ts],
-            # x_std=std_train[ts],
+            x_mean=mean_train[ts],
+            x_std=std_train[ts],
             time_covariates=["week_of_year"],
-            global_scale="deepAR",
-            scale_i=factors[ts],
+            global_scale="standard",
+            # scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
-            # embedding_dim=embedding_dim,
+            embedding_dim=embedding_dim,
         )
 
         if ts == 0:
@@ -124,7 +124,7 @@ def main(
             LSTM(lstm_nodes, lstm_nodes, input_seq_len),
             Linear(lstm_nodes * input_seq_len, 1),
         )
-    # net.to_device("cuda")
+    net.to_device("cuda")
     # net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
@@ -175,28 +175,28 @@ def main(
         if sigma_v != None:
             # Decaying observation's variance
             sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
+                curr_v=sigma_v, min_v=0.3, decaying_factor=0.99, curr_iter=epoch
             )
             var_y = np.full(
                 (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
             )
 
         for x, y in batch_iter:
-            # # build a zero vector with the same length as x with 1 where the embedding is stored
-            # zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
-            # # get the indices of the time series stored in the embedding
-            # x_ts_idx = reduce_vector(x, zero_vector, embedding_dim)
-            # # reduce the vector to get only the indices (needed if embedding_dim > 1)
-            # x_ts_idx = np.mean(x_ts_idx, axis=1).tolist()
+            # build a zero vector with the same length as x with 1 where the embedding is stored
+            zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+            # get the indices of the time series stored in the embedding
+            x_ts_idx = reduce_vector(x, zero_vector, embedding_dim)
+            # reduce the vector to get only the indices (needed if embedding_dim > 1)
+            x_ts_idx = np.mean(x_ts_idx, axis=1).tolist()
 
-            # # replace the embedding section with the actual embedding
-            # x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
+            # replace the embedding section with the actual embedding
+            x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
 
-            # # only leave variance for the embedding section
-            # x_var = x_var * zero_vector
+            # only leave variance for the embedding section
+            x_var = x_var * zero_vector
 
             # Feed forward
-            m_pred, _ = net(x)  # , x_var)
+            m_pred, _ = net(x, x_var)
             # print(f"m_pred: {m_pred}")
             # print(f"y: {y}")
 
@@ -232,22 +232,22 @@ def main(
             # )
 
             # get the updated input state
-            # (mu_delta, var_delta) = net.get_input_states()
+            (mu_delta, var_delta) = net.get_input_states()
 
             # update the embedding
-            # x_update = mu_delta * x_var
-            # var_update = x_var * var_delta * x_var
+            x_update = mu_delta * x_var
+            var_update = x_var * var_delta * x_var
 
             # reduce the vector to get only embeddings
-            # x_update = reduce_vector(x_update, zero_vector, embedding_dim)
-            # var_update = reduce_vector(var_update, zero_vector, embedding_dim)
+            x_update = reduce_vector(x_update, zero_vector, embedding_dim)
+            var_update = reduce_vector(var_update, zero_vector, embedding_dim)
 
             # store the updated embedding
-            # vec_loc = 0
-            # for ts_idx_ in x_ts_idx:
-            #     ts_idx_ = int(ts_idx_)
-            #     embeddings.update(ts_idx_, x_update[vec_loc], var_update[vec_loc])
-            #     vec_loc += 1
+            vec_loc = 0
+            for ts_idx_ in x_ts_idx:
+                ts_idx_ = int(ts_idx_)
+                embeddings.update(ts_idx_, x_update[vec_loc], var_update[vec_loc])
+                vec_loc += 1
 
             pred = m_pred
             obs = y
@@ -267,14 +267,14 @@ def main(
 
         for x, y in val_batch_iter:
             # replace the embedding section with the actual embedding
-            # x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
-            # zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+            x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
+            zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
 
-            # # only leave variance for the embedding section
-            # x_var = x_var * zero_vector
+            # only leave variance for the embedding section
+            x_var = x_var * zero_vector
 
             # Prediction
-            m_pred, v_pred = net(x)  # , x_var)
+            m_pred, v_pred = net(x, x_var)
 
             if sigma_v is None:
                 mu_preds.extend(m_pred[::2])
@@ -350,7 +350,7 @@ def main(
     net.save_csv(out_dir + "/param/hq_series_proposal.csv")
 
     # save the embeddings
-    # embeddings.save(out_dir)
+    embeddings.save(out_dir)
 
     # Testing
     pbar = tqdm(ts_idx, desc="Testing Progress")
@@ -370,15 +370,15 @@ def main(
             num_features=num_features,
             stride=seq_stride,
             ts_idx=ts,
-            # x_mean=mean_train[ts],
-            # x_std=std_train[ts],
+            x_mean=mean_train[ts],
+            x_std=std_train[ts],
             time_covariates=["week_of_year"],
-            global_scale="deepAR",
-            scale_i=factors[ts],
+            global_scale="standard",
+            # scale_i=factors[ts],
             scale_covariates=True,
             covariate_means=covar_means[ts],
             covariate_stds=covar_stds[ts],
-            # embedding_dim=embedding_dim,
+            embedding_dim=embedding_dim,
         )
 
         # test_batch_iter = test_dtl.create_data_loader(batch_size, shuffle=False)
@@ -388,8 +388,6 @@ def main(
         var_preds = []
         y_test = []
         x_test = []
-
-        # net = net_optim
 
         # Rolling window predictions
         for RW_idx_, (x, y) in enumerate(test_batch_iter):
@@ -402,14 +400,14 @@ def main(
                 ] = mu_preds[-RW_idx:]
 
             # replace the embedding section with the actual embedding
-            # x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
-            # zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
+            x, x_var = input_embeddings(x, embeddings, num_features, embedding_dim)
+            zero_vector = build_vector(x.shape[0], num_features, embedding_dim)
 
             # only leave variance for the embedding section
-            # x_var = x_var * zero_vector
+            x_var = x_var * zero_vector
 
             # Prediction
-            m_pred, v_pred = net(x)  # , x_var)
+            m_pred, v_pred = net(x, x_var)
 
             if sigma_v is None:
                 mu_preds.extend(m_pred[::2])
@@ -427,12 +425,12 @@ def main(
         x_test = np.array(x_test)
 
         # Unscale the predictions
-        mu_preds = mu_preds * factors[ts]
-        std_preds = std_preds * factors[ts]
-        y_test = y_test * factors[ts]
-        # mu_preds = normalizer.unstandardize(mu_preds, mean_train[ts], std_train[ts])
-        # std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-        # y_test = normalizer.unstandardize(y_test, mean_train[ts], std_train[ts])
+        # mu_preds = mu_preds * factors[ts]
+        # std_preds = std_preds * factors[ts]
+        # y_test = y_test * factors[ts]
+        mu_preds = normalizer.unstandardize(mu_preds, mean_train[ts], std_train[ts])
+        std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
+        y_test = normalizer.unstandardize(y_test, mean_train[ts], std_train[ts])
 
         # save test predictions for each time series
         ytestPd[:, ts] = mu_preds.flatten()
