@@ -655,16 +655,19 @@ class GlobalTimeSeriesDataloader:
         x = self.load_data_from_csv(self.x_file)
         x = x[:, self.ts_idx : self.ts_idx + 1]  # choose time series column
         date_time = self.load_data_from_csv(self.date_time_file)
-        if date_time.shape[1] > 1:
-            date_time = date_time[
-                :, self.ts_idx : self.ts_idx + 1
-            ]  # choose time series column
+        # x = self.load_data_from_csv(self.x_file)
+        # x = x[:, self.ts_idx : self.ts_idx + 1]  # choose time series column
+        # date_time = self.load_data_from_csv(self.date_time_file)
+        # if date_time.shape[1] > 1:
+        #     date_time = date_time[
+        #         :, self.ts_idx : self.ts_idx + 1
+        #     ]  # choose time series column
 
-        # get index of first non-nan value
-        first_non_nan = np.argmax(np.isfinite(x), axis=0)
-        # slice x and date_time to remove the nan values
-        x = x[first_non_nan[0] :, :]
-        date_time = date_time[first_non_nan[0] :, :]
+        # # get index of first non-nan value
+        # first_non_nan = np.argmax(np.isfinite(x), axis=0)
+        # # slice x and date_time to remove the nan values
+        # x = x[first_non_nan[0] :, :]
+        # date_time = date_time[first_non_nan[0] :, :]
 
         # Add time covariates
         if self.time_covariates is not None:
