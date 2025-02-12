@@ -19,6 +19,7 @@ data/traffic
 data/imagenet
 test_model/
 wandb/
+out/
 
 # VSCode
 .vscode
