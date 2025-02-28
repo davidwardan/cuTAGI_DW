@@ -24,5 +24,10 @@ void bind_slstm_layer(pybind11::module_& modo)
         .def_readwrite("init_method", &SLSTM::init_method)
         .def("init_weight_bias", &SLSTM::init_weight_bias)
         .def("forward", &SLSTM::forward)
-        .def("backward", &SLSTM::backward);
+        .def("backward", &SLSTM::backward)
+        // Expose getter and setter functions for cell and hidden states
+        .def("get_hidden_states", &SLSTM::get_hidden_states)
+        .def("set_hidden_states", &SLSTM::set_hidden_states)
+        .def("get_cell_states", &SLSTM::get_cell_states)
+        .def("set_cell_states", &SLSTM::set_cell_states);
 }

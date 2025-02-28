@@ -14,27 +14,51 @@ from pytagi.nn import SLSTM, SLinear, OutputUpdater, Sequential, Linear, LSTM
 
 from examples.data_loader import TimeSeriesDataloader
 
+plt.rcParams.update(
+    {
+        "pgf.texsystem": "pdflatex",
+        "font.family": "serif",
+        "text.usetex": False,
+        "pgf.rcfonts": False,
+        "figure.figsize": [6, 2],
+        "font.size": 12,
+    }
+)
+
 # Parameters for the sinusoidal data
-frequency = 1  # Frequency of the sine wave
-amplitude = 1  # Amplitude of the sine wave
-phase = 0  # Phase shift
-sampling_rate = 100  # Points per unit time
-duration = 10  # Duration in seconds
+frequency = 1
+phase = 0
+sampling_rate = 100
+duration = 10
+
+# Define time/amplitude segments (time, amplitude)
+change_points = [(0, 1), (5, 2), (10, 0.5), (15, 1.5)]
 
 # Generate time points
 t = np.linspace(0, duration, int(sampling_rate * duration))
+y = np.zeros_like(t)
 
-# Generate sinusoidal data
-y = amplitude * np.sin(2 * np.pi * frequency * t + phase)
+# Generate data with amplitude changes
+for i in range(len(change_points) - 1):
+    start_time, amp = change_points[i]
+    end_time, _ = change_points[i + 1]
+    mask = (t >= start_time) & (t < end_time)
+    y[mask] = amp * np.sin(2 * np.pi * frequency * t[mask] + phase)
 
-# # Visualize the synthetic data
-# plt.figure(figsize=(10, 5))
-# plt.plot(t, y)
-# plt.xlabel("Time")
-# plt.ylabel("Value")
-# plt.show()
+# Handle final segment
+last_time, last_amp = change_points[-1]
+mask = t >= last_time
+y[mask] = last_amp * np.sin(2 * np.pi * frequency * t[mask] + phase)
+
+# Visualize the synthetic data
+plt.plot(t, y)
+plt.xlabel("Time")
+plt.ylabel("Value")
+plt.show()
+plt.savefig("time_series.svg", bbox_inches="tight", pad_inches=0, transparent=True)
 
 
+# define function to split data into windows
 def split_into_windows(data, window_size):
     """
     Splits the input array `data` into windows of size `window_size` with a stride of 1,
@@ -55,7 +79,7 @@ def split_into_windows(data, window_size):
     return x, y
 
 
-window_size = 10
+window_size = 20
 batch_size = 1
 output_col = [0]
 X, Y = split_into_windows(y, window_size)
@@ -67,28 +91,33 @@ output_seq_len = 1
 
 # Network
 net = Sequential(
-    SLSTM(input_seq_len, 40, 1),
-    SLSTM(40, 40, 1),
-    SLinear(40, 1),
+    SLSTM(input_seq_len, 20, 1),
+    SLSTM(20, 20, 1),
+    SLinear(20, 1),
 )
 net.set_threads(1)  # multi-processing is slow on a small net
 out_updater = OutputUpdater(net.device)
-sigma_v = 1.0
+sigma_v = 0.3
 net.num_samples = window_size + input_seq_len
 net.input_state_update = True
 var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
 mses = []
+y_preds = []
+prev_states = np.zeros(input_seq_len, dtype=np.float32)
 for x, y in zip(X, Y):
 
     x = x.astype(np.float32)
     y = np.array([y], dtype=np.float32)
 
     # concatenate ones to beginning of x with input seq_len
-    nan_input = np.ones(input_seq_len, dtype=np.float32)
-    x = np.concatenate((nan_input, x), axis=0)
+    x = np.concatenate((prev_states, x), axis=0)
+    prev_states = x[-input_seq_len:]
 
+    # Feed forward
     y_pred, _ = net(x)
+    print(len(y_pred))
+    y_preds.append(y_pred[-1])
 
     # Update output layer
     out_updater.update(
@@ -102,11 +131,19 @@ for x, y in zip(X, Y):
     net.backward()
     net.step()
 
+    # Compute MSE
     mse = metric.mse(y_pred, y)
     mses.append(mse)
 
     # smooth states
-    net.smoother()
-    mu, var = net.get_outputs_smoother()
+    mu_zo_smooth, var_zo_smooth = net.smoother()
 
-    # print(mu_zo_smooth)
+# visualize true data with predicted data
+plt.plot(t[window_size:], Y, label="True data")
+plt.plot(t[window_size:], y_preds, label="Predicted data")
+plt.xlabel("Time")
+plt.ylabel("Value")
+plt.legend(loc=(0.25, 1.04), ncol=2, frameon=False)
+plt.savefig(
+    "time_series_online.svg", bbox_inches="tight", pad_inches=0, transparent=True
+)
