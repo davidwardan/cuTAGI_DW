@@ -182,7 +182,7 @@ void save_priors_smoother(int time_step, int num_states,
             lstm_states.var_c_prior[i];
     }
 }
-
+// TODO: check this function
 void save_posteriors_smoother(int time_step, int num_states,
                               BaseLSTMStates &lstm_states,
                               SmoothSLSTM &smooth_states) {

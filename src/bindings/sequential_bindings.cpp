@@ -153,4 +153,8 @@ void bind_sequential(pybind11::module_& m) {
             }
             self.set_lstm_states(states);
         });
+        .def("get_all_hidden_states", &Sequential::get_all_hidden_states)
+        .def("get_all_cell_states", &Sequential::get_all_cell_states)
+        .def("set_all_hidden_states", &Sequential::set_all_hidden_states)
+        .def("set_all_cell_states", &Sequential::set_all_cell_states);
 }
