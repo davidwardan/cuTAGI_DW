@@ -169,7 +169,7 @@ void save_priors_smoother(int time_step, int num_states,
             lstm_states.var_c_prior[i];
     }
 }
-
+// TODO: check this function
 void save_posteriors_smoother(int time_step, int num_states,
                               BaseLSTMStates &lstm_states,
                               SmoothSLSTM &smooth_states) {
@@ -539,6 +539,34 @@ void SLSTM::smoother()
 
     // // TODO: Clear variables for next epoch
     this->time_step = 0;
-    this->smooth_states.reset_zeros();
-    this->lstm_states.reset_zeros();
+    // this->smooth_states.reset_zeros();
+    // this->lstm_states.reset_zeros();
+}
+
+std::vector<float> SLSTM::get_hidden_states() const {
+    // Return the current hidden state.
+    // Adjust the member variable if your implementation uses a different one.
+    return this->lstm_states.mu_h_prior;
+}
+
+void SLSTM::set_hidden_states(const std::vector<float> &new_hidden) {
+    // Check that the new hidden state has the correct size
+    if (new_hidden.size() != this->lstm_states.mu_h_prior.size()) {
+        throw std::runtime_error("Hidden state size mismatch.");
+    }
+    this->lstm_states.mu_h_prior = new_hidden;
+}
+
+std::vector<float> SLSTM::get_cell_states() const {
+    // Return the current cell state.
+    // Adjust if your implementation stores it differently.
+    return this->smooth_states.mu_c_smooths;
+}
+
+void SLSTM::set_cell_states(const std::vector<float> &new_cell) {
+    // Check that the new cell state has the correct size
+    if (new_cell.size() != this->lstm_states.mu_c_prior.size()) {
+        throw std::runtime_error("Cell state size mismatch.");
+    }
+    this->lstm_states.mu_c_prior = new_cell;
 }

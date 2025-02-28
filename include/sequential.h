@@ -159,6 +159,19 @@ class Sequential {
                                                std::vector<std::vector<float>>>>
     get_norm_mean_var();
     std::unordered_map<std::string, int> get_neg_var_w_counter();
+    // Retrieve hidden states from all SLSTM layers in the network.
+    std::map<std::string, std::vector<float>> get_all_hidden_states() const;
+
+    // Retrieve cell states from all SLSTM layers in the network.
+    std::map<std::string, std::vector<float>> get_all_cell_states() const;
+
+    // Set hidden states for all SLSTM layers.
+    void set_all_hidden_states(
+        const std::map<std::string, std::vector<float>>& new_states);
+
+    // Set cell states for all SLSTM layers.
+    void set_all_cell_states(
+        const std::map<std::string, std::vector<float>>& new_states);
 
     std::unordered_map<int, std::tuple<std::vector<float>, std::vector<float>,
                                        std::vector<float>, std::vector<float>>>
