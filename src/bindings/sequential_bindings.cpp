@@ -151,4 +151,8 @@ void bind_sequential(pybind11::module_& m) {
             }
             return py_norm_mean_var;
         });
+        .def("get_all_hidden_states", &Sequential::get_all_hidden_states)
+        .def("get_all_cell_states", &Sequential::get_all_cell_states)
+        .def("set_all_hidden_states", &Sequential::set_all_hidden_states)
+        .def("set_all_cell_states", &Sequential::set_all_cell_states);
 }

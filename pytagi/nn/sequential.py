@@ -234,3 +234,14 @@ class Sequential:
 
         """
         return self._cpp_backend.get_norm_mean_var()
+    def get_all_hidden_states(self):
+        return self._cpp_backend.get_all_hidden_states()
+
+    def get_all_cell_states(self):
+        return self._cpp_backend.get_all_cell_states()
+
+    def set_all_hidden_states(self, new_states):
+        self._cpp_backend.set_all_hidden_states(new_states)
+
+    def set_all_cell_states(self, new_states):
+        self._cpp_backend.set_all_cell_states(new_states)

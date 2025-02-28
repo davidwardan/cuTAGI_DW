@@ -785,3 +785,80 @@ Sequential::get_input_states() {
 
     return {py_delta_mu, py_delta_var};
 }
+
+std::map<std::string, std::vector<float>> Sequential::get_all_hidden_states()
+    const {
+    std::map<std::string, std::vector<float>> state_dict;
+    for (size_t i = 0; i < layers.size(); ++i) {
+        // Only consider layers that are SLSTM
+        if (layers[i]->get_layer_type() == LayerType::SLSTM) {
+            // Use a unique key, for example layer_info + index
+            std::string key =
+                layers[i]->get_layer_info() + "_" + std::to_string(i);
+            // Cast to SLSTM to access the new getter
+            const SLSTM *slstm_layer =
+                dynamic_cast<const SLSTM *>(layers[i].get());
+            if (slstm_layer) {
+                state_dict[key] = slstm_layer->get_hidden_states();
+            }
+        }
+    }
+    return state_dict;
+}
+
+std::map<std::string, std::vector<float>> Sequential::get_all_cell_states()
+    const {
+    std::map<std::string, std::vector<float>> state_dict;
+    for (size_t i = 0; i < layers.size(); ++i) {
+        if (layers[i]->get_layer_type() == LayerType::SLSTM) {
+            std::string key =
+                layers[i]->get_layer_info() + "_" + std::to_string(i);
+            const SLSTM *slstm_layer =
+                dynamic_cast<const SLSTM *>(layers[i].get());
+            if (slstm_layer) {
+                state_dict[key] = slstm_layer->get_cell_states();
+            }
+        }
+    }
+    return state_dict;
+}
+
+void Sequential::set_all_hidden_states(
+    const std::map<std::string, std::vector<float>> &new_states) {
+    for (size_t i = 0; i < layers.size(); ++i) {
+        if (layers[i]->get_layer_type() == LayerType::SLSTM) {
+            std::string key =
+                layers[i]->get_layer_info() + "_" + std::to_string(i);
+            auto it = new_states.find(key);
+            if (it != new_states.end()) {
+                SLSTM *slstm_layer = dynamic_cast<SLSTM *>(layers[i].get());
+                if (slstm_layer) {
+                    slstm_layer->set_hidden_states(it->second);
+                }
+            } else {
+                throw std::runtime_error(
+                    "Missing new hidden state for layer: " + key);
+            }
+        }
+    }
+}
+
+void Sequential::set_all_cell_states(
+    const std::map<std::string, std::vector<float>> &new_states) {
+    for (size_t i = 0; i < layers.size(); ++i) {
+        if (layers[i]->get_layer_type() == LayerType::SLSTM) {
+            std::string key =
+                layers[i]->get_layer_info() + "_" + std::to_string(i);
+            auto it = new_states.find(key);
+            if (it != new_states.end()) {
+                SLSTM *slstm_layer = dynamic_cast<SLSTM *>(layers[i].get());
+                if (slstm_layer) {
+                    slstm_layer->set_cell_states(it->second);
+                }
+            } else {
+                throw std::runtime_error("Missing new cell state for layer: " +
+                                         key);
+            }
+        }
+    }
+}
