@@ -650,7 +650,7 @@ void SLSTM::backward(BaseDeltaStates &input_delta_states,
     ++this->time_step;
 }
 
-void SLSTM::smoother()
+void SLSTM::smoother(bool online /*= false*/)
 /*
  */
 {

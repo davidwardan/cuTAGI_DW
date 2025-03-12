@@ -82,36 +82,30 @@ def generate_changing_amplitude_sine(
 
 
 # Generate time series data with changing amplitude
-frequency = 1
+# Set parameters for hourly data with each cycle having 24 data points (i.e., one day)
+frequency = 1 / 24  # One cycle per 24 hours
 phase = 0
-sampling_rate = 100
-duration = 20
+sampling_rate = 1  # 1 sample per hour
+duration = 480  # Total duration in hours (e.g., 10 days of data)
 # change_points = [(0, 1), (5, 2), (10, 0.5), (15, 1.5)]
+change_points = [(0, 1), (24 * 10, 2)]
 
 t, y = generate_changing_amplitude_sine(
     frequency=frequency,
     phase=phase,
     sampling_rate=sampling_rate,
     duration=duration,
-    # change_points=change_points,
+    change_points=change_points,
 )
-
-y_true = y.copy()
-
-# Visualize the synthetic data
-plt.plot(t, y)
-plt.xlabel("Time")
-plt.ylabel("Value")
-plt.savefig("time_series.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
 
 # global parameters
 output_col = [0]
 num_features = 1
-input_seq_len = 5
+input_seq_len = 1
 output_seq_len = 1
-window_size = 20  # window size for online training
+window_size = 24  # window size for online training
 batch_size = 1  # so far only batch_size=1 is supported
-sigma_v = 2
+sigma_v = 4  # initial sigma_v
 
 
 # prepare data into windows
@@ -119,26 +113,44 @@ def prepare_data(data, window_size):
     x = []
     for i in range(len(data) - window_size + 1):
         x.append(data[i : i + window_size])
-    return x
+    return np.array(x, dtype=np.float32)
 
+# split data into training and testing
+split_ratio = 0.8
 
-# prepare data
-data = y
+train_data = y[: int(0.8 * len(y))]
+test_data = y[int(0.8 * len(y)) :]
+
+train_y = train_data.copy()
+test_y = test_data.copy()
+
+# Visualize the synthetic data
+train_t = t[: int(0.8 * len(y))]
+test_t = t[int(0.8 * len(y)) :]
+
+plt.figure()
+plt.plot(train_t, train_data, "b-", label="Training Data")
+plt.plot(test_t, test_data, "r-", label="Testing Data")
+plt.legend(loc=(0.2, 1.01), ncol=2, frameon=False)
+plt.xlabel("Time")
+plt.ylabel("Value")
+plt.savefig("time_series.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
+
 # data = normalizer(data)
-data = prepare_data(data, window_size)
-data = np.array(data, dtype=np.float32)
+train_data = prepare_data(train_data, window_size)
 
 # Network
 net = Sequential(
     SLSTM(input_seq_len, 10, 1),
     SLSTM(10, 10, 1),
-    # SLSTM(10, 10, 1),
     SLinear(10, 1),
 )
 manual_seed(42)  # TAGI seed
-net.set_threads(1)  # multi-processing is slow on a small net
+net.set_threads(8)  # multi-processing is slow on a small net
 out_updater = OutputUpdater(net.device)
-net.num_samples = window_size + input_seq_len  # TODO: what should this be?
+net.num_samples = (
+    window_size + input_seq_len
+)  # equal to the window size + lookback period
 net.input_state_update = True
 var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
@@ -146,37 +158,51 @@ mu_preds = []
 S_preds = []
 mses = []
 # Training
-first_lookback = np.ones(
-    input_seq_len, dtype=np.float32
-)  # set to 1 for the first lookback
-
+first_lookback = np.ones(input_seq_len, dtype=np.float32)
 
 i = 0
-mu_preds = [0.0] * (len(data) * (window_size - input_seq_len + 1))
-S_preds = [0.0] * (len(data) * (window_size - input_seq_len + 1))
+# mu_preds = [0.0] * (train_data.shape[0] + train_data.shape[1] - 1)
+# S_preds = [0.0] * (train_data.shape[0] + train_data.shape[1] - 1)
+mu_preds = []
+S_preds = []
+parameters = []  # store parameters for each window
 
-for idx, window in tqdm(enumerate(data)):
+prediction_idx = 0
+total_mse = 0
+
+for idx, window in tqdm(
+    enumerate(train_data), desc="Processing windows", total=len(train_data)
+):
     window = np.concatenate((first_lookback, window))  # add first lookback
     x_rolled, y_rolled = utils.create_rolling_window(
         window, output_col, input_seq_len, output_seq_len, num_features, 1
     )
 
+    sigma_v = exponential_scheduler(
+        curr_v=sigma_v, min_v=1, decaying_factor=0.99, curr_iter=idx
+    )
+    var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
+
     # update first lookback for the next window
     first_lookback = window[1 : input_seq_len + 1]
-
-    # prediction index
     prediction_idx = idx
 
-    # iterate over the rolled windows
-    for x, y in zip(x_rolled, y_rolled):
-        x = x.astype(np.float32)
-        y = np.array(y, dtype=np.float32)
-        # print(prediction_idx)
-
+    # iterate over the rolled windows of the smoothing window
+    for i, (x, y) in enumerate(
+        tqdm(
+            zip(x_rolled, y_rolled),
+            desc=f"Window {idx}",
+            leave=False,
+            total=len(x_rolled),
+        )
+    ):
         # forward pass
         mu_pred, S_pred = net(x)
-        mu_preds[prediction_idx] = mu_pred
-        S_preds[prediction_idx] = S_pred
+        if idx == 0:
+            mu_preds.append(mu_pred)
+            S_preds.append(S_pred)
+        # mu_preds[prediction_idx] = mu_pred
+        # S_preds[prediction_idx] = S_pred
         prediction_idx += 1
 
         # update output
@@ -191,54 +217,45 @@ for idx, window in tqdm(enumerate(data)):
         net.backward()
         net.step()
 
-        # get hidden and cell states
-        hidden_states = net.get_all_hidden_states()
-        cell_states = net.get_all_cell_states()
-        print(len(hidden_states['SLSTM(10,10)_1']))
-        print(len(cell_states['SLSTM(10,10)_1']))
-
-        # Smooth values
-        net.smoother()
-
-        smoothed_hidden_states = net.get_all_hidden_states()
-        smoothed_cell_states = net.get_all_cell_states()
-        print(len(smoothed_hidden_states['SLSTM(10,10)_1']))
-        print(len(smoothed_cell_states['SLSTM(10,10)_1']))
-
-        sys.exit()
-
         # Compute MSE
         mse = metric.mse(mu_pred, y)
         mses.append(mse)
+        total_mse += mse
 
-# slice the predictions
-mu_preds = mu_preds[:prediction_idx]
-S_preds = S_preds[:prediction_idx]
+    # Smooth values
+    net.smoother(online=True)
+
+    # append the last prediction
+    if idx > 0:
+        mu_preds.append(mu_pred)
+        S_preds.append(S_pred)
+
+    # Print average MSE for this window
+    avg_mse = total_mse / prediction_idx if prediction_idx > 0 else 0
+    print(f"Window {idx}, Average MSE: {avg_mse:.6f}, Current σ: {sigma_v:.3f}")
 
 # Visualize the predictions
 plt.figure()
-y_preds = np.array(mu_preds).flatten()
+mu_preds = np.array(mu_preds).flatten()
 S_preds = np.array(S_preds).flatten()
-plt.plot(y_true, "k", label=r"$y_{true}$")
-plt.plot(mu_preds, "r", label=r"$\mathbb{E}[Y']$")
+plt.plot(train_t, train_y, "k", label=r"$y_{true}$")
+plt.plot(train_t, mu_preds, "r", label=r"$\mathbb{E}[Y']$")
 plt.fill_between(
-    range(len(y_preds)),
-    y_preds - np.sqrt(S_preds),
-    y_preds + np.sqrt(S_preds),
+    train_t,
+    mu_preds - np.sqrt(S_preds),
+    mu_preds + np.sqrt(S_preds),
     facecolor="red",
     alpha=0.3,
     label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(1),
 )
+plt.axvspan(0, window_size, alpha=0.2, color="forestgreen", zorder=0)
 plt.legend(loc=(0.2, 1.01), ncol=3, frameon=False)
 plt.xlabel("Time")
 plt.ylabel("Value")
 plt.savefig("pred.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
 
-# synthesize more data for prediction
-data_forecast = y_true
-data_forecast = data_forecast[-(250 + input_seq_len) :]
-x = data_forecast.astype(np.float32)
-
+# Test the model
+x = np.concatenate((train_y[-input_seq_len:], test_data))
 x_rolled, y_rolled = utils.create_rolling_window(
     x, output_col, input_seq_len, output_seq_len, num_features, 1
 )
@@ -246,9 +263,8 @@ x_rolled, y_rolled = utils.create_rolling_window(
 mu_preds = []
 S_preds = []
 for x, y in zip(x_rolled, y_rolled):
-    x = x.astype(np.float32)
 
-    # forward pass
+    # Forward pass
     mu_pred, S_pred = net(x)
     mu_preds.append(mu_pred)
     S_preds.append(S_pred)
@@ -257,12 +273,14 @@ for x, y in zip(x_rolled, y_rolled):
 mu_preds = np.array(mu_preds).flatten()
 S_preds = np.array(S_preds).flatten()
 plt.figure()
-plt.plot(y_rolled[input_seq_len:], "k", label=r"$y_{true}$")
-plt.plot(mu_preds[input_seq_len:], "r", label=r"$\mathbb{E}[Y']$")
+plt.plot(train_t, train_y, "k")
+plt.axvspan(train_t[0], train_t[-1], alpha=0.2)
+plt.plot(test_t, test_y, "k", label=r"$y_{true}$")
+plt.plot(test_t, mu_preds, "r", label=r"$\mathbb{E}[Y']$")
 plt.fill_between(
-    range(len(mu_preds[input_seq_len:])),
-    mu_preds[input_seq_len:] - np.sqrt(S_preds[input_seq_len:]),
-    mu_preds[input_seq_len:] + np.sqrt(S_preds[input_seq_len:]),
+    test_t,
+    mu_preds - np.sqrt(S_preds),
+    mu_preds + np.sqrt(S_preds),
     facecolor="red",
     alpha=0.3,
     label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(1),

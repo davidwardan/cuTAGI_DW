@@ -67,7 +67,8 @@ void bind_sequential(pybind11::module_& m) {
                  }
              })
         .def("backward", &Sequential::backward)
-        .def("smoother", &Sequential::smoother)
+        .def("smoother", &Sequential::smoother, pybind11::arg("online") = false,
+             "Perform smoothing with optional online update of states.")
         .def("step", &Sequential::step)
         .def("reset_lstm_states", &Sequential::reset_lstm_states)
         .def("output_to_host", &Sequential::output_to_host)

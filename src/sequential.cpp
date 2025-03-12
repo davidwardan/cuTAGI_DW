@@ -476,7 +476,8 @@ void Sequential::backward()
                               this->input_state_update);
 }
 
-std::tuple<std::vector<float>, std::vector<float>> Sequential::smoother()
+std::tuple<std::vector<float>, std::vector<float>> Sequential::smoother(
+    bool online /*= false*/)
 /*
  */
 {
