@@ -405,7 +405,8 @@ void Sequential::backward()
                               this->input_state_update);
 }
 
-std::tuple<std::vector<float>, std::vector<float>> Sequential::smoother()
+std::tuple<std::vector<float>, std::vector<float>> Sequential::smoother(
+    bool online /*= false*/)
 /*
  */
 {
@@ -416,7 +417,7 @@ std::tuple<std::vector<float>, std::vector<float>> Sequential::smoother()
         auto *current_layer = layer->get();
         if (current_layer->get_layer_type() == LayerType::SLSTM) {
             auto *slstm_layer = dynamic_cast<SLSTM *>(current_layer);
-            slstm_layer->smoother();
+            slstm_layer->smoother(online);
         } else if (current_layer->get_layer_type() == LayerType::SLinear) {
             auto *slinear_layer = dynamic_cast<SLinear *>(current_layer);
             slinear_layer->smoother();
