@@ -34,7 +34,7 @@ class SLSTM : public LSTM {
                   BaseTempStates &temp_states,
                   bool state_udapte = true) override;
 
-    void smoother();
+    void smoother(bool online = false);
 
     std::tuple<std::vector<float>, std::vector<float>, std::vector<float>,
                std::vector<float>>
