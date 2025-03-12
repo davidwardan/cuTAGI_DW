@@ -34,7 +34,7 @@ class SLSTM : public LSTM {
                   BaseTempStates &temp_states,
                   bool state_udapte = true) override;
 
-    void smoother();
+    void smoother(bool online = false);
 
     // Getter and Setter for hidden states
     std::vector<float> get_hidden_states() const;

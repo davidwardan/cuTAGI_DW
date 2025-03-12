@@ -145,10 +145,9 @@ class Sequential:
         """Perform a backward pass."""
         self._cpp_backend.backward()
 
-    def smoother(self):
-        """Perform a smoother pass."""
-        self._cpp_backend.smoother()
-
+    def smoother(self, online: bool = False):
+        """Perform a smoother pass with optional online update."""
+        self._cpp_backend.smoother(online)
         return self.get_outputs_smoother()
 
     def step(self):

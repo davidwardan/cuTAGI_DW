@@ -508,7 +508,7 @@ void SLSTM::backward(BaseDeltaStates &input_delta_states,
     ++this->time_step;
 }
 
-void SLSTM::smoother()
+void SLSTM::smoother(bool online /*= false*/)
 /*
  */
 {
@@ -537,36 +537,54 @@ void SLSTM::smoother()
         this->smooth_states.var_h_posts, this->smooth_states.mu_h_smooths,
         this->smooth_states.var_h_smooths);
 
-    // // TODO: Clear variables for next epoch
+    // Clear the LSTM states
     this->time_step = 0;
-    // this->smooth_states.reset_zeros();
-    // this->lstm_states.reset_zeros();
+    this->lstm_states.reset_zeros();
+
+    // Assign smoothed state as the previous state for the next window
+    if (online) {
+        size_t num_states =
+            this->smooth_states.num_states;  // number of states per time step
+        this->lstm_states.mu_h_prev.assign(
+            this->smooth_states.mu_h_smooths.begin() + num_states,
+            this->smooth_states.mu_h_smooths.begin() + 2 * num_states);
+        this->lstm_states.var_h_prev.assign(
+            this->smooth_states.var_h_smooths.begin() + num_states,
+            this->smooth_states.var_h_smooths.begin() + 2 * num_states);
+        this->lstm_states.mu_c_prev.assign(
+            this->smooth_states.mu_c_smooths.begin() + num_states,
+            this->smooth_states.mu_c_smooths.begin() + 2 * num_states);
+        this->lstm_states.var_c_prev.assign(
+            this->smooth_states.var_c_smooths.begin() + num_states,
+            this->smooth_states.var_c_smooths.begin() + 2 * num_states);
+    }
+
+    // Clear the smoothed states
+    this->smooth_states.reset_zeros();
 }
 
 std::vector<float> SLSTM::get_hidden_states() const {
     // Return the current hidden state.
-    // Adjust the member variable if your implementation uses a different one.
-    return this->lstm_states.mu_h_prior;
+    return this->smooth_states.mu_h_posts;
 }
 
 void SLSTM::set_hidden_states(const std::vector<float> &new_hidden) {
     // Check that the new hidden state has the correct size
-    if (new_hidden.size() != this->lstm_states.mu_h_prior.size()) {
+    if (new_hidden.size() != this->lstm_states.mu_h_prev.size()) {
         throw std::runtime_error("Hidden state size mismatch.");
     }
-    this->lstm_states.mu_h_prior = new_hidden;
+    this->lstm_states.mu_h_prev = new_hidden;
 }
 
 std::vector<float> SLSTM::get_cell_states() const {
     // Return the current cell state.
-    // Adjust if your implementation stores it differently.
-    return this->smooth_states.mu_c_smooths;
+    return this->smooth_states.mu_c_posts;
 }
 
 void SLSTM::set_cell_states(const std::vector<float> &new_cell) {
     // Check that the new cell state has the correct size
-    if (new_cell.size() != this->lstm_states.mu_c_prior.size()) {
+    if (new_cell.size() != this->lstm_states.mu_c_prev.size()) {
         throw std::runtime_error("Cell state size mismatch.");
     }
-    this->lstm_states.mu_c_prior = new_cell;
+    this->lstm_states.mu_c_prev = new_cell;
 }
