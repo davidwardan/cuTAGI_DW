@@ -13,7 +13,7 @@ plt.rcParams.update(
         "font.family": "serif",
         "text.usetex": False,
         "pgf.rcfonts": False,
-        "figure.figsize": [6, 2],
+        "figure.figsize": [10, 2],
         "font.size": 12,
     }
 )
@@ -143,7 +143,9 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
     plt.xlabel("Time")
     plt.ylabel("Value")
     plt.ylim(y_min, y_max)
-    plt.savefig("./out/time_series.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
+    plt.savefig(
+        "./out/time_series.pdf", bbox_inches="tight", pad_inches=0, transparent=True
+    )
 
     # Load data into windows
     train_data = prepare_windows(train_data, window_size)
@@ -153,9 +155,10 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
 
     # Network
     net = Sequential(
-        SLSTM(input_seq_len, 40, 1),
-        SLSTM(40, 40, 1),
-        SLinear(40, 1),
+        SLSTM(input_seq_len, 100, 1),
+        SLSTM(100, 100, 1),
+        # SLSTM(40, 40, 1),
+        SLinear(100, 1),
     )
     net.set_threads(1)  # only set to 1
     out_updater = OutputUpdater(net.device)
@@ -196,6 +199,9 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
                 if idx == 0:
                     mu_preds.append(mu_pred)
                     S_preds.append(S_pred)
+                # elif i == len(x_rolled) - 1:
+                #     mu_preds.append(mu_pred)
+                #     S_preds.append(S_pred)
 
                 # update output
                 out_updater.update(
@@ -218,16 +224,18 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
                 log_liks.append(log_lik)
                 window_log_lik += log_lik
 
-        # Smooth values
-        if idx == train_data.shape[0] - 1:
-            net.smoother(online=False)
-        else:
-            net.smoother(online=True)
-
-        # append the last prediction
-        if idx > 0:
+            # do a one-step prediction
+            some_x = np.concatenate((x_rolled[-1], y_rolled[-1]))
+            mu_pred, S_pred = net(some_x[-input_seq_len:])
             mu_preds.append(mu_pred)
             S_preds.append(S_pred)
+
+        # Smooth values
+        if idx == train_data.shape[0] - 1:
+            # net.smoother(online=False)
+            pass
+        else:
+            net.smoother(online=True)
 
         # Print average MSE for this window
         tqdm.write(
@@ -235,16 +243,16 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
         )
 
     # Compute residuals
-    residuals = train_y - np.array(mu_preds).flatten()
+    # residuals = train_y - np.array(mu_preds).flatten()
 
     # Visualize the predictions
     plt.figure()
     mu_preds = np.array(mu_preds).flatten()
     S_preds = np.array(S_preds).flatten()
     plt.plot(train_t, train_y, "k", label=r"$y_{true}$")
-    plt.plot(train_t, mu_preds, "r", label=r"$\mathbb{E}[Y']$")
+    plt.plot(range(len(mu_preds)), mu_preds, "r", label=r"$\mathbb{E}[Y']$")
     plt.fill_between(
-        train_t,
+        range(len(mu_preds)),
         mu_preds - np.sqrt(S_preds),
         mu_preds + np.sqrt(S_preds),
         facecolor="red",
@@ -259,16 +267,18 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
     plt.savefig("./out/pred.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
 
     # Visualize the residuals
-    plt.figure()
-    plt.plot(train_t, residuals, "k")
-    plt.axvspan(0, window_size, alpha=0.2)
-    if change_points is not None:
-        for change in change_points[1:]:
-            plt.axvline(x=change[0], color="r", linestyle="--")
-    plt.xlabel("Time")
-    plt.ylabel("Residuals")
-    plt.ylim(y_min, y_max)
-    plt.savefig("./out/residuals.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
+    # plt.figure()
+    # plt.plot(train_t, residuals, "k")
+    # plt.axvspan(0, window_size, alpha=0.2)
+    # if change_points is not None:
+    #     for change in change_points[1:]:
+    #         plt.axvline(x=change[0], color="r", linestyle="--")
+    # plt.xlabel("Time")
+    # plt.ylabel("Residuals")
+    # plt.ylim(y_min, y_max)
+    # plt.savefig(
+    #     "./out/residuals.pdf", bbox_inches="tight", pad_inches=0, transparent=True
+    # )
 
     # Test the model
     input_seq = train_y[-input_seq_len:].copy()
@@ -292,23 +302,42 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
     recursive_mu_preds = np.array(recursive_mu_preds).flatten()
     recursive_S_preds = np.array(recursive_S_preds).flatten()
     plt.figure()
-    # plt.plot(train_t, train_y, "k")
-    # plt.axvspan(train_t[0], train_t[-1], alpha=0.2)
+    plt.plot(train_t, train_y, "k")
+    plt.axvspan(train_t[0], train_t[-1], alpha=0.2, label="Online Learning")
+    plt.plot(range(len(mu_preds)), mu_preds, "r")
+    plt.axvspan(
+        0,
+        window_size,
+        facecolor="green",
+        alpha=0.2,
+        edgecolor="none",
+        linewidth=0,
+        label=r"$\mathtt{D}$",
+    )
+    plt.fill_between(
+        range(len(mu_preds)),
+        mu_preds - np.sqrt(S_preds),
+        mu_preds + np.sqrt(S_preds),
+        facecolor="red",
+        alpha=0.3,
+    )
     plt.plot(test_t, test_y, "k", label=r"$y_{true}$")
-    plt.plot(test_t, recursive_mu_preds, "r", label=r"$\mathbb{E}[Y']$")
+    plt.plot(test_t, recursive_mu_preds, "b", label=r"$\mathbb{E}[Y']$")
     plt.fill_between(
         test_t,
         recursive_mu_preds - np.sqrt(recursive_S_preds),
         recursive_mu_preds + np.sqrt(recursive_S_preds),
-        facecolor="red",
+        facecolor="blue",
         alpha=0.3,
         label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(1),
     )
-    plt.legend(loc=(0.2, 1.01), ncol=3, frameon=False)
+    plt.legend(loc=(0.06, 1.01), ncol=5, frameon=False)
     plt.xlabel("Time")
     plt.ylabel("Value")
     plt.ylim(y_min, y_max)
-    plt.savefig("./out/pred_future.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
+    plt.savefig(
+        "./out/pred_future.pdf", bbox_inches="tight", pad_inches=0, transparent=True
+    )
 
     # Calculate the MSE and log likelihood for the test data
     test_mse = metric.mse(test_y, recursive_mu_preds)
@@ -330,7 +359,7 @@ if __name__ == "__main__":
     phase = 0  # Initial phase
     sampling_rate = 1  # 1 sample per hour
     duration = 1 / frequency * 25  # Total duration
-    change_points = [(0, 1), (24 * 5, 0.5), (24 * 10, 2, 1 / 48)]
+    change_points = [(0, 1), (24 * 14, 1.5), (24 * 16, 0.75, 1 / 36)]
 
     t, y = generate_changing_amplitude_sine(
         frequency=frequency,
@@ -341,9 +370,9 @@ if __name__ == "__main__":
     )
 
     # Get index for test split
-    num_test_cycles = 2
+    num_test_cycles = 2.5
     period = 48
     test_duration = num_test_cycles * period
     test_index = len(y) - int(test_duration * sampling_rate)
 
-    main(y, t, test_index, window_size=24, sigma_v=4.0, change_points=change_points)
+    main(y, t, test_index, window_size=48, sigma_v=1, change_points=change_points)
