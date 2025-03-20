@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
+import pandas as pd
 
 import pytagi.metric as metric
 from pytagi import exponential_scheduler, manual_seed, Utils
@@ -13,96 +14,23 @@ plt.rcParams.update(
         "font.family": "serif",
         "text.usetex": False,
         "pgf.rcfonts": False,
-        "figure.figsize": [10, 2],
-        "font.size": 12,
     }
 )
 
+import matplotlib as mpl
+
+mpl.rcParams.update(
+    {
+        "pgf.texsystem": "pdflatex",
+        "pgf.preamble": r"\usepackage{amsfonts}\usepackage{amssymb}",
+    }
+)
+
+# set line width to 1
+mpl.rcParams["lines.linewidth"] = 1
+
 # Instantiate the Utils class
 utils = Utils()
-
-
-# Define function to generate time series data with changing amplitude and frequency
-def generate_changing_amplitude_sine(
-    frequency=1, phase=0, sampling_rate=100, duration=10, change_points=None
-):
-    """
-    Generate a sine wave time series with variable amplitude and frequency,
-    ensuring continuity at changepoints by adjusting the phase.
-
-    If `change_points` is None, a constant amplitude and frequency are used.
-    Otherwise, the amplitude and frequency change at the specified time points,
-    and the phase is updated to keep the sine wave continuous at each changepoint.
-
-    Parameters
-    ----------
-    frequency : float, optional
-        Default frequency of the sine wave (default is 1). This is used if a change point
-        does not specify a frequency.
-    phase : float, optional
-        Initial phase in radians (default is 0).
-    sampling_rate : int, optional
-        Number of samples per second (default is 100).
-    duration : int or float, optional
-        Duration of the signal.
-    change_points : list of tuple, optional
-        Each tuple should specify (time, amplitude) or (time, amplitude, frequency).
-        The amplitude and frequency change at these time points.
-
-    Returns
-    -------
-    tuple
-        t : ndarray
-            Time points.
-        y : ndarray
-            Sine wave values.
-    """
-    t = np.linspace(0, duration, int(sampling_rate * duration))
-    if change_points is None:
-        y = np.sin(2 * np.pi * frequency * t + phase)
-    else:
-        y = np.zeros_like(t)
-        # Initialize with the default frequency and phase for the first segment
-        current_phase = phase
-        current_freq = frequency
-
-        # Process each segment defined by change_points
-        for i in range(len(change_points) - 1):
-            cp = change_points[i]
-            start_time = cp[0]
-            amplitude = cp[1]
-            seg_freq = cp[2] if len(cp) > 2 else frequency
-
-            # For segments after the first, adjust phase to ensure continuity
-            if i > 0:
-                # t_c is the current changepoint time
-                t_c = start_time
-                # Adjust phase so that:
-                # sin(2*pi*seg_freq*t_c + new_phase) = sin(2*pi*current_freq*t_c + current_phase)
-                current_phase = (2 * np.pi * current_freq * t_c + current_phase) - (
-                    2 * np.pi * seg_freq * t_c
-                )
-                current_freq = seg_freq
-
-            # Determine end time for this segment
-            next_cp = change_points[i + 1]
-            end_time = next_cp[0]
-            mask = (t >= start_time) & (t < end_time)
-            y[mask] = amplitude * np.sin(2 * np.pi * seg_freq * t[mask] + current_phase)
-
-        # Handle the final segment
-        last_cp = change_points[-1]
-        start_time = last_cp[0]
-        amplitude = last_cp[1]
-        seg_freq = last_cp[2] if len(last_cp) > 2 else frequency
-        if len(change_points) > 1:
-            t_c = start_time
-            current_phase = (2 * np.pi * current_freq * t_c + current_phase) - (
-                2 * np.pi * seg_freq * t_c
-            )
-        mask = t >= start_time
-        y[mask] = amplitude * np.sin(2 * np.pi * seg_freq * t[mask] + current_phase)
-    return t, y
 
 
 # Prepare data into windows
@@ -132,19 +60,31 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
     # global parameters
     output_col = [0]
     num_features = 1
-    input_seq_len = 12
+    input_seq_len = 52
     output_seq_len = 1
     batch_size = 1  # only set to 1
 
-    plt.figure()
-    plt.plot(train_t, train_data, "b-", label="Training Data")
-    plt.plot(test_t, test_data, "r-", label="Testing Data")
-    plt.legend(loc=(0.2, 1.01), ncol=2, frameon=False)
+    plt.figure(figsize=(6, 1))
+    plt.axvspan(
+        train_t[0],
+        train_t[-1],
+        facecolor="dodgerblue",
+        alpha=0.2,
+        label="Online Learning",
+        edgecolor="none",
+        linewidth=0,
+    )
+    plt.plot(train_t, train_data, "r", label=r"$y_{true}$")
+    plt.plot(test_t, test_data, "r")
     plt.xlabel("Time")
     plt.ylabel("Value")
     plt.ylim(y_min, y_max)
+    plt.legend(loc=(0.2, 1.01), ncol=2, frameon=False, columnspacing=0.5)
     plt.savefig(
-        "./out/time_series.pdf", bbox_inches="tight", pad_inches=0, transparent=True
+        "./out/real_time_series.pdf",
+        bbox_inches="tight",
+        pad_inches=0,
+        transparent=True,
     )
 
     # Load data into windows
@@ -155,10 +95,9 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
 
     # Network
     net = Sequential(
-        SLSTM(input_seq_len, 100, 1),
-        SLSTM(100, 100, 1),
-        # SLSTM(40, 40, 1),
-        SLinear(100, 1),
+        SLSTM(input_seq_len, 50, 1),
+        SLSTM(50, 50, 1),
+        SLinear(50, 1),
     )
     net.set_threads(1)  # only set to 1
     out_updater = OutputUpdater(net.device)
@@ -243,42 +182,74 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
         )
 
     # Compute residuals
-    # residuals = train_y - np.array(mu_preds).flatten()
+    # remove the last element
+    mu_preds.pop()
+    S_preds.pop()
 
-    # Visualize the predictions
-    plt.figure()
+    residuals = train_y - np.array(mu_preds).flatten()
+
+    # Create a figure with two subplots sharing the x-axis
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(6, 3))
+
     mu_preds = np.array(mu_preds).flatten()
     S_preds = np.array(S_preds).flatten()
-    plt.plot(train_t, train_y, "k", label=r"$y_{true}$")
-    plt.plot(range(len(mu_preds)), mu_preds, "r", label=r"$\mathbb{E}[Y']$")
-    plt.fill_between(
-        range(len(mu_preds)),
+
+    # Subplot 1: Visualize the predictions
+    ax1.axvspan(
+        train_t[0] + pd.DateOffset(weeks=window_size),
+        train_t[-1],
+        facecolor="dodgerblue",
+        alpha=0.2,
+        label="Online Learning",
+        edgecolor="none",
+        linewidth=0,
+    )
+    ax1.axvspan(
+        train_t[0],
+        train_t[0] + pd.DateOffset(weeks=window_size),
+        alpha=0.3,
+        facecolor="green",
+        label=r"$\mathtt{D}$",
+        edgecolor="none",
+        linewidth=0,
+    )
+    ax1.plot(train_t, train_y, "r", label=r"$y_{true}$", linewidth=1)
+    ax1.plot(train_t, mu_preds, "b", label=r"$\mathbb{E}[Y']$", linewidth=1)
+    ax1.fill_between(
+        train_t,
         mu_preds - np.sqrt(S_preds),
         mu_preds + np.sqrt(S_preds),
-        facecolor="red",
+        facecolor="blue",
         alpha=0.3,
-        label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(1),
+        label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$",
     )
-    plt.axvspan(0, window_size, alpha=0.2)
-    plt.legend(loc=(0.2, 1.01), ncol=3, frameon=False)
-    plt.xlabel("Time")
-    plt.ylabel("Value")
-    plt.ylim(y_min, y_max)
-    plt.savefig("./out/pred.pdf", bbox_inches="tight", pad_inches=0, transparent=True)
+    ax1.plot(test_t, test_y, "r")
+    ax1.set_ylabel("Value")
+    ax1.set_ylim(y_min, y_max)
+    ax1.legend(loc=(0.0, 1.01), ncol=5, frameon=False, columnspacing=0.5)
 
-    # Visualize the residuals
-    # plt.figure()
-    # plt.plot(train_t, residuals, "k")
-    # plt.axvspan(0, window_size, alpha=0.2)
-    # if change_points is not None:
-    #     for change in change_points[1:]:
-    #         plt.axvline(x=change[0], color="r", linestyle="--")
-    # plt.xlabel("Time")
-    # plt.ylabel("Residuals")
-    # plt.ylim(y_min, y_max)
-    # plt.savefig(
-    #     "./out/residuals.pdf", bbox_inches="tight", pad_inches=0, transparent=True
-    # )
+    # Subplot 2: Visualize the residuals
+    ax2.axvspan(
+        train_t[0],
+        train_t[0] + pd.DateOffset(weeks=window_size),
+        facecolor="green",
+        alpha=0.3,
+        edgecolor="none",
+        linewidth=0,
+    )
+    ax2.plot(train_t, residuals, "k-", label=r"$r_t$", linewidth=1)
+    ax2.set_xlabel("Time")
+    ax2.set_ylabel("Value")
+    ax2.set_ylim(y_min, y_max)
+    ax2.legend(loc=(0.4, 1.01), ncol=1, frameon=False, columnspacing=0.5)
+
+    fig.tight_layout()
+    fig.savefig(
+        "./out/real_predict.pdf",
+        bbox_inches="tight",
+        pad_inches=0,
+        transparent=True,
+    )
 
     # Test the model
     input_seq = train_y[-input_seq_len:].copy()
@@ -301,27 +272,35 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
     # Visualize the predictions
     recursive_mu_preds = np.array(recursive_mu_preds).flatten()
     recursive_S_preds = np.array(recursive_S_preds).flatten()
-    plt.figure()
-    plt.plot(train_t, train_y, "k")
-    plt.axvspan(train_t[0], train_t[-1], alpha=0.2, label="Online Learning")
-    plt.plot(range(len(mu_preds)), mu_preds, "r")
+    plt.figure(figsize=(6, 1))
+    plt.plot(train_t, train_y, "r")
     plt.axvspan(
-        0,
-        window_size,
-        facecolor="green",
+        train_t[0] + pd.DateOffset(weeks=window_size),
+        train_t[-1],
         alpha=0.2,
+        facecolor="dodgerblue",
+        label="Online Learning",
+        edgecolor="none",
+        linewidth=0,
+    )
+    plt.plot(train_t, mu_preds, "b")
+    plt.axvspan(
+        train_t[0],
+        train_t[0] + pd.DateOffset(weeks=window_size),
+        facecolor="green",
+        alpha=0.3,
         edgecolor="none",
         linewidth=0,
         label=r"$\mathtt{D}$",
     )
     plt.fill_between(
-        range(len(mu_preds)),
+        train_t,
         mu_preds - np.sqrt(S_preds),
         mu_preds + np.sqrt(S_preds),
-        facecolor="red",
+        facecolor="blue",
         alpha=0.3,
     )
-    plt.plot(test_t, test_y, "k", label=r"$y_{true}$")
+    plt.plot(test_t, test_y, "r", label=r"$y_{true}$")
     plt.plot(test_t, recursive_mu_preds, "b", label=r"$\mathbb{E}[Y']$")
     plt.fill_between(
         test_t,
@@ -329,14 +308,17 @@ def main(y, t, test_index, window_size, sigma_v, change_points=None):
         recursive_mu_preds + np.sqrt(recursive_S_preds),
         facecolor="blue",
         alpha=0.3,
-        label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(1),
+        label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$",
     )
-    plt.legend(loc=(0.06, 1.01), ncol=5, frameon=False)
+    plt.legend(loc=(-0.01, 1.01), ncol=5, frameon=False, columnspacing=0.5)
     plt.xlabel("Time")
     plt.ylabel("Value")
     plt.ylim(y_min, y_max)
     plt.savefig(
-        "./out/pred_future.pdf", bbox_inches="tight", pad_inches=0, transparent=True
+        "./out/real_forecast.pdf",
+        bbox_inches="tight",
+        pad_inches=0,
+        transparent=True,
     )
 
     # Calculate the MSE and log likelihood for the test data
@@ -354,25 +336,20 @@ if __name__ == "__main__":
     # Fix random seed
     np.random.seed(42)
 
-    # Generate synthetic data
-    frequency = 1 / 24  # One cycle per 24 hours
-    phase = 0  # Initial phase
-    sampling_rate = 1  # 1 sample per hour
-    duration = 1 / frequency * 25  # Total duration
-    change_points = [(0, 1), (24 * 14, 1.5), (24 * 16, 0.75, 1 / 36)]
+    data_csv = "./data/hq_data/weekly/hq_train_weekly_values.csv"
+    dates_csv = "./data/hq_data/weekly/hq_train_weekly_dates.csv"
 
-    t, y = generate_changing_amplitude_sine(
-        frequency=frequency,
-        phase=phase,
-        sampling_rate=sampling_rate,
-        duration=duration,
-        change_points=change_points,
-    )
+    # read data
+    df_time = pd.read_csv(dates_csv)
+    df_time = df_time.iloc[:, 0]
 
-    # Get index for test split
-    num_test_cycles = 2.5
-    period = 48
-    test_duration = num_test_cycles * period
-    test_index = len(y) - int(test_duration * sampling_rate)
+    df_data = pd.read_csv(data_csv)
+    col_name = df_data.columns[20]
+    y_values = df_data.iloc[:, 20]
 
-    main(y, t, test_index, window_size=48, sigma_v=1, change_points=change_points)
+    # use 10% of the data for testing
+    test_index = int(0.9 * len(y_values))
+    y = y_values.values
+    t = pd.to_datetime(df_time.values)
+
+    main(y, t, test_index, window_size=52, sigma_v=4)
