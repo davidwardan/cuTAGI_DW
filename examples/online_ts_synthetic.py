@@ -36,7 +36,12 @@ utils = Utils()
 
 # Define function to generate time series data with changing amplitude and frequency
 def generate_changing_amplitude_sine(
-    frequency=1, phase=0, sampling_rate=100, duration=10, change_points=None
+    frequency=1,
+    phase=0,
+    sampling_rate=100,
+    duration=10,
+    change_points=None,
+    noise_std=0.0,
 ):
     """
     Generate a sine wave time series with variable amplitude and frequency,
@@ -114,6 +119,9 @@ def generate_changing_amplitude_sine(
             )
         mask = t >= start_time
         y[mask] = amplitude * np.sin(2 * np.pi * seg_freq * t[mask] + current_phase)
+    if noise_std > 0.0:
+        noise = np.random.normal(loc=0.0, scale=noise_std, size=len(y))
+        y = y + noise
     return t, y
 
 
@@ -143,8 +151,8 @@ def adjust_parameters(net, idx, window_size, change_points):
             if idx == change[0] - window_size:
                 state_dict = net.state_dict()
                 for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
-                    var_w = [x + 2e-4 for x in var_w]
-                    var_b = [x + 2e-4 for x in var_b]
+                    var_w = [x + 3e-4 for x in var_w]
+                    var_b = [x + 3e-4 for x in var_b]
                     state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
                 net.load_state_dict(state_dict)
 
@@ -228,7 +236,7 @@ def main(
         )
 
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.5, decaying_factor=0.99, curr_iter=idx
+            curr_v=sigma_v, min_v=sigma_v, decaying_factor=0.99, curr_iter=idx
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
@@ -386,10 +394,10 @@ def main(
     # Visualize the predictions
     recursive_mu_preds = np.array(recursive_mu_preds).flatten()
     recursive_S_preds = np.array(recursive_S_preds).flatten()
-    plt.figure(figsize=(6, 1))
+    plt.figure(figsize=(6, 0.65))
     plt.plot(train_t, train_y, "r")
     plt.axvspan(
-        window_size,
+        0,
         train_t[-1],
         alpha=0.2,
         facecolor="dodgerblue",
@@ -398,15 +406,15 @@ def main(
         linewidth=0,
     )
     plt.plot(train_t, mu_preds, "b")
-    plt.axvspan(
-        0,
-        window_size,
-        facecolor="green",
-        alpha=0.3,
-        edgecolor="none",
-        linewidth=0,
-        label=r"$\mathtt{D}$",
-    )
+    # plt.axvspan(
+    #     0,
+    #     window_size,
+    #     facecolor="green",
+    #     alpha=0.3,
+    #     edgecolor="none",
+    #     linewidth=0,
+    #     label=r"$\mathtt{D}$",
+    # )
     plt.fill_between(
         train_t,
         mu_preds - np.sqrt(S_preds),
@@ -414,7 +422,7 @@ def main(
         facecolor="blue",
         alpha=0.3,
     )
-    plt.plot(test_t, test_y, "r", label=r"$y_{true}$")
+    plt.plot(test_t, test_y, "r", label=r"$y_{true}$", linewidth=1)
     plt.plot(test_t, recursive_mu_preds, "b", label=r"$\mathbb{E}[Y']$")
     plt.fill_between(
         test_t,
@@ -427,12 +435,14 @@ def main(
     if change_points is not None and intervention:
         for change in change_points[1:]:
             plt.axvline(x=change[0], color="r", linestyle="--")
-    plt.legend(loc=(-0.01, 1.01), ncol=5, frameon=False, columnspacing=0.5)
-    plt.xlabel("Time")
+    # plt.legend(loc=(-0.01, 1.01), ncol=5, frameon=False, columnspacing=0.5)
+    # plt.xlabel("Time")
     plt.ylabel("Value")
     plt.ylim(y_min, y_max)
+    # turn off x-axis
+    plt.xticks([])
     plt.savefig(
-        "./out/synthetic_forecast.pdf",
+        "./out/continual_synFcst.pgf",
         bbox_inches="tight",
         pad_inches=0,
         transparent=True,
@@ -466,6 +476,7 @@ if __name__ == "__main__":
         sampling_rate=sampling_rate,
         duration=duration,
         change_points=change_points,
+        # noise_std=0.6,
     )
 
     # Get index for test split
@@ -479,7 +490,7 @@ if __name__ == "__main__":
         t,
         test_index,
         window_size=24,
-        sigma_v=10,
+        sigma_v=0.2,
         change_points=change_points,
-        intervention=True,
+        intervention=False,
     )
