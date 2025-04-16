@@ -10,7 +10,7 @@ from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 from pytagi import Normalizer as normalizer
 
 from examples.data_loader import GlobalTimeSeriesDataloader
-from examples.embedding import *
+from examples.embedding_loader import *
 
 # Add the 'build' directory to sys.path in one line
 sys.path.append(

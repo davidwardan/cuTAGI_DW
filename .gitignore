@@ -49,3 +49,4 @@ nohup.out
 
 out/
 data/toy_embedding/
+config/
