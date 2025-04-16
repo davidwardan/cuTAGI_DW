@@ -19,9 +19,7 @@ class DataloaderBase(ABC):
     def process_data(self) -> dict:
         raise NotImplementedError
 
-    def create_data_loader(
-        self, raw_input: np.ndarray, raw_output: np.ndarray
-    ) -> list:
+    def create_data_loader(self, raw_input: np.ndarray, raw_output: np.ndarray) -> list:
         """Create dataloader based on batch size"""
         num_input_data = raw_input.shape[0]
         num_output_data = raw_output.shape[0]
@@ -44,9 +42,7 @@ class DataloaderBase(ABC):
         return dataset
 
     @staticmethod
-    def split_data(
-        data: int, test_ratio: float = 0.2, val_ratio: float = 0.0
-    ) -> dict:
+    def split_data(data: int, test_ratio: float = 0.2, val_ratio: float = 0.0) -> dict:
         """Split data into training, validation, and test sets"""
         num_data = data.shape[1]
         splited_data = {}
@@ -212,9 +208,9 @@ class MnistDataLoader:
         for start_idx in range(0, num_data, batch_size):
             end_idx = min(start_idx + batch_size, num_data)
             idx = indices[start_idx:end_idx]
-            yield input_data[idx].flatten(), output_data[
+            yield input_data[idx].flatten(), output_data[idx].flatten(), output_idx[
                 idx
-            ].flatten(), output_idx[idx].flatten(), labels[idx].flatten()
+            ].flatten(), labels[idx].flatten()
 
     def process_data(
         self, x_train_file: str, y_train_file: str, num_images: int
@@ -222,13 +218,9 @@ class MnistDataLoader:
         """Process MNIST images."""
         # Load training and test data
         utils = Utils()
-        images, labels = self.load_mnist_images(
-            x_train_file, y_train_file, num_images
-        )
+        images, labels = self.load_mnist_images(x_train_file, y_train_file, num_images)
 
-        y, y_idx, num_enc_obs = utils.label_to_obs(
-            labels=labels, num_classes=10
-        )
+        y, y_idx, num_enc_obs = utils.label_to_obs(labels=labels, num_classes=10)
         x_mean, x_std = Normalizer.compute_mean_std(images)
         x_std = 1
 
@@ -280,12 +272,8 @@ class MnistOneHotDataloader(DataloaderBase):
         )
 
         # Normalizer
-        x_train = self.normalizer.standardize(
-            data=train_images, mu=x_mean, std=x_std
-        )
-        x_test = self.normalizer.standardize(
-            data=test_images, mu=x_mean, std=x_std
-        )
+        x_train = self.normalizer.standardize(data=train_images, mu=x_mean, std=x_std)
+        x_test = self.normalizer.standardize(data=test_images, mu=x_mean, std=x_std)
 
         y_train = y_train.reshape((num_train_images, 10))
         x_train = x_train.reshape((num_train_images, 28, 28))
@@ -330,9 +318,7 @@ class TimeSeriesDataloader:
         self.stride = stride
         self.x_mean = x_mean
         self.x_std = x_std
-        self.ts_idx = (
-            ts_idx  # add time series index when data having multiple ts
-        )
+        self.ts_idx = ts_idx  # add time series index when data having multiple ts
         self.time_covariates = time_covariates  # for adding time covariates
         self.keep_last_time_cov = keep_last_time_cov
         self.dataset = self.process_data()
@@ -382,14 +368,10 @@ class TimeSeriesDataloader:
             date_time = np.array(date_time, dtype="datetime64")
             for time_cov in self.time_covariates:
                 if time_cov == "hour_of_day":
-                    hour_of_day = (
-                        date_time.astype("datetime64[h]").astype(int) % 24
-                    )
+                    hour_of_day = date_time.astype("datetime64[h]").astype(int) % 24
                     x = np.concatenate((x, hour_of_day), axis=1)
                 elif time_cov == "day_of_week":
-                    day_of_week = (
-                        date_time.astype("datetime64[D]").astype(int) % 7
-                    )
+                    day_of_week = date_time.astype("datetime64[D]").astype(int) % 7
                     x = np.concatenate((x, day_of_week), axis=1)
                 elif time_cov == "week_of_year":
                     week_of_year = (
@@ -432,9 +414,7 @@ class TimeSeriesDataloader:
         dataset["value"] = (x_rolled, y_rolled)
 
         # NOTE: Datetime is saved for the visualization purpose
-        dataset["date_time"] = [
-            np.datetime64(date) for date in np.squeeze(date_time)
-        ]
+        dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
 
         return dataset
 
@@ -446,9 +426,7 @@ class TimeSeriesDataloader:
         for i in range(0, len(x)):
             x_ = x[i]
             keep_idx = np.arange(0, len(x_), self.num_features)
-            x_new[i] = np.concatenate(
-                (x_[keep_idx], x_[-self.num_features + 1 :])
-            )
+            x_new[i] = np.concatenate((x_[keep_idx], x_[-self.num_features + 1 :]))
         return x_new
 
     def create_data_loader(self, batch_size: int, shuffle: bool = True):
@@ -697,36 +675,33 @@ class GlobalTimeSeriesDataloader:
                     x = np.concatenate((x, quarter_of_year), axis=1)
 
         # standardize covariates
-        if self.scale_covariates is True:
-            # if self.global_scale == 'deepAR':
-            #     if self.covariate_means is None:
-            #         self.covariate_means = 1 + np.nanmean(x, axis=0)
-            #     for col in range(1, self.num_features):
-            #         column_to_scale = x[:, col]
-            #         x[:, col] = column_to_scale / (1 + self.covariate_means[col])
-            # else:
-            if self.covariate_means is None and self.covariate_stds is None:
-                self.covariate_means = np.nanmean(
-                    x, axis=0
-                )  # store the mean for scaling the test data
-                self.covariate_stds = np.nanstd(
-                    x, axis=0
-                )  # store the std for scaling the test data
-            for col in range(1, self.num_features):
-                column_to_scale = x[:, col]
-                x[:, col] = Normalizer.standardize(
-                    column_to_scale, self.covariate_means[col], self.covariate_stds[col]
-                )
+        if self.scale_covariates:
+            # Compute means and stds for covariates if missing
+            if self.covariate_means is None or self.covariate_stds is None:
+                self.covariate_means = np.nanmean(x, axis=0)
+                self.covariate_stds = np.nanstd(x, axis=0)
+            # Avoid division by zero for any zero std entries
+            cov_idx = slice(1, self.num_features)
+            stds = self.covariate_stds[cov_idx]
+            stds = np.where(stds == 0.0, 1.0, stds)
+            # Standardize all covariate columns at once
+            x[:, cov_idx] = (x[:, cov_idx] - self.covariate_means[cov_idx]) / stds
 
         # scale the observations using time series dependent scaling factors
-        if self.global_scale is not None:
-            if self.global_scale == "deepAR":
-                if self.scale_i is None:
-                    self.scale_i = 1 + np.nanmean(x[:, 0])
-                x[:, 0] = x[:, 0] / np.array(self.scale_i)
+        if self.global_scale:
+            mode = self.global_scale.strip().lower()
 
-            elif self.global_scale == "standard":
-                if self.x_mean is None and self.x_std is None:
+            # --- deepAR scaling ---
+            if mode == "deepar":
+                if self.scale_i is None:
+                    # deepAR often uses mean absolute value; here we add 1 to avoid zero‐division
+                    self.scale_i = 1.0 + np.nanmean(x[:, 0])
+                x[:, 0] /= self.scale_i
+
+            # --- standard z‑score scaling ---
+            elif mode == "standard":
+                # recompute if either is missing
+                if self.x_mean is None or self.x_std is None:
                     self.x_mean, self.x_std = Normalizer.compute_mean_std(x[:, 0])
                 x[:, 0] = Normalizer.standardize(
                     data=x[:, 0], mu=self.x_mean, std=self.x_std
@@ -761,25 +736,32 @@ class GlobalTimeSeriesDataloader:
 
         return dataset
 
-    # TODO: optimize the embedding code
     def roll_embedding(self, x_rolled: np.ndarray, embedding: np.ndarray) -> np.ndarray:
-        # shape: (num_data, input_seq_len * num_features + embedding_dim)
-        to_add = np.tile(embedding, (x_rolled.shape[0], 1))
-        col_idx = [i for i in range(0, x_rolled.shape[1], self.num_features)]
-        new_x_rolled = np.zeros(
-            (
-                x_rolled.shape[0],
-                (self.num_features + len(embedding)) * self.input_seq_len,
-            )
+        # Assuming embedding is a 1D vector; if not, adjust accordingly
+        emb_dim = embedding.shape[0] if embedding.ndim == 1 else embedding.shape[1]
+
+        # Reshape the rolled data into a (num_data, seq_len, features) array.
+        x_rolled_reshaped = x_rolled.reshape(
+            x_rolled.shape[0], self.input_seq_len, self.num_features
         )
-        j = 0
-        for i in col_idx:
-            to_concat = np.concatenate(
-                (x_rolled[:, i : i + self.num_features], to_add), axis=1
-            )
-            new_x_rolled[:, j : j + len(embedding) + self.num_features] = to_concat
-            j += len(embedding) + self.num_features
-        return np.float32(new_x_rolled)
+
+        # Reshape and broadcast the embedding vector to match the sequence length.
+        embedding_vector = embedding.reshape(1, 1, -1)
+        embedding_broadcasted = np.broadcast_to(
+            embedding_vector, (x_rolled.shape[0], self.input_seq_len, emb_dim)
+        )
+
+        # Concatenate the original features and the embedding along the last dimension.
+        concatenated = np.concatenate(
+            [x_rolled_reshaped, embedding_broadcasted], axis=2
+        )
+
+        # Reshape back to a 2D array with shape (x_rolled.shape[0], self.input_seq_len * (features + emb_dim)).
+        new_x_rolled = concatenated.reshape(
+            x_rolled.shape[0], self.input_seq_len * (self.num_features + emb_dim)
+        )
+
+        return new_x_rolled.astype(np.float32)
 
     def create_data_loader(
         self,
