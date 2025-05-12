@@ -129,23 +129,25 @@ def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 1):
         zo_smooth_std = np.array(var_zo_smooth) ** 0.5
         mu_sequence = mu_zo_smooth[:input_seq_len]
 
+        print(net.get_lstm_states())
+
         # # Figures for each epoch
-        t = np.arange(len(mu_zo_smooth))
-        t_train = np.arange(len(y_train))
-        plt.switch_backend("Agg")
-        plt.figure()
-        plt.plot(t_train, y_train, color="r")
-        plt.plot(t, mu_zo_smooth, color="b")
-        plt.fill_between(
-            t,
-            mu_zo_smooth - zo_smooth_std,
-            mu_zo_smooth + zo_smooth_std,
-            alpha=0.2,
-            label="1 Std Dev",
-        )
-        filename = f"saved_results/smoother/smoother#{epoch}.png"
-        plt.savefig(filename)
-        plt.close()
+        # t = np.arange(len(mu_zo_smooth))
+        # t_train = np.arange(len(y_train))
+        # plt.switch_backend("Agg")
+        # plt.figure()
+        # plt.plot(t_train, y_train, color="r")
+        # plt.plot(t, mu_zo_smooth, color="b")
+        # plt.fill_between(
+        #     t,
+        #     mu_zo_smooth - zo_smooth_std,
+        #     mu_zo_smooth + zo_smooth_std,
+        #     alpha=0.2,
+        #     label="1 Std Dev",
+        # )
+        # filename = f"saved_results/smoother/smoother#{epoch}.png"
+        # plt.savefig(filename)
+        # plt.close()
 
         # Progress bar
         pbar.set_description(

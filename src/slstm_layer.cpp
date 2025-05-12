@@ -540,10 +540,22 @@ void SLSTM::smoother(bool online /*= false*/)
     // Clear the LSTM states
     this->time_step = 0;
     this->lstm_states.reset_zeros();
-    //TODO: should reset only the starting value to the smoothed onne
+    // TODO: should reset only the starting value to the smoothed onne
     this->lstm_states.mu_h_prev.assign(
         this->smooth_states.mu_h_smooths.begin(),
         this->smooth_states.mu_h_smooths.begin() +
+            this->smooth_states.num_states);
+    this->lstm_states.var_h_prev.assign(
+        this->smooth_states.var_h_smooths.begin(),
+        this->smooth_states.var_h_smooths.begin() +
+            this->smooth_states.num_states);
+    this->lstm_states.mu_c_prev.assign(
+        this->smooth_states.mu_c_smooths.begin(),
+        this->smooth_states.mu_c_smooths.begin() +
+            this->smooth_states.num_states);
+    this->lstm_states.var_c_prev.assign(
+        this->smooth_states.var_c_smooths.begin(),
+        this->smooth_states.var_c_smooths.begin() +
             this->smooth_states.num_states);
 
     // Assign smoothed state as the previous state for the next window

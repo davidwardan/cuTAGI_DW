@@ -1504,8 +1504,8 @@ void LSTM::backward(BaseDeltaStates &input_delta_states,
 std::tuple<std::vector<float>, std::vector<float>, std::vector<float>,
            std::vector<float>>
 LSTM::get_LSTM_states() const {
-    return std::make_tuple(lstm_states.mu_h_prior, lstm_states.var_h_prior,
-                           lstm_states.mu_c_prior, lstm_states.var_c_prior);
+    return std::make_tuple(lstm_states.mu_h_prev, lstm_states.var_h_prev,
+                           lstm_states.mu_c_prev, lstm_states.var_c_prev);
 }
 // set the cell state and hidden state
 void LSTM::set_LSTM_states(const std::vector<float> &mu_h,
