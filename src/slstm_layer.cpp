@@ -559,6 +559,9 @@ void SLSTM::smoother(bool online /*= false*/)
         this->smooth_states.var_h_posts, this->smooth_states.mu_h_smooths,
         this->smooth_states.var_h_smooths);
 
+    // Print summary of all smoother states
+    this->print_summary();
+
     // Clear the LSTM states
     this->time_step = 0;
     this->lstm_states.reset_zeros();

@@ -36,7 +36,11 @@ class SLSTM : public LSTM {
 
     void smoother(bool online = false);
 
-    std::tuple<std::vector<float>, std::vector<float>, std::vector<float>,
-               std::vector<float>>
-    get_smoothed_lstm_state(int timestep) const;
+    // Getter and Setter for hidden states
+    std::vector<float> get_hidden_states() const;
+    void set_hidden_states(const std::vector<float> &new_hidden);
+
+    // Getter and Setter for cell states
+    std::vector<float> get_cell_states() const;
+    void set_cell_states(const std::vector<float> &new_cell);
 };
