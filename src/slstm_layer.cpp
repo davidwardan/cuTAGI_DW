@@ -20,37 +20,43 @@ void SLSTM::print_summary() const {
     size_t num_states = this->smooth_states.num_states;
     size_t middle_timestep = num_timesteps / 2;
 
-    std::vector<size_t> timesteps = {0, middle_timestep, num_timesteps > 0 ? num_timesteps - 1 : 0};
+    std::vector<size_t> timesteps = {0, middle_timestep,
+                                     num_timesteps > 0 ? num_timesteps - 1 : 0};
     std::vector<std::string> labels = {"First", "Middle", "Last"};
 
     for (size_t idx = 0; idx < timesteps.size(); ++idx) {
         size_t t = timesteps[idx];
         if (t >= num_timesteps) continue;
-        std::cout << "=== " << labels[idx] << " Time Step (" << t << ") ===" << std::endl;
+        std::cout << "=== " << labels[idx] << " Time Step (" << t
+                  << ") ===" << std::endl;
 
         // Priors
         std::cout << "--- Priors ---" << std::endl;
         std::cout << "mu_c_priors: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_c_priors[t * num_states + i] << " ";
+            std::cout << this->smooth_states.mu_c_priors[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "var_c_priors: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_c_priors[t * num_states + i] << " ";
+            std::cout << this->smooth_states.var_c_priors[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "mu_h_priors: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_h_priors[t * num_states + i] << " ";
+            std::cout << this->smooth_states.mu_h_priors[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "var_h_priors: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_h_priors[t * num_states + i] << " ";
+            std::cout << this->smooth_states.var_h_priors[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
@@ -58,25 +64,29 @@ void SLSTM::print_summary() const {
         std::cout << "--- Posteriors ---" << std::endl;
         std::cout << "mu_c_posts: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_c_posts[t * num_states + i] << " ";
+            std::cout << this->smooth_states.mu_c_posts[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "var_c_posts: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_c_posts[t * num_states + i] << " ";
+            std::cout << this->smooth_states.var_c_posts[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "mu_h_posts: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_h_posts[t * num_states + i] << " ";
+            std::cout << this->smooth_states.mu_h_posts[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "var_h_posts: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_h_posts[t * num_states + i] << " ";
+            std::cout << this->smooth_states.var_h_posts[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
@@ -84,25 +94,29 @@ void SLSTM::print_summary() const {
         std::cout << "--- Smoothed ---" << std::endl;
         std::cout << "mu_c_smooths: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_c_smooths[t * num_states + i] << " ";
+            std::cout << this->smooth_states.mu_c_smooths[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "var_c_smooths: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_c_smooths[t * num_states + i] << " ";
+            std::cout << this->smooth_states.var_c_smooths[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "mu_h_smooths: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_h_smooths[t * num_states + i] << " ";
+            std::cout << this->smooth_states.mu_h_smooths[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
         std::cout << "var_h_smooths: ";
         for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_h_smooths[t * num_states + i] << " ";
+            std::cout << this->smooth_states.var_h_smooths[t * num_states + i]
+                      << " ";
         }
         std::cout << std::endl;
 
@@ -610,14 +624,39 @@ void SLSTM::smoother(bool online /*= false*/)
  */
 {
     // Initialize the last time step for smoothing
-    this->smooth_states.mu_c_smooths.back() =
-        this->smooth_states.mu_c_posts.back();
-    this->smooth_states.var_c_smooths.back() =
-        this->smooth_states.var_c_posts.back();
-    this->smooth_states.mu_h_smooths.back() =
-        this->smooth_states.mu_h_posts.back();
-    this->smooth_states.var_h_smooths.back() =
-        this->smooth_states.var_h_posts.back();
+    // this->smooth_states.mu_c_smooths.back() =
+    //     this->smooth_states.mu_c_posts.back();
+    // this->smooth_states.var_c_smooths.back() =
+    //     this->smooth_states.var_c_posts.back();
+    // this->smooth_states.mu_h_smooths.back() =
+    //     this->smooth_states.mu_h_posts.back();
+    // this->smooth_states.var_h_smooths.back() =
+    //     this->smooth_states.var_h_posts.back();
+    // Initialize the last time step for smoothing
+    size_t num_states = this->smooth_states.num_states;
+    size_t last_timestep_start =
+        (this->smooth_states.num_timesteps - 1) * num_states;
+
+    // Copy the entire block of states at the last time step
+    std::copy(this->smooth_states.mu_c_posts.begin() + last_timestep_start,
+              this->smooth_states.mu_c_posts.begin() + last_timestep_start +
+                  num_states,
+              this->smooth_states.mu_c_smooths.begin() + last_timestep_start);
+
+    std::copy(this->smooth_states.var_c_posts.begin() + last_timestep_start,
+              this->smooth_states.var_c_posts.begin() + last_timestep_start +
+                  num_states,
+              this->smooth_states.var_c_smooths.begin() + last_timestep_start);
+
+    std::copy(this->smooth_states.mu_h_posts.begin() + last_timestep_start,
+              this->smooth_states.mu_h_posts.begin() + last_timestep_start +
+                  num_states,
+              this->smooth_states.mu_h_smooths.begin() + last_timestep_start);
+
+    std::copy(this->smooth_states.var_h_posts.begin() + last_timestep_start,
+              this->smooth_states.var_h_posts.begin() + last_timestep_start +
+                  num_states,
+              this->smooth_states.var_h_smooths.begin() + last_timestep_start);
 
     smooth_cell_states(
         this->smooth_states.num_timesteps, this->smooth_states.num_states,
