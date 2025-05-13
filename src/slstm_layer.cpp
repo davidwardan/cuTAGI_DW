@@ -13,6 +13,103 @@
 // SLSTM: LSTM layer with smoother
 ////////////////////////////////////////////////////////////////////////////////
 
+void SLSTM::print_summary() const {
+    std::cout << "===== Smoother State Summary =====" << std::endl;
+
+    size_t num_timesteps = this->smooth_states.num_timesteps;
+    size_t num_states = this->smooth_states.num_states;
+    size_t middle_timestep = num_timesteps / 2;
+
+    std::vector<size_t> timesteps = {0, middle_timestep, num_timesteps > 0 ? num_timesteps - 1 : 0};
+    std::vector<std::string> labels = {"First", "Middle", "Last"};
+
+    for (size_t idx = 0; idx < timesteps.size(); ++idx) {
+        size_t t = timesteps[idx];
+        if (t >= num_timesteps) continue;
+        std::cout << "=== " << labels[idx] << " Time Step (" << t << ") ===" << std::endl;
+
+        // Priors
+        std::cout << "--- Priors ---" << std::endl;
+        std::cout << "mu_c_priors: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.mu_c_priors[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "var_c_priors: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.var_c_priors[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "mu_h_priors: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.mu_h_priors[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "var_h_priors: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.var_h_priors[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        // Posteriors
+        std::cout << "--- Posteriors ---" << std::endl;
+        std::cout << "mu_c_posts: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.mu_c_posts[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "var_c_posts: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.var_c_posts[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "mu_h_posts: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.mu_h_posts[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "var_h_posts: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.var_h_posts[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        // Smoothed
+        std::cout << "--- Smoothed ---" << std::endl;
+        std::cout << "mu_c_smooths: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.mu_c_smooths[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "var_c_smooths: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.var_c_smooths[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "mu_h_smooths: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.mu_h_smooths[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "var_h_smooths: ";
+        for (size_t i = 0; i < num_states; ++i) {
+            std::cout << this->smooth_states.var_h_smooths[t * num_states + i] << " ";
+        }
+        std::cout << std::endl;
+
+        std::cout << "===================================" << std::endl;
+    }
+}
+
 std::string SLSTM::get_layer_info() const
 /*
  */
@@ -536,6 +633,9 @@ void SLSTM::smoother(bool online /*= false*/)
         this->smooth_states.var_c_smooths, this->smooth_states.mu_h_posts,
         this->smooth_states.var_h_posts, this->smooth_states.mu_h_smooths,
         this->smooth_states.var_h_smooths);
+
+    // Print summary of all smoother states
+    this->print_summary();
 
     // Clear the LSTM states
     this->time_step = 0;

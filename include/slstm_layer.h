@@ -43,4 +43,7 @@ class SLSTM : public LSTM {
     // Getter and Setter for cell states
     std::vector<float> get_cell_states() const;
     void set_cell_states(const std::vector<float> &new_cell);
+
+    void print_summary() const;
+
 };
