@@ -145,6 +145,10 @@ class Sequential {
     std::tuple<pybind11::array_t<float>, pybind11::array_t<float>>
     get_outputs_smoother();
 
+    // Returns a map from layer index to pointer of its smoothed states for both
+    // SmoothSLSTM and SmoothSlinear layers
+    std::unordered_map<int, const void*> get_smooth_states() const;
+
     std::tuple<pybind11::array_t<float>, pybind11::array_t<float>>
     get_input_states();
 

@@ -153,5 +153,34 @@ void bind_sequential(pybind11::module_& m) {
                 states[key] = value;
             }
             self.set_lstm_states(states);
-        });
+        })
+    // New bindings for SLSTM smoother states
+    .def("get_smooth_states", [](Sequential& self) {
+        auto states = self.get_slstm_smooth_states();
+        pybind11::dict py_states;
+
+        for (const auto& pair : states) {
+            pybind11::dict layer_data;
+
+            layer_data["num_states"] = pair.second->num_states;
+            layer_data["num_timesteps"] = pair.second->num_timesteps;
+            layer_data["mu_h_priors"] = pair.second->mu_h_priors;
+            layer_data["var_h_priors"] = pair.second->var_h_priors;
+            layer_data["mu_c_priors"] = pair.second->mu_c_priors;
+            layer_data["var_c_priors"] = pair.second->var_c_priors;
+            layer_data["mu_h_posts"] = pair.second->mu_h_posts;
+            layer_data["var_h_posts"] = pair.second->var_h_posts;
+            layer_data["mu_c_posts"] = pair.second->mu_c_posts;
+            layer_data["var_c_posts"] = pair.second->var_c_posts;
+            layer_data["mu_h_smooths"] = pair.second->mu_h_smooths;
+            layer_data["var_h_smooths"] = pair.second->var_h_smooths;
+            layer_data["mu_c_smooths"] = pair.second->mu_c_smooths;
+            layer_data["var_c_smooths"] = pair.second->var_c_smooths;
+            layer_data["cov_hc"] = pair.second->cov_hc;
+            layer_data["cov_cc"] = pair.second->cov_cc;
+
+            py_states[pybind11::int_(pair.first)] = layer_data;
+        }
+        return py_states;
+    });
 }
