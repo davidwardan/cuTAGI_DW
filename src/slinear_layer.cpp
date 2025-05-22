@@ -250,6 +250,10 @@ void SLinear::smoother()
         this->smooth_states.mu_zo_posts, this->smooth_states.var_zo_posts,
         this->smooth_states.mu_zo_smooths, this->smooth_states.var_zo_smooths);
 
-    // // TODO: Clear variables for next epoch
+    // // TODO: Clear variables for next epochq
     this->time_step = 0;
+}
+
+const SmoothSLinear &SLinear::get_smooth_states() const {
+    return this->smooth_states;
 }

@@ -257,3 +257,12 @@ class Sequential:
                         (mu_h_prior, var_h_prior, mu_c_prior, var_c_prior).
         """
         self._cpp_backend.set_lstm_states(states)
+
+    def get_slstm_smooth_states(self) -> dict:
+        """
+        Get the smoothed states for all SLSTM layers.
+
+        Returns:
+            dict: A dictionary mapping layer indices (int) to SmoothSLSTM objects.
+        """
+        return self._cpp_backend.get_slstm_smooth_states()

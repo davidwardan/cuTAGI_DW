@@ -13,115 +13,54 @@
 // SLSTM: LSTM layer with smoother
 ////////////////////////////////////////////////////////////////////////////////
 
+#include <fstream>
+#include <sstream>
+
 void SLSTM::print_summary() const {
-    std::cout << "===== Smoother State Summary =====" << std::endl;
+    std::ofstream summary_file("smoother_state_summary.csv");
+
+    if (!summary_file.is_open()) {
+        LOG(LogLevel::ERROR, "Failed to open smoother_state_summary.csv");
+        return;
+    }
+
+    summary_file << "TimeStep,StateType,Variable,Values\n";
 
     size_t num_timesteps = this->smooth_states.num_timesteps;
     size_t num_states = this->smooth_states.num_states;
-    size_t middle_timestep = num_timesteps / 2;
 
-    std::vector<size_t> timesteps = {0, middle_timestep,
-                                     num_timesteps > 0 ? num_timesteps - 1 : 0};
-    std::vector<std::string> labels = {"First", "Middle", "Last"};
-
-    for (size_t idx = 0; idx < timesteps.size(); ++idx) {
-        size_t t = timesteps[idx];
-        if (t >= num_timesteps) continue;
-        std::cout << "=== " << labels[idx] << " Time Step (" << t
-                  << ") ===" << std::endl;
-
-        // Priors
-        std::cout << "--- Priors ---" << std::endl;
-        std::cout << "mu_c_priors: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_c_priors[t * num_states + i]
-                      << " ";
+    auto write_vector = [&](const std::string& state_type, const std::string& variable,
+                            const std::vector<float>& vec) {
+        for (size_t t = 0; t < num_timesteps; ++t) {
+            summary_file << t << "," << state_type << "," << variable << ",";
+            for (size_t i = 0; i < num_states; ++i) {
+                summary_file << vec[t * num_states + i];
+                if (i < num_states - 1) summary_file << " ";
+            }
+            summary_file << "\n";
         }
-        std::cout << std::endl;
+    };
 
-        std::cout << "var_c_priors: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_c_priors[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
+    // Write Priors
+    write_vector("Priors", "mu_c_priors", this->smooth_states.mu_c_priors);
+    write_vector("Priors", "var_c_priors", this->smooth_states.var_c_priors);
+    write_vector("Priors", "mu_h_priors", this->smooth_states.mu_h_priors);
+    write_vector("Priors", "var_h_priors", this->smooth_states.var_h_priors);
 
-        std::cout << "mu_h_priors: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_h_priors[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
+    // Write Posteriors
+    write_vector("Posteriors", "mu_c_posts", this->smooth_states.mu_c_posts);
+    write_vector("Posteriors", "var_c_posts", this->smooth_states.var_c_posts);
+    write_vector("Posteriors", "mu_h_posts", this->smooth_states.mu_h_posts);
+    write_vector("Posteriors", "var_h_posts", this->smooth_states.var_h_posts);
 
-        std::cout << "var_h_priors: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_h_priors[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
+    // Write Smoothed
+    write_vector("Smoothed", "mu_c_smooths", this->smooth_states.mu_c_smooths);
+    write_vector("Smoothed", "var_c_smooths", this->smooth_states.var_c_smooths);
+    write_vector("Smoothed", "mu_h_smooths", this->smooth_states.mu_h_smooths);
+    write_vector("Smoothed", "var_h_smooths", this->smooth_states.var_h_smooths);
 
-        // Posteriors
-        std::cout << "--- Posteriors ---" << std::endl;
-        std::cout << "mu_c_posts: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_c_posts[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "var_c_posts: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_c_posts[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "mu_h_posts: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_h_posts[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "var_h_posts: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_h_posts[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        // Smoothed
-        std::cout << "--- Smoothed ---" << std::endl;
-        std::cout << "mu_c_smooths: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_c_smooths[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "var_c_smooths: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_c_smooths[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "mu_h_smooths: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.mu_h_smooths[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "var_h_smooths: ";
-        for (size_t i = 0; i < num_states; ++i) {
-            std::cout << this->smooth_states.var_h_smooths[t * num_states + i]
-                      << " ";
-        }
-        std::cout << std::endl;
-
-        std::cout << "===================================" << std::endl;
-    }
+    summary_file.close();
+    LOG(LogLevel::INFO, "Smoother states successfully written to smoother_state_summary.csv");
 }
 
 std::string SLSTM::get_layer_info() const
@@ -280,7 +219,6 @@ void save_priors_smoother(int time_step, int num_states,
             lstm_states.var_c_prior[i];
     }
 }
-// TODO: check this function
 void save_posteriors_smoother(int time_step, int num_states,
                               BaseLSTMStates &lstm_states,
                               SmoothSLSTM &smooth_states) {
@@ -475,27 +413,29 @@ void SLSTM::forward(BaseHiddenStates &input_states,
                         this->lstm_states.var_c_prior);
 
     // Save for smoothing
-    save_priors_smoother(this->time_step, this->output_size, this->lstm_states,
-                         this->smooth_states);
+    if (this->training) {
+        save_priors_smoother(this->time_step, this->output_size, this->lstm_states,
+                             this->smooth_states);
 
-    save_cov_cell_states_smoother(
-        this->time_step, this->output_size, this->lstm_states.var_c_prev,
-        this->lstm_states.mu_f_ga, this->smooth_states.cov_cc);
+        save_cov_cell_states_smoother(
+            this->time_step, this->output_size, this->lstm_states.var_c_prev,
+            this->lstm_states.mu_f_ga, this->smooth_states.cov_cc);
 
-    save_cov_hidden_cell_states_smoother(
-        this->time_step, this->output_size, this->lstm_states.var_c_prior,
-        this->lstm_states.mu_o_ga, this->lstm_states.jcb_ca,
-        this->smooth_states.cov_hc);
+        save_cov_hidden_cell_states_smoother(
+            this->time_step, this->output_size, this->lstm_states.var_c_prior,
+            this->lstm_states.mu_o_ga, this->lstm_states.jcb_ca,
+            this->smooth_states.cov_hc);
 
-    int end_chunk_ = batch_size * this->seq_len * this->output_size;
-    save_cov_hidden_states_smoother(
-        this->mu_w, lstm_states.jcb_f_ga, lstm_states.mu_i_ga,
-        lstm_states.jcb_i_ga, lstm_states.mu_c_ga, lstm_states.jcb_c_ga,
-        lstm_states.mu_o_ga, lstm_states.jcb_o_ga, lstm_states.var_h_prev,
-        lstm_states.mu_c_prev, lstm_states.mu_ca, lstm_states.jcb_ca,
-        this->w_pos_f, this->w_pos_i, this->w_pos_c, this->w_pos_o,
-        this->output_size, this->input_size, 0, end_chunk_,
-        smooth_output_states->cov_hh);
+        int end_chunk_ = batch_size * this->seq_len * this->output_size;
+        save_cov_hidden_states_smoother(
+            this->mu_w, lstm_states.jcb_f_ga, lstm_states.mu_i_ga,
+            lstm_states.jcb_i_ga, lstm_states.mu_c_ga, lstm_states.jcb_c_ga,
+            lstm_states.mu_o_ga, lstm_states.jcb_o_ga, lstm_states.var_h_prev,
+            lstm_states.mu_c_prev, lstm_states.mu_ca, lstm_states.jcb_ca,
+            this->w_pos_f, this->w_pos_i, this->w_pos_c, this->w_pos_o,
+            this->output_size, this->input_size, 0, end_chunk_,
+            smooth_output_states->cov_hh);
+    }
 
     smooth_output_states->mu_h_prev = lstm_states.mu_h_prev;
 }
@@ -679,7 +619,8 @@ void SLSTM::smoother(bool online /*= false*/)
     // Clear the LSTM states
     this->time_step = 0;
     this->lstm_states.reset_zeros();
-    // TODO: should reset only the starting value to the smoothed onne
+    // Reset the starting value to the smoothed one
+    //TODO: this does not take into account that we
     this->lstm_states.mu_h_prev.assign(
         this->smooth_states.mu_h_smooths.begin(),
         this->smooth_states.mu_h_smooths.begin() +
@@ -719,28 +660,6 @@ void SLSTM::smoother(bool online /*= false*/)
     this->smooth_states.reset_zeros();
 }
 
-std::vector<float> SLSTM::get_hidden_states() const {
-    // Return the current hidden state.
-    return this->smooth_states.mu_h_posts;
-}
-
-void SLSTM::set_hidden_states(const std::vector<float> &new_hidden) {
-    // Check that the new hidden state has the correct size
-    if (new_hidden.size() != this->lstm_states.mu_h_prev.size()) {
-        throw std::runtime_error("Hidden state size mismatch.");
-    }
-    this->lstm_states.mu_h_prev = new_hidden;
-}
-
-std::vector<float> SLSTM::get_cell_states() const {
-    // Return the current cell state.
-    return this->smooth_states.mu_c_posts;
-}
-
-void SLSTM::set_cell_states(const std::vector<float> &new_cell) {
-    // Check that the new cell state has the correct size
-    if (new_cell.size() != this->lstm_states.mu_c_prev.size()) {
-        throw std::runtime_error("Cell state size mismatch.");
-    }
-    this->lstm_states.mu_c_prev = new_cell;
+const SmoothSLSTM& SLSTM::get_smooth_states() const {
+    return this->smooth_states;
 }

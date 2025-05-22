@@ -7,6 +7,7 @@
 #include "../include/custom_logger.h"
 #include "../include/pooling_layer.h"
 #include "../include/resnet_block.h"
+#include "../include/slstm_layer.h"
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 
@@ -922,4 +923,33 @@ void Sequential::set_lstm_states(
 #endif
         }
     }
+}
+
+std::unordered_map<std::string, const void *> Sequential::get_smooth_states()
+    const {
+    std::unordered_map<std::string, const void *> result;
+    std::unordered_map<LayerType, int> type_count;
+
+    for (size_t i = 0; i < layers.size(); ++i) {
+        const auto &layer = layers[i];
+        LayerType type = layer->get_layer_type();
+        std::string key;
+
+        if (type == LayerType::SLSTM) {
+            int idx = type_count[type]++;
+            key = "SLSTM" + std::to_string(idx);
+            if (auto slstm_layer = dynamic_cast<SLSTM *>(layer.get())) {
+                result[key] = static_cast<const void *>(
+                    &slstm_layer->get_smooth_states());
+            }
+        } else if (type == LayerType::SLinear) {
+            int idx = type_count[type]++;
+            key = "SLinear" + std::to_string(idx);
+            if (auto slinear_layer = dynamic_cast<SLinear *>(layer.get())) {
+                result[key] =
+                    static_cast<const void *>(&slinear_layer->smooth_states);
+            }
+        }
+    }
+    return result;
 }

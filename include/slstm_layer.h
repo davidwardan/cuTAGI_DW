@@ -36,14 +36,8 @@ class SLSTM : public LSTM {
 
     void smoother(bool online = false);
 
-    // Getter and Setter for hidden states
-    std::vector<float> get_hidden_states() const;
-    void set_hidden_states(const std::vector<float> &new_hidden);
-
-    // Getter and Setter for cell states
-    std::vector<float> get_cell_states() const;
-    void set_cell_states(const std::vector<float> &new_cell);
+    /// Accessor for the internal smoothed states
+    const SmoothSLSTM& get_smooth_states() const;
 
     void print_summary() const;
-
 };
