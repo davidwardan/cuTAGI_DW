@@ -240,7 +240,3 @@ void SLinear::smoother(const std::vector<float> &mu_h_smooths_prev_slstm,
 
     this->time_step = 0;
 }
-
-const SmoothSLinear &SLinear::get_smooth_states() const {
-    return this->smooth_states;
-}
