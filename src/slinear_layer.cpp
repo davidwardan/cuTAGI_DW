@@ -253,7 +253,3 @@ void SLinear::smoother()
     // // TODO: Clear variables for next epochq
     this->time_step = 0;
 }
-
-const SmoothSLinear &SLinear::get_smooth_states() const {
-    return this->smooth_states;
-}

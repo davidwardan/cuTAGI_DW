@@ -37,7 +37,4 @@ class SLinear : public Linear {
                   BaseTempStates &temp_states, bool state_udapte) override;
 
     void smoother();
-
-    /// Accessor for the internal smoothed states
-    const SmoothSLinear &get_smooth_states() const;
 };

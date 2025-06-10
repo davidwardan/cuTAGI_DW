@@ -35,9 +35,4 @@ class SLSTM : public LSTM {
                   bool state_udapte = true) override;
 
     void smoother(bool online = false);
-
-    /// Accessor for the internal smoothed states
-    const SmoothSLSTM& get_smooth_states() const;
-
-    void print_summary() const;
 };

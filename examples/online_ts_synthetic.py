@@ -7,6 +7,7 @@ import sys
 import pytagi.metric as metric
 from pytagi import exponential_scheduler, manual_seed, Utils
 from pytagi.nn import SLSTM, SLinear, OutputUpdater, Sequential
+from examples.view_param import ParameterViewer
 
 
 plt.rcParams.update(
@@ -210,14 +211,16 @@ def main(
 
     # Network
     net = Sequential(
-        SLSTM(input_seq_len, 50, 1),
-        SLSTM(50, 50, 1),
-        SLinear(50, 1),
+        SLSTM(input_seq_len, 40, 1),
+        SLSTM(40, 40, 1),
+        SLinear(40, 1),
     )
     net.set_threads(1)  # only set to 1
     out_updater = OutputUpdater(net.device)
     net.num_samples = window_size + input_seq_len
     var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
+
+    viewer = ParameterViewer(net, "./saved_results/param_online")
 
     # Training
     mu_preds = []
@@ -243,11 +246,22 @@ def main(
         # update first lookback for the next window
         first_lookback = window[1 : input_seq_len + 1]
 
+        if idx % 20 == 0:
+            if idx ==0:
+                state_dict = net.state_dict()
+                # check the max value of the variances
+                mu_w, var_w, mu_b, var_b = state_dict["SLinear.2"]
+                max_var = max(max(var_w), max(var_b))
+            # viewer.heatmap("2", epoch=idx, cmap="plasma", which="var", vmin=0.0,vmax=max_var)
+
         window_mse = 0
         window_log_lik = 0
+
         # iterate over the rolled windows of the smoothing window
         with tqdm(total=len(x_rolled), desc=f"Window {idx}", leave=False):
             for i, (x, y) in enumerate(zip(x_rolled, y_rolled)):
+
+
 
                 # adjust network parameters at changepoints
                 if intervention:
@@ -367,7 +381,7 @@ def main(
 
     fig.tight_layout()
     fig.savefig(
-        "./out/synthetic_predict.pdf",
+        "./out/synthetic_predict.svg",
         bbox_inches="tight",
         pad_inches=0,
         transparent=True,
@@ -435,14 +449,14 @@ def main(
     if change_points is not None and intervention:
         for change in change_points[1:]:
             plt.axvline(x=change[0], color="r", linestyle="--")
-    # plt.legend(loc=(-0.01, 1.01), ncol=5, frameon=False, columnspacing=0.5)
-    # plt.xlabel("Time")
+    plt.legend(loc=(-0.01, 1.01), ncol=5, frameon=False, columnspacing=0.5)
+    plt.xlabel("Time")
     plt.ylabel("Value")
     plt.ylim(y_min, y_max)
     # turn off x-axis
     plt.xticks([])
     plt.savefig(
-        "./out/continual_synFcst.pgf",
+        "./out/continual_synFcst.svg",
         bbox_inches="tight",
         pad_inches=0,
         transparent=True,
