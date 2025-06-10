@@ -432,6 +432,7 @@ void SLSTM::forward(BaseHiddenStates &input_states,
 
     // Save for smoothing
     if (this->training) {
+        std::cout << this->time_step << std::endl;
         save_priors_smoother(this->time_step, this->output_size,
                              this->lstm_states, this->smooth_states);
 
@@ -626,24 +627,16 @@ void SLSTM::smoother()
     this->print_summary();
 
     // Clear the LSTM states
-    this->time_step = 0;
+    this->time_step = 12;
     this->lstm_states.reset_zeros();
-    // Reset the starting value to the smoothed one
-    this->lstm_states.mu_h_prev.assign(
-        this->smooth_states.mu_h_smooths.begin(),
-        this->smooth_states.mu_h_smooths.begin() +
-            this->smooth_states.num_states);
-    this->lstm_states.var_h_prev.assign(
-        this->smooth_states.var_h_smooths.begin(),
-        this->smooth_states.var_h_smooths.begin() +
-            this->smooth_states.num_states);
-    this->lstm_states.mu_c_prev.assign(
-        this->smooth_states.mu_c_smooths.begin(),
-        this->smooth_states.mu_c_smooths.begin() +
-            this->smooth_states.num_states);
-    this->lstm_states.var_c_prev.assign(
-        this->smooth_states.var_c_smooths.begin(),
-        this->smooth_states.var_c_smooths.begin() +
-            this->smooth_states.num_states);
-    this->smooth_states.reset_zeros();
+    // this->smooth_states.reset_zeros();
+    // set prior smooth and post smooth to smooth states
+    this->smooth_states.mu_h_priors = this->smooth_states.mu_h_smooths;
+    this->smooth_states.var_h_priors = this->smooth_states.var_h_smooths;
+    this->smooth_states.mu_c_priors = this->smooth_states.mu_c_smooths;
+    this->smooth_states.var_c_priors = this->smooth_states.var_c_smooths;
+    this->smooth_states.mu_h_posts = this->smooth_states.mu_h_smooths;
+    this->smooth_states.var_h_posts = this->smooth_states.var_h_smooths;
+    this->smooth_states.mu_c_posts = this->smooth_states.mu_c_smooths;
+    this->smooth_states.var_c_posts = this->smooth_states.var_c_smooths;
 }

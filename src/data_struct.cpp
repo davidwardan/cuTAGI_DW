@@ -1,4 +1,5 @@
 #include "../include/data_struct.h"
+#include <random>
 
 ////////////////////////////////////////////////////////////////////////////////
 // Base Hidden States
@@ -387,6 +388,23 @@ void SmoothSLinear::set_num_states(size_t num_timesteps)
 {
     this->num_timesteps = num_timesteps;
     this->reset_zeros();
+
+    /* ---------- design prior for t = 0 … L-1 ------------------- */
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::normal_distribution<float> dist(0.0f, 0.01f);
+    std::normal_distribution<float> perturb(0.0f, 1.0f);
+    for (size_t t = 0; t < 12 && t < num_timesteps; ++t) {
+        mu_zo_priors[t] = dist(gen);
+        var_zo_priors[t] = 0.01f;
+
+        mu_zo_posts[t] = mu_zo_priors[t] + std::sqrt(var_zo_priors[t]) * perturb(gen);
+        var_zo_posts[t] = var_zo_priors[t];
+        mu_zo_smooths[t] = mu_zo_posts[t];   // initialise smoothed mean equal to posterior
+        var_zo_smooths[t] = var_zo_posts[t]; // initialise smoothed variance equal to posterior
+        /* cov_zo[t] can stay 0 – RTS equation handles it */
+    }
+
 }
 
 void SmoothSLinear::reset_zeros()
@@ -443,9 +461,33 @@ void SmoothSLSTM::set_num_states(size_t num_states, size_t num_timesteps)
 /*
  */
 {
+    // Update dimensions and reset buffers
     this->num_states = num_states;
     this->num_timesteps = num_timesteps;
     this->reset_zeros();
+
+    /* ---------- design prior for t = 0 … L-1 ------------------- */
+    for (size_t t = 0; t < 12 && t < num_timesteps; ++t) {
+        for (size_t s = 0; s < num_states; ++s) {
+            const size_t idx = t * num_states + s;
+
+            /* ---- priors ---- */
+            mu_h_priors[idx] = 0.0f;
+            var_h_priors[idx] = 1.0f;  // “large” uncertainty
+            mu_c_priors[idx] = 0.0f;
+            var_c_priors[idx] = 1.0f;
+
+            /* ---- posts (equal to priors for t < L) ---- */
+            mu_h_posts[idx] = mu_h_priors[idx];
+            var_h_posts[idx] = var_h_priors[idx];
+            mu_c_posts[idx] = mu_c_priors[idx];
+            var_c_posts[idx] = var_c_priors[idx];
+
+            /* ---- covariances stay zero; RTS handles updates ---- */
+            cov_hc[idx] = 0.0f;
+            cov_cc[idx] = 0.0f;
+        }
+    }
 }
 
 void SmoothSLSTM::reset_zeros()

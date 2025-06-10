@@ -8,10 +8,10 @@
 class SLSTM : public LSTM {
    public:
     SmoothSLSTM smooth_states;
-    int time_step = 0;
+    int time_step = 12 + 1;
     SLSTM(size_t input_size, size_t output_size, int seq_len = 1,
           bool bias = true, float gain_w = 1.0f, float gain_b = 1.0f,
-          std::string init_method = "Xavier", int time_step = 0,
+          std::string init_method = "Xavier", int time_step = 13,
           int device_idx = 0)
         : LSTM(input_size, output_size, seq_len, bias, gain_w, gain_b,
                init_method, device_idx),

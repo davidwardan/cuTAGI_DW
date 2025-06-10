@@ -167,6 +167,7 @@ void SLinear::forward(BaseHiddenStates &input_states,
     if (this->smooth_states.num_timesteps !=
         smooth_input_states->num_timesteps) {
         this->smooth_states.set_num_states(smooth_input_states->num_timesteps);
+        this->time_step = 12;
     }
 
     // Forward pass
@@ -196,6 +197,7 @@ void SLinear::forward(BaseHiddenStates &input_states,
 
     // save z_output prior for smoothing
     if (this->training) {
+        std::cout << this->time_step << std::endl;
         this->smooth_states.mu_zo_priors[this->time_step] =
             smooth_output_states->mu_a[0];
         this->smooth_states.var_zo_priors[this->time_step] =
@@ -207,6 +209,8 @@ void SLinear::forward(BaseHiddenStates &input_states,
             this->var_b, smooth_input_states->mu_h_prev,
             smooth_input_states->mu_a, smooth_input_states->cov_hh,
             this->smooth_states.cov_zo);
+
+        this->print_summary();
     }
 
     if (this->training) {
@@ -306,7 +310,14 @@ void SLinear::smoother()
     this->print_summary();
 
     // // TODO: Clear variables for next epoch
-    this->time_step = 0;
+    // define look_back_len as int
+    this->time_step = 12 + 1;
+
+    // copy the smoothed values to zo_prior and zo_post
+    this->smooth_states.mu_zo_priors = this->smooth_states.mu_zo_smooths;
+    this->smooth_states.var_zo_priors = this->smooth_states.var_zo_smooths;
+    this->smooth_states.mu_zo_posts = this->smooth_states.mu_zo_smooths;
+    this->smooth_states.var_zo_posts = this->smooth_states.var_zo_smooths;
 
     // // print summary of all smoother states
     // this->print_summary();

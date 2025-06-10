@@ -11,19 +11,20 @@ from examples.data_loader import TimeSeriesDataloader
 from pytagi import Normalizer as normalizer
 from pytagi import exponential_scheduler, manual_seed
 from pytagi.nn import SLSTM, OutputUpdater, Sequential, SLinear
+from examples.plot_smooth_states import plot_smooth_states
 
 
-def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 5):
+def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 1):
     """Run training for time-series forecasting model"""
     # Dataset
     output_col = [0]
     num_features = 1
-    input_seq_len = 24
+    input_seq_len = 12
     output_seq_len = 1
     seq_stride = 1
     # Number of observations before training time to be inferred. These
     # obervations are nan in training data.
-    infer_window_len = 24
+    infer_window_len = 12
 
     train_dtl = TimeSeriesDataloader(
         x_file="data/toy_time_series_smoother/x_train_sin_smoother.csv",
@@ -79,7 +80,7 @@ def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 5):
     # net.to_device("cuda")
     net.set_threads(1)  # multi-processing is slow on a small net
     net.input_state_update = True
-    net.num_samples = train_dtl.dataset["value"][0].shape[0]
+    net.num_samples = train_dtl.dataset["value"][0].shape[0] + 12
     out_updater = OutputUpdater(net.device)
 
     # -------------------------------------------------------------------------#
@@ -109,6 +110,8 @@ def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 5):
 
             # Feed forward
             m_pred, _ = net(x)
+            # import sys
+            # sys.exit()
 
             # Update output layer
             out_updater.update(
@@ -137,7 +140,7 @@ def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 5):
 
             # Add new prediction to mu_sequence
             mu_sequence = np.append(mu_sequence, m_pred)
-            mu_sequence = mu_sequence[-input_seq_len:]
+            mu_sequence = mu_sequence[:input_seq_len]
 
         # Validation
         net.eval()
@@ -183,6 +186,8 @@ def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 5):
         mu_zo_smooth, var_zo_smooth = net.smoother()
         zo_smooth_std = np.array(var_zo_smooth) ** 0.5
         mu_sequence = mu_zo_smooth[:input_seq_len]
+
+        plot_smooth_states(12, epoch=epoch)
 
         # Figures for each epoch
         t = np.arange(len(mu_zo_smooth))
