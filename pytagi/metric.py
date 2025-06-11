@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.stats import norm
 
 from pytagi.tagi_utils import HRCSoftmax, Utils
 
@@ -14,7 +15,7 @@ class HRCSoftmaxMetric:
         )
 
     def error_rate(
-            self, m_pred: np.ndarray, v_pred: np.ndarray, label: np.ndarray
+        self, m_pred: np.ndarray, v_pred: np.ndarray, label: np.ndarray
     ) -> float:
         """Compute error rate for classifier"""
         batch_size = m_pred.shape[0] // self.hrc_softmax.len
@@ -40,12 +41,12 @@ def mse(prediction: np.ndarray, observation: np.ndarray) -> float:
 
 
 def log_likelihood(
-        prediction: np.ndarray, observation: np.ndarray, std: np.ndarray
+    prediction: np.ndarray, observation: np.ndarray, std: np.ndarray
 ) -> float:
     """Compute the averaged log-likelihood"""
 
-    log_lik = -0.5 * np.log(2 * np.pi * (std ** 2)) - 0.5 * (
-            ((observation - prediction) / std) ** 2
+    log_lik = -0.5 * np.log(2 * np.pi * (std**2)) - 0.5 * (
+        ((observation - prediction) / std) ** 2
     )
 
     return np.nanmean(log_lik)
@@ -53,9 +54,9 @@ def log_likelihood(
 
 def rmse(prediction: np.ndarray, observation: np.ndarray) -> None:
     """Root mean squared error"""
-    mse = mse(prediction, observation)
+    mse_val = mse(prediction, observation)
 
-    return mse ** 0.5
+    return mse_val**0.5
 
 
 def classification_error(prediction: np.ndarray, label: np.ndarray) -> None:
@@ -67,9 +68,11 @@ def classification_error(prediction: np.ndarray, label: np.ndarray) -> None:
 
     return count / len(prediction)
 
+
 def computeRMSE(y, ypred):
     e = np.reshape((y - ypred) ** 2, (-1, 1))
     return np.sqrt(np.mean(e))
+
 
 # TODO: needs to be reveiwed
 def computeMASE(y, ypred, ytrain, seasonality):
@@ -97,3 +100,26 @@ def compute90QL(y, ypred, Vpred):
     Iq_ = y <= ypred_90q
     e = y - ypred_90q
     return np.sum(2 * e * (0.9 * Iq - (1 - 0.9) * Iq_)) / np.sum(np.abs(y))
+
+
+def computeCRPS(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
+    """
+    Compute the CRPS (Continuous Ranked Probability Score) for Gaussian predictive distribution.
+
+    Parameters:
+    - y: True observations (n_samples,)
+    - mu: Predictive means (n_samples,)
+    - sigma: Predictive standard deviations (n_samples,)
+
+    Returns:
+    - Averaged CRPS score
+    """
+    # Ensure proper shape
+    y = y.reshape(-1)
+    mu = mu.reshape(-1)
+    sigma = sigma.reshape(-1)
+
+    # Standardized difference
+    z = (y - mu) / sigma
+    crps = sigma * (z * (2 * norm.cdf(z) - 1) + 2 * norm.pdf(z) - 1 / np.sqrt(np.pi))
+    return np.nanmean(crps)
