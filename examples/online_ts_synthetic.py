@@ -134,27 +134,37 @@ def prepare_windows(data, window_size):
     return np.array(x, dtype=np.float32)
 
 
-def adjust_parameters(net, idx, window_size, change_points):
+def adjust_parameters(
+    net, idx, window_size, change_points, which_layer=None, mode="set"
+):
     """
     Adjust the network's state dictionary at changepoints.
 
     For each changepoint (except the first one), if the current index matches the changepoint time minus the window_size,
-    update the variances of the weights and biases by adding 2e-4.
+    update the variances of the weights and biases either by adding or setting them to 1e-2, but only if they are below a threshold.
 
     Parameters:
         net: The neural network whose parameters are to be adjusted.
         idx: The current window index in the training loop.
         window_size: The size of the sliding window.
         change_points: A list of changepoint tuples.
+        which_layer: Specific layer names to adjust.
+        mode: "add" to increment, "set" to assign the value.
     """
     if change_points is not None:
         for change in change_points[1:]:
             if idx == change[0] - window_size:
                 state_dict = net.state_dict()
+                threshold = 5e-4  # example threshold
                 for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
-                    var_w = [x + 3e-4 for x in var_w]
-                    var_b = [x + 3e-4 for x in var_b]
-                    state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+                    if layer_name in which_layer or which_layer is None:
+                        if mode == "add":
+                            var_w = [x + 1e-2 if x < threshold else x for x in var_w]
+                            var_b = [x + 1e-2 if x < threshold else x for x in var_b]
+                        elif mode == "set":
+                            var_w = [0.025 if x < threshold else x for x in var_w]
+                            var_b = [0.025 if x < threshold else x for x in var_b]
+                        state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
                 net.load_state_dict(state_dict)
 
 
@@ -247,12 +257,20 @@ def main(
         first_lookback = window[1 : input_seq_len + 1]
 
         if idx % 20 == 0:
-            if idx ==0:
+            if idx == 0:
                 state_dict = net.state_dict()
                 # check the max value of the variances
-                mu_w, var_w, mu_b, var_b = state_dict["SLinear.2"]
+                mu_w, var_w, mu_b, var_b = state_dict["SLSTM.1"]
                 max_var = max(max(var_w), max(var_b))
-            # viewer.heatmap("2", epoch=idx, cmap="plasma", which="var", vmin=0.0,vmax=max_var)
+                viewer.heatmap(
+                    "1",
+                    epoch=idx,
+                    cmap="plasma",
+                    which="var",
+                    vmin=0.0,
+                    vmax=max_var,
+                    layer_type="LSTM",
+                )
 
         window_mse = 0
         window_log_lik = 0
@@ -261,11 +279,11 @@ def main(
         with tqdm(total=len(x_rolled), desc=f"Window {idx}", leave=False):
             for i, (x, y) in enumerate(zip(x_rolled, y_rolled)):
 
-
-
                 # adjust network parameters at changepoints
                 if intervention:
-                    adjust_parameters(net, idx, window_size, change_points)
+                    adjust_parameters(
+                        net, idx, window_size, change_points, which_layer=["SLinear.2"]
+                    )
 
                 # forward pass
                 mu_pred, S_pred = net(x)
@@ -506,5 +524,5 @@ if __name__ == "__main__":
         window_size=24,
         sigma_v=0.2,
         change_points=change_points,
-        intervention=False,
+        intervention=True,
     )
