@@ -138,3 +138,67 @@ def classification_error(prediction: np.ndarray, label: np.ndarray) -> float:
         if pred != lab:
             count += 1
     return count / len(prediction)
+
+
+def computeRMSE(y, ypred):
+    e = np.reshape((y - ypred) ** 2, (-1, 1))
+    return np.sqrt(np.mean(e))
+
+
+# TODO: needs to be reveiwed
+def computeMASE(y, ypred, ytrain, seasonality):
+    nbts = y.shape[1]
+    se = np.full((1, y.shape[1]), np.nan)
+    for i in range(nbts):
+        ytrain_ = ytrain[:, i]
+        # remove nans
+        ytrain_ = ytrain_[~np.isnan(ytrain_)]
+        if len(ytrain_) > seasonality:
+            se[0, i] = np.mean(np.abs(ytrain_[seasonality:] - ytrain_[:-seasonality]))
+    se[se == 0] = np.nan
+    MASE = np.mean(np.abs(y - ypred) / se)
+    MASE = np.nanmean(MASE)
+    return MASE
+
+
+def computeND(y, ypred):
+    return np.sum(np.abs(ypred - y)) / np.sum(np.abs(y))
+
+
+def compute90QL(y, ypred, Vpred):
+    ypred_90q = ypred + 1.282 * np.sqrt(Vpred)
+    Iq = y > ypred_90q
+    Iq_ = y <= ypred_90q
+    e = y - ypred_90q
+    return np.sum(2 * e * (0.9 * Iq - (1 - 0.9) * Iq_)) / np.sum(np.abs(y))
+
+
+def computeCRPS(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
+    """
+    Compute the CRPS (Continuous Ranked Probability Score) for Gaussian predictive distribution.
+
+    Parameters:
+    - y: True observations (n_samples,)
+    - mu: Predictive means (n_samples,)
+    - sigma: Predictive standard deviations (n_samples,)
+
+    Returns:
+    - Averaged CRPS score
+    """
+    # Ensure proper shape
+    y = y.reshape(-1)
+    mu = mu.reshape(-1)
+    sigma = sigma.reshape(-1)
+
+    # Standardized difference
+    z = (y - mu) / sigma
+    # Approximation of the cumulative distribution function (CDF) for the standard normal distribution
+    def norm_cdf(x):
+        return 0.5 * (1 + np.erf(x / np.sqrt(2)))
+
+    # Approximation of the probability density function (PDF) for the standard normal distribution
+    def norm_pdf(x):
+        return np.exp(-0.5 * x**2) / np.sqrt(2 * np.pi)
+
+    crps = sigma * (z * (2 * norm_cdf(z) - 1) + 2 * norm_pdf(z) - 1 / np.sqrt(np.pi))
+    return np.nanmean(crps)
