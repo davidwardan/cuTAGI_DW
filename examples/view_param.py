@@ -73,6 +73,7 @@ class ParameterViewer:
         return_img: bool = False,
         vmin: float | None = None,
         vmax: float | None = None,
+        layer_type: str | None = None,
     ):
         """
         Visualise the weight matrix / conv filter bank of one layer.
@@ -92,86 +93,88 @@ class ParameterViewer:
         w = _to_numpy(getattr(layer, attr))
         fig = None
 
-        # ---- LSTM Layer: 4 gates in one vector ------------------------
-        if (
-            w.ndim == 1
-            and hasattr(layer, "input_size")
-            and hasattr(layer, "output_size")
-            and not hasattr(layer, "in_features")
-        ):
-            out_f, in_f = layer.output_size, layer.input_size + layer.output_size
-            gate_size = out_f * in_f
+        # ---- LSTM Layer: 4 gates stacked in 2D ------------------------
+        if layer_type == "LSTM":
+            out_f = layer.output_size
+            in_f = layer.input_size + layer.output_size
+            expected_shape = (4 * out_f, in_f)
 
-            if w.size == 4 * gate_size:
+            # Reshape if needed (1D vector)
+            if w.ndim == 1:
+                if w.size == expected_shape[0] * expected_shape[1]:
+                    w = w.reshape(expected_shape)
+                    print(
+                        f"[INFO] Reshaped flat LSTM weights to {expected_shape} for visualization."
+                    )
+                else:
+                    raise ValueError(
+                        f"LSTM layer '{layer_name}' has flat weights of shape {w.shape}, "
+                        f"but cannot reshape to expected {expected_shape} "
+                        f"(4 * {out_f}, {in_f}) = {4*out_f*in_f} elements required)."
+                    )
+
+            if w.shape == expected_shape:
                 gate_names = ["Forget", "Input", "Cell State", "Output"]
-                fig, axarr = plt.subplots(2, 2, figsize=(12, 9), tight_layout=True)
-                fig.suptitle(
-                    f"{which.capitalize()} weights – LSTM Layer '{layer_name}'",
-                    fontsize=16,
+                gate_colors = ["red", "green", "blue", "purple"]
+
+                vmin_plot = vmin if vmin is not None else float(np.min(w))
+                vmax_plot = vmax if vmax is not None else float(np.max(w))
+                if vmin_plot == vmax_plot:
+                    eps = 1e-6 or abs(vmin_plot) * 1e-3
+                    vmin_plot -= eps
+                    vmax_plot += eps
+
+                fig, ax = plt.subplots(figsize=(10, 8))
+                im = ax.imshow(
+                    w,
+                    aspect="auto",
+                    interpolation="nearest",
+                    vmin=vmin_plot,
+                    vmax=vmax_plot,
+                    cmap=cmap,
+                )
+                fig.colorbar(im, ax=ax, shrink=0.8)
+
+                ax.set_title(
+                    f"{which.capitalize()} weights – LSTM Layer '{layer_name}'"
+                )
+                ax.set_xlabel("Input + Recurrent Weights")
+                ax.set_ylabel("Gates (stacked over output dim)")
+                ax.grid(which="minor", color="w", linestyle="-", linewidth=0.5)
+                ax.tick_params(
+                    which="both",
+                    bottom=False,
+                    left=False,
+                    labelbottom=False,
+                    labelleft=False,
                 )
 
-                vmin_plot = vmin if vmin is not None else np.min(w)
-                vmax_plot = vmax if vmax is not None else np.max(w)
-
-                for i, (ax, name) in enumerate(zip(axarr.flat, gate_names)):
-                    gate_w = w[i * gate_size : (i + 1) * gate_size].reshape(out_f, in_f)
-
-                    im = ax.imshow(
-                        gate_w,
-                        aspect="auto",
-                        interpolation="nearest",
-                        vmin=vmin_plot,
-                        vmax=vmax_plot,
-                        cmap=cmap,
-                    )
-                    fig.colorbar(im, ax=ax, shrink=0.8)
-                    ax.set_title(f"{name} Gate")
-                    ax.set_xlabel(f"Input Weights (left) + Recurrent Weights (right)")
-                    ax.set_ylabel(f"Hidden Dim ({layer.output_size})")
-                    ax.grid(which="minor", color="w", linestyle="-", linewidth=0.5)
-                    ax.tick_params(
-                        which="both",
-                        bottom=False,
-                        left=False,
-                        labelbottom=False,
-                        labelleft=False,
+                # Horizontal lines between gates
+                for i in range(1, 4):
+                    ax.axhline(
+                        i * out_f - 0.5, color="gray", linestyle="--", linewidth=1
                     )
 
-                    # --- ADDED FOR CLARITY ---
-                    # Draw a vertical line to separate the input weights from the recurrent (hidden) weights.
-                    # The first `layer.input_size` columns are for the input, the rest are for the hidden state.
-                    split_point = layer.input_size - 0.5
-                    ax.axvline(split_point, color="r", linestyle="--", linewidth=2)
-                    # --- END ADDED SECTION ---
-
+                # Gate name annotations
+                for i, name in enumerate(gate_names):
+                    ax.text(
+                        -0.5,
+                        i * out_f + out_f / 2,
+                        name,
+                        color=gate_colors[i],
+                        fontsize=10,
+                        verticalalignment="center",
+                        horizontalalignment="right",
+                        fontweight="bold",
+                    )
             else:
-                w = w.reshape(1, -1)
+                raise ValueError(
+                    f"LSTM layer '{layer_name}' has unexpected shape {w.shape}, expected {expected_shape}. "
+                    f"Ensure weights are stored as a 2D matrix with shape [4*out_f, in_f + out_f]."
+                )
 
-        # ---- Convolutional kernels ------------------------------------
-        if w.ndim == 4:
-            vmin_plot, vmax_plot = vmin, vmax
-            if vmin_plot is None and vmax_plot is None:
-                vmax_plot = np.max(np.abs(w)) if which == "mean" else np.max(w)
-                vmin_plot = -vmax_plot if which == "mean" else np.min(w)
-
-            oc, ic, *_ = w.shape
-            fig, axarr = plt.subplots(
-                oc, ic, figsize=(ic * 1.4, oc * 1.4), squeeze=False
-            )
-            for i in range(oc):
-                for j in range(ic):
-                    axarr[i, j].imshow(
-                        w[i, j],
-                        cmap=cmap,
-                        vmin=vmin_plot,
-                        vmax=vmax_plot,
-                        interpolation="nearest",
-                    )
-                    axarr[i, j].axis("off")
-            fig.suptitle(f"{which.capitalize()} conv filters – {layer_name}")
-
-        # ---- Dense layer heat-map (or reshaped 1D) --------------------
-        elif w.ndim <= 2:
+        # ---- Dense layer heat-map --------------------
+        else:
             if w.ndim == 1:
                 out_f = None
                 for a in ("out_features", "out_dim", "output_features", "output_size"):
