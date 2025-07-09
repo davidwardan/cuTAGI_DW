@@ -75,8 +75,10 @@ def input_embeddings(x, embeddings, num_features, embedding_dim):
     idxs = x[starts].astype(int)
 
     # gather all embeddings in one go using advanced indexing
-    embed_means = embeddings.mu_embedding[idxs]    # shape (n_blocks, embedding_dim)
-    embed_vars = embeddings.var_embedding[idxs]     # shape (n_blocks, embedding_dim)
+    # embed_means = embeddings.mu_embedding[idxs]  # shape (n_blocks, embedding_dim)
+    # embed_vars = embeddings.var_embedding[idxs]  # shape (n_blocks, embedding_dim)
+    embed_means = embeddings[0]
+    embed_vars = embeddings[1]
 
     # compute all target positions for the embedding slots
     offsets = np.arange(embedding_dim)
