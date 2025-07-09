@@ -239,15 +239,20 @@ class Sequential:
         """
         return self._cpp_backend.get_norm_mean_var()
 
-    def get_lstm_states(self) -> dict:
+    # TODO: fix description
+    def get_lstm_states(self, time_step: int = -1) -> dict:
         """
         Get the LSTM states for all LSTM layers as a dictionary.
 
+        Args:
+            time_step (int, optional): The time step to retrieve the smoothed LSTM states for.
+                                       If -1, retrieves the current states.
+
         Returns:
             dict: A dictionary where each key is the layer index (int) and each value is a 4-tuple
-                of numpy arrays (mu_h_prior, var_h_prior, mu_c_prior, var_c_prior).
+                  of numpy arrays (mu_h_prior, var_h_prior, mu_c_prior, var_c_prior).
         """
-        return self._cpp_backend.get_lstm_states()
+        return self._cpp_backend.get_lstm_states(time_step)
 
     def set_lstm_states(self, states: dict) -> None:
         """
@@ -258,16 +263,3 @@ class Sequential:
                         (mu_h_prior, var_h_prior, mu_c_prior, var_c_prior).
         """
         self._cpp_backend.set_lstm_states(states)
-
-    def get_lstm_states_smooth(self, timestep: int) -> dict:
-        """
-        Get the smoothed LSTM states at a given timestep for all SLSTM layers.
-
-        Args:
-            timestep (int): The timestep to extract smoothed states from.
-
-        Returns:
-            dict: A dictionary where each key is the layer index (int) and the value is a 4-tuple
-                  of numpy arrays (mu_h, var_h, mu_c, var_c).
-        """
-        return self._cpp_backend.get_lstm_states_smooth(timestep)
