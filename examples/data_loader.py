@@ -551,6 +551,9 @@ class GlobalTimeSeriesDataloader:
         covariate_stds: Optional[np.ndarray] = None,
         embedding_dim: Optional[int] = None,
         embedding: Optional[np.ndarray] = None,
+        embed_at_end: Optional[
+            bool
+        ] = False,  # if True, embedding is added at the end of the input sequence
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -572,6 +575,7 @@ class GlobalTimeSeriesDataloader:
         self.covariate_stds = covariate_stds
         self.embedding_dim = embedding_dim
         self.embedding = embedding
+        self.embed_at_end = embed_at_end
         self.dataset = self.process_data()
 
     @staticmethod
@@ -721,7 +725,17 @@ class GlobalTimeSeriesDataloader:
         if self.embedding_dim is not None or self.embedding is not None:
             if self.embedding_dim is not None and self.embedding is None:
                 self.embedding = np.full((self.embedding_dim,), self.ts_idx)
-            x_rolled = self.roll_embedding(x_rolled, self.embedding)
+            if self.embed_at_end:
+                # TODO: add embedding at the end of the sequence
+                x_rolled = np.concatenate(
+                    [
+                        x_rolled,
+                        np.tile(self.embedding, (x_rolled.shape[0], 1)),
+                    ],
+                    axis=1,
+                )
+            else:
+                x_rolled = self.roll_embedding(x_rolled, self.embedding)
 
         # Dataloader
         dataset = {}
