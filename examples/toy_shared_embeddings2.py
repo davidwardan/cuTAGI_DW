@@ -66,8 +66,8 @@ def main(num_epochs=40, batch_size=1, sigma_v=2.0):
 
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/toy_embedding/time_series_values.csv",
-            date_time_file="data/toy_embedding/time_series_datetimes.csv",
+            x_file="data/toy_embedding/train_triplets_values.csv",
+            date_time_file="data/toy_embedding/train_triplets_datetimes.csv",
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -195,73 +195,101 @@ def main(num_epochs=40, batch_size=1, sigma_v=2.0):
     amp_embeddings.save(os.path.join(save_dir, "amp_embeddings"))
     period_embeddings.save(os.path.join(save_dir, "period_embeddings"))
 
-    # ----------------------------------------------------------------------
-    # Visualise learned embeddings for each time series (PCA 2‑D projection)
-    # ----------------------------------------------------------------------
-    from sklearn.decomposition import PCA
+    # save model
+    net.save(os.path.join(save_dir, "model.pth"))
 
-    # Build a full embedding vector for each time‑series ID (0‒26)
-    time_series_embeddings = []
-    ts_labels = []
-    ts_colors = []
-    # Human‑readable category names
-    wave_names = ["Sin", "Square", "Triangular"]
-    amp_names = ["Amp1x", "Amp1.5x", "Amp0.5x"]
-    per_names = ["Period1x", "Period1.5x", "Period0.5x"]
-    color_map = {
-        "Sin": "red",
-        "Square": "blue",
-        "Triangular": "green",
-    }
-    for ts in range(nb_ts):
+    # ------------------------------------------------------------------
+    # Test the model on *all* 27 (wave, amp, period) time‑series
+    # ------------------------------------------------------------------
+    import math
+
+    m_preds = {i: [] for i in range(nb_ts)}
+    var_preds = {i: [] for i in range(nb_ts)}
+    m_true = {i: [] for i in range(nb_ts)}
+
+    pbar = tqdm(ts_idx, desc="Testing Progress")
+    for ts in pbar:
+        test_dtl = GlobalTimeSeriesDataloader(
+            x_file="data/toy_embedding/test_triplets_values.csv",
+            date_time_file="data/toy_embedding/test_triplets_datetimes.csv",
+            output_col=output_col,
+            input_seq_len=input_seq_len,
+            output_seq_len=output_seq_len,
+            num_features=num_features,
+            stride=seq_stride,
+            ts_idx=ts,
+            embedding_dim=embedding_dim,
+            embed_at_end=True,
+        )
+
+        # Extract test sequences and timestamps
+        inputs, outputs = test_dtl.dataset["value"]
+        datetimes = test_dtl.dataset["date_time"][input_seq_len:]
+        seq_window = inputs[0][:input_seq_len].copy()
+
+        # Decode the series id -> (wave, amp, period) indices
         wave_idx = ts // 9
         amp_idx = (ts // 3) % 3
         period_idx = ts % 3
 
-        wave_mu, _ = wave_embeddings.get_embedding(wave_idx)
-        amp_mu, _ = amp_embeddings.get_embedding(amp_idx)
-        per_mu, _ = period_embeddings.get_embedding(period_idx)
+        # Pre‑fetch embedding parameters for this series
+        wave_mu, wave_var = wave_embeddings.get_embedding(wave_idx)
+        amp_mu, amp_var = amp_embeddings.get_embedding(amp_idx)
+        per_mu, per_var = period_embeddings.get_embedding(period_idx)
+        embed_mu = np.concatenate((wave_mu, amp_mu, per_mu), axis=0)
+        embed_var = np.concatenate((wave_var, amp_var, per_var), axis=0)
 
-        ts_embed = np.concatenate((wave_mu, amp_mu, per_mu), axis=0)
-        time_series_embeddings.append(ts_embed)
-        descriptive_label = (
-            f"{wave_names[wave_idx]}_{amp_names[amp_idx]}_{per_names[period_idx]}"
-        )
-        ts_labels.append(descriptive_label)
-        ts_colors.append(color_map[wave_names[wave_idx]])
+        for i in range(len(outputs)):
+            # Assemble input vector  [current window | embedding]
+            x = np.concatenate((seq_window, np.zeros(embedding_dim, dtype=np.float32)))
+            x_var = np.zeros_like(x)
+            x[-embedding_dim:] = embed_mu
+            x_var[-embedding_dim:] = embed_var
 
-    embeddings_matrix = np.array(time_series_embeddings)
+            # Forward pass
+            m_pred, var_pred = net(np.float32(x), np.float32(x_var))
+            mean_pred = float(np.squeeze(m_pred))
+            var_pred_scalar = float(np.squeeze(var_pred))
 
-    pca = PCA(n_components=2)
-    pca_result = pca.fit_transform(embeddings_matrix)
+            m_preds[ts].append(mean_pred)
+            var_preds[ts].append(var_pred_scalar)
+            m_true[ts].append(outputs[i][0])
 
-    plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(
-        pca_result[:, 0], pca_result[:, 1], s=100, c=ts_colors, alpha=0.8
+            # Recursive window update
+            seq_window = np.roll(seq_window, -1)
+            seq_window[-1] = mean_pred
+
+    # ------------------------------------------------------------------
+    # Visualise predictions
+    # ------------------------------------------------------------------
+    true_dates = datetimes  # same length for all series
+    n_cols = 3
+    n_rows = math.ceil(nb_ts / n_cols)
+
+    fig, axs = plt.subplots(
+        n_rows, n_cols, figsize=(5 * n_cols, 3 * n_rows), sharex=True, sharey=True
     )
-    for i, lbl in enumerate(ts_labels):
-        plt.annotate(lbl, (pca_result[i, 0], pca_result[i, 1]), fontsize=10)
-    plt.title("PCA of Learned Embeddings per Time Series")
-    plt.xlabel("PCA Component 1")
-    plt.ylabel("PCA Component 2")
-    plt.grid(True)
-    plt.tight_layout()
+    axs = axs.flatten()
 
-    # Add legend
-    legend_labels = list(color_map.keys())
-    legend_handles = [
-        plt.Line2D(
-            [0],
-            [0],
-            marker="o",
-            color="w",
-            markerfacecolor=color_map[label],
-            markersize=10,
+    for idx, ts in enumerate(ts_idx):
+        ax = axs[idx]
+        ax.plot(true_dates, m_true[ts], color="red", label="True")
+        ax.plot(true_dates, m_preds[ts], color="blue", label="Pred")
+        ax.fill_between(
+            true_dates,
+            np.array(m_preds[ts]) - np.sqrt(np.array(var_preds[ts])),
+            np.array(m_preds[ts]) + np.sqrt(np.array(var_preds[ts])),
+            color="blue",
+            alpha=0.3,
         )
-        for label in legend_labels
-    ]
-    plt.legend(legend_handles, legend_labels, title="Wave Types", loc="best")
+        ax.set_title(f"TS {ts} (w{ts//9}, a{(ts//3)%3}, p{ts%3})", fontsize=9)
+        ax.legend(fontsize=7)
 
+    # Hide unused axes (if any)
+    for ax in axs[nb_ts:]:
+        ax.axis("off")
+
+    plt.tight_layout()
     plt.show()
 
 

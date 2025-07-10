@@ -126,6 +126,30 @@ def main(seed=42):
     # Build DataFrame and save to CSV
     df_values = pd.DataFrame(data, index=index)
     df_values.to_csv("time_series_values.csv", index=False)
+    # ------------------------------------------------------------------
+    # Create train / test splits (80 % train, 20 % test) and
+    # save separate CSV files for values and datetimes
+    # ------------------------------------------------------------------
+    num_points     = len(df_values)
+    test_size      = int(0.2 * num_points)
+    input_seq_len  = 24  # one‑day look‑back
+
+    # Turn the DateTimeIndex into a regular column for easier I/O
+    df_full = df_values.reset_index().rename(columns={"index": "datetime"})
+
+    # 80 % train  |  last 20 % (+look‑back) test
+    train_df = df_full.iloc[:-test_size].reset_index(drop=True)
+    test_df  = df_full.iloc[-test_size - input_seq_len :].reset_index(drop=True)
+
+    # Column list excluding the datetime column
+    value_cols = [c for c in df_full.columns if c != "datetime"]
+
+    # ----- Write CSVs -----
+    train_df[value_cols].to_csv("train_values.csv", index=False)
+    train_df[["datetime"]].to_csv("train_datetimes.csv", index=False)
+
+    test_df[value_cols].to_csv("test_values.csv", index=False)
+    test_df[["datetime"]].to_csv("test_datetimes.csv", index=False)
 
     # Plot each time series variant in its own subplot
     n_cols = 3
