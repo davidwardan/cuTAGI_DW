@@ -407,6 +407,7 @@ void SmoothSLSTM::set_num_states(size_t num_states, size_t num_timesteps)
 /*
  */
 {
+    // TODO: also accounr for batch size
     this->num_states = num_states;
     this->num_timesteps = num_timesteps;
     this->reset_zeros();

@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.lines import Line2D
+from scipy.spatial.distance import pdist, squareform
 
 # This script assumes you have a directory structure like:
 # out/
@@ -20,6 +21,36 @@ from matplotlib.lines import Line2D
 #
 # If your files don't exist, this script will create dummy files to run.
 import os
+
+# ----------------------------------------------------------------------
+# Distance / divergence functions for diagonal‑covariance Gaussians
+# ----------------------------------------------------------------------
+def sym_kl(mu1, var1, mu2, var2):
+    """Symmetric KL divergence between N(mu1,var1) and N(mu2,var2)."""
+    def kl(a_mu, a_var, b_mu, b_var):
+        ratio = a_var / b_var
+        diff2 = ((b_mu - a_mu) ** 2) / b_var
+        return 0.5 * np.sum(np.log(b_var / a_var) + ratio + diff2 - 1)
+    return kl(mu1, var1, mu2, var2) + kl(mu2, var2, mu1, var1)
+
+def wasserstein2(mu1, var1, mu2, var2):
+    """Squared 2‑Wasserstein distance between two diagonal Gaussians."""
+    return np.sum((mu1 - mu2) ** 2 + (np.sqrt(var1) - np.sqrt(var2)) ** 2)
+
+def mahalanobis_avg(mu1, var1, mu2, var2):
+    """Mahalanobis using the average variance as metric tensor."""
+    avg_var = 0.5 * (var1 + var2)
+    return np.sum((mu1 - mu2) ** 2 / avg_var)
+
+def pairwise_diag_metric(mus, vars, fn):
+    """Compute full pairwise matrix using the supplied fn."""
+    n = mus.shape[0]
+    D = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            d = fn(mus[i], vars[i], mus[j], vars[j])
+            D[i, j] = D[j, i] = d
+    return D
 
 
 def create_dummy_data(embed_dir="out/toy_shared_embeddings/"):
@@ -79,6 +110,9 @@ def main(embed_dir="out/toy_shared_embeddings/"):
     embeddings = np.concatenate(
         [wave_embeddings_mu, amp_embeddings_mu, period_embeddings_mu], axis=0
     )
+    embeddings_var = np.concatenate(
+        [wave_embeddings_var, amp_embeddings_var, period_embeddings_var], axis=0
+    )  # shape (9, d)
     pca_initial = PCA(n_components=3)
     pca_result_initial = pca_initial.fit_transform(embeddings)
     expl_var = pca_initial.explained_variance_ratio_
@@ -226,6 +260,82 @@ def main(embed_dir="out/toy_shared_embeddings/"):
     fig2.tight_layout()
     fig2.savefig("embedding_triplets.png", dpi=300)
     plt.show()
+
+    # ------------------------------------------------------------------
+    # Part 3 – Similarity metrics
+    #   • mean‑only: cosine, Euclidean
+    #   • mean+variance: symmetric‑KL, Wasserstein‑2, Mahalanobis
+    # ------------------------------------------------------------------
+    labels_individual = wave_names + amp_names + per_names
+
+    # ===== Individual embeddings (9) =====
+    cosine_ind   = 1 - squareform(pdist(embeddings, metric="cosine"))
+    euc_ind      = squareform(pdist(embeddings, metric="euclidean"))
+    skl_ind      = pairwise_diag_metric(embeddings, embeddings_var, sym_kl)
+    w2_ind       = pairwise_diag_metric(embeddings, embeddings_var, wasserstein2)
+    mahal_ind    = pairwise_diag_metric(embeddings, embeddings_var, mahalanobis_avg)
+
+    out_tables = {
+        "cosine":       pd.DataFrame(cosine_ind, index=labels_individual, columns=labels_individual),
+        "euclidean":    pd.DataFrame(euc_ind,    index=labels_individual, columns=labels_individual),
+        "symKL":        pd.DataFrame(skl_ind,    index=labels_individual, columns=labels_individual),
+        "W2_sq":        pd.DataFrame(w2_ind,     index=labels_individual, columns=labels_individual),
+        "mahalanobis":  pd.DataFrame(mahal_ind,  index=labels_individual, columns=labels_individual),
+    }
+
+    # ------------------------------------------------------------------
+    #  A. Sub‑embedding (9×9) similarities
+    # ------------------------------------------------------------------
+    print("\n=== Individual‑embedding similarity matrices (first 3×3 preview) ===")
+    for name, df_tab in out_tables.items():
+        print(f"\n{name}:")
+        print(df_tab.iloc[:3, :3].round(3))          # small preview
+        df_tab.to_csv(f"individual_{name}.csv")      # full table to CSV
+
+    # summary statistics across ALL upper‑triangle pairs
+    upper_ind = np.triu_indices_from(cosine_ind, k=1)
+    print("\n--- Individual‑embedding summary (mean ± std) ---")
+    for name, df_tab in out_tables.items():
+        vals = df_tab.values[upper_ind]
+        print(f"{name:12}: {vals.mean():.4f} ± {vals.std():.4f}")
+
+    # ===== Triplet embeddings (27) =====
+    # build mu & var matrices for triplets
+    triplet_vars = []
+    for wave_idx in range(len(wave_names)):
+        for amp_idx in range(len(amp_names)):
+            for per_idx in range(len(per_names)):
+                triplet_vars.append(
+                    np.concatenate(
+                        (
+                            wave_embeddings_var[wave_idx],
+                            amp_embeddings_var[amp_idx],
+                            period_embeddings_var[per_idx],
+                        ),
+                        axis=0,
+                    )
+                )
+    triplet_vars = np.array(triplet_vars)  # (27, d)
+
+    cosine_trip = 1 - squareform(pdist(embeddings_matrix, metric="cosine"))
+    euc_trip    = squareform(pdist(embeddings_matrix, metric="euclidean"))
+    skl_trip    = pairwise_diag_metric(embeddings_matrix, triplet_vars, sym_kl)
+    w2_trip     = pairwise_diag_metric(embeddings_matrix, triplet_vars, wasserstein2)
+    mahal_trip  = pairwise_diag_metric(embeddings_matrix, triplet_vars, mahalanobis_avg)
+
+    trip_tables = {
+        "cosine":      cosine_trip,
+        "euclidean":   euc_trip,
+        "symKL":       skl_trip,
+        "W2_sq":       w2_trip,
+        "mahalanobis": mahal_trip,
+    }
+
+    upper = np.triu_indices_from(cosine_trip, k=1)
+    print("\n=== Triplet‑level summary (mean±std) ===")
+    for name, mat in trip_tables.items():
+        print(f"{name:12}: {mat[upper].mean():.4f} ± {mat[upper].std():.4f}")
+        pd.DataFrame(mat, index=ts_labels, columns=ts_labels).to_csv(f"triplet_{name}.csv")
 
 
 if __name__ == "__main__":
