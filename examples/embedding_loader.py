@@ -26,6 +26,16 @@ class TimeSeriesEmbeddings:
         elif encoding_type == "uniform":
             self.mu_embedding = np.full(embedding_dim, 1 / (embedding_dim[1]))
             self.var_embedding = np.ones(embedding_dim)
+        elif encoding_type == "sphere":
+            radius = 3  # radius of the sphere
+            # sample means from a normal distribution
+            vecs = np.random.randn(*embedding_dim)
+            # project each row to the unit sphere
+            vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
+            # scale to radius R
+            self.mu_embedding = radius * vecs
+            # small, fixed variance
+            self.var_embedding = np.full(embedding_dim, 1.0)
         else:
             self.mu_embedding = np.full(embedding_dim, 1.0)
             self.var_embedding = np.ones(embedding_dim)
