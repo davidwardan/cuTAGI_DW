@@ -339,4 +339,4 @@ def main(embed_dir="out/toy_shared_embeddings/"):
 
 
 if __name__ == "__main__":
-    main()
+    main(embed_dir="out/toy2_shared_embeddings/")
