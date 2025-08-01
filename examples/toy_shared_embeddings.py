@@ -5,14 +5,27 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import cosine
 from sklearn.decomposition import PCA
 
-# Assuming these are in a directory named 'examples'
-# and 'pytagi' is installed
 from examples.embedding_loader import (
     TimeSeriesEmbeddings,
 )
 from examples.data_loader import GlobalTimeSeriesDataloader
 from pytagi import exponential_scheduler, manual_seed
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
+
+import matplotlib as mpl
+
+# Update matplotlib parameters in a single dictionary
+mpl.rcParams.update(
+    {
+        "pgf.texsystem": "pdflatex",
+        "font.family": "serif",
+        "text.usetex": False,
+        "pgf.rcfonts": False,
+        "pgf.preamble": r"\usepackage{amsfonts}\usepackage{amssymb}",
+        "pgf.preamble": r"\usepackage{amsmath}",
+        "lines.linewidth": 1,  # Set line width to 1
+    }
+)
 
 
 def concat_ts_sample(data, data_add):
@@ -38,7 +51,9 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     print("Running with shared embeddings...")
     # --- Dataset and Model Configuration ---
     nb_ts = 4
-    ts_idx = np.arange(0, nb_ts)
+    # train_idx = np.arange(0, nb_ts - 1)
+    train_idx = np.arange(0, nb_ts)
+    test_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 1
     input_seq_len = 24
@@ -50,15 +65,15 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     # --- Initialize Embeddings ---
     embeddings = TimeSeriesEmbeddings(
         (nb_ts, embedding_dim_shared),
-        # encoding_type="normal",
-        encoding_type="sphere",
+        encoding_type="normal",
+        # encoding_type="sphere",
         seed=seed,
     )
 
     manual_seed(seed)
 
     # --- Load Data ---
-    pbar = tqdm(ts_idx, desc="Loading Data Progress")
+    pbar = tqdm(train_idx, desc="Loading Data Progress")
     train_dtl = None
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
@@ -111,6 +126,7 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
             ts = int(x_ts_idx)
 
             pair_map = {0: (0, 2), 1: (0, 3), 2: (1, 2), 3: (1, 3)}
+            # pair_map = {0: (0, 2), 1: (0, 3), 2: (1, 2)}
             if ts not in pair_map:
                 raise ValueError(f"Unsupported ts_id {ts}")
             pair = pair_map[ts]
@@ -168,14 +184,13 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
 
     # --- Plot and Save Results ---
     # Training MSE
-    plt.figure(figsize=(10, 5))
+    plt.figure(figsize=(5, 2))
     plt.plot(range(num_epochs), mse_history, label="Training MSE")
-    plt.title("Shared Embeddings: Training MSE")
     plt.xlabel("Epoch")
     plt.ylabel("MSE")
     plt.legend()
     plt.grid(True)
-    plt.savefig(os.path.join(out_dir, "training_mse.png"))
+    plt.savefig(os.path.join(out_dir, "training_mse.pdf"))
     plt.close()
 
     # Cosine Similarity
@@ -203,15 +218,15 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
         [sin_embed_mu, square_embed_mu, amp1_embed_mu, amp2_embed_mu]
     )
     pca_result = pca.fit_transform(embeddings_matrix)
-    plt.figure(figsize=(8, 6))
-    plt.scatter(pca_result[:, 0], pca_result[:, 1], s=100)
+    plt.figure(figsize=(3, 2))
+    plt.scatter(pca_result[:, 0], pca_result[:, 1], s=50)
     for i, txt in enumerate(["Sin", "Square", "Amp1", "Amp2"]):
-        plt.annotate(txt, (pca_result[i, 0], pca_result[i, 1]), fontsize=12)
-    plt.title("PCA of Time Series Embeddings")
+        plt.annotate(txt, (pca_result[i, 0], pca_result[i, 1]))
     plt.xlabel("PCA Component 1")
     plt.ylabel("PCA Component 2")
     plt.grid()
-    plt.savefig(os.path.join(out_dir, "pca_embeddings.png"))
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "pca_embeddings.pgf"))
     plt.close()
 
     # PCA of Pair Embeddings
@@ -223,15 +238,15 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     ]
     pca_pairs = PCA(n_components=2)
     pair_pca = pca_pairs.fit_transform(np.array(pair_embeds))
-    plt.figure(figsize=(8, 6))
-    plt.scatter(pair_pca[:, 0], pair_pca[:, 1], s=100)
+    plt.figure(figsize=(3, 2))
+    plt.scatter(pair_pca[:, 0], pair_pca[:, 1], s=50)
     for idx, label in enumerate(labels):
-        plt.annotate(label, (pair_pca[idx, 0], pair_pca[idx, 1]), fontsize=12)
-    plt.title("PCA of Pair Embeddings")
+        plt.annotate(label, (pair_pca[idx, 0], pair_pca[idx, 1]))
     plt.xlabel("PCA Component 1")
     plt.ylabel("PCA Component 2")
     plt.grid()
-    plt.savefig(os.path.join(out_dir, "pca_pair_embeddings.png"))
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "pca_pair_embeddings.pgf"))
     plt.close()
 
     # --- Testing and Prediction Plotting ---
@@ -239,7 +254,8 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     var_preds = {i: [] for i in range(nb_ts)}
     m_true = {i: [] for i in range(nb_ts)}
 
-    pbar = tqdm(ts_idx, desc="Testing Progress")
+    pbar = tqdm(test_idx, desc="Testing Progress")
+    pair_map = {0: (0, 2), 1: (0, 3), 2: (1, 2), 3: (1, 3)}
     for ts in pbar:
         test_dtl = GlobalTimeSeriesDataloader(
             x_file="data/toy_embedding/test_values.csv",
@@ -280,11 +296,14 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
             seq_window[-1] = mean_pred
 
     true_dates = test_dtl.dataset["date_time"][input_seq_len:]
-    fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
-    for idx, ts in enumerate(ts_idx):
+    fig, axs = plt.subplots(2, 2, figsize=(5.5, 2.5), sharex=True, sharey=True)
+
+    for idx, ts in enumerate(test_idx):
         ax = axs.flat[idx]
-        ax.plot(true_dates, m_true[ts], color="red", label="True")
-        ax.plot(true_dates, m_preds[ts], color="blue", label="Predicted")
+        ax.plot(true_dates, m_true[ts], color="red", label=r"$y_t$")
+        ax.plot(
+            true_dates, m_preds[ts], color="blue", label=r"$\boldsymbol{\hat{Y}}_t$"
+        )
         ax.fill_between(
             true_dates,
             np.array(m_preds[ts]) - np.sqrt(np.array(var_preds[ts])),
@@ -292,12 +311,30 @@ def shared_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
             color="blue",
             alpha=0.3,
         )
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Value")
-        ax.legend()
+
+        if idx in [0, 2]:
+            ax.set_ylabel("Value")
+
+        if idx in [2, 3]:
+            ax.set_xlabel("Time")
+
+        # Remove x-axis tick labels
+        ax.tick_params(axis="x", labelbottom=False)
+        ax.tick_params(axis="both")
+
+        # Only show legend in top-left
+        if idx == 1:
+            ax.legend(
+                loc=(0, 1.01),
+                ncol=2,
+                frameon=False,
+            )
+        else:
+            ax.legend().remove()
+
     plt.ylim(-2, 2)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "predictions.png"))
+    plt.savefig(os.path.join(out_dir, "predictions.pgf"))
     plt.close()
 
 
@@ -308,7 +345,9 @@ def embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     print("\nRunning with embeddings...")
     # --- Configuration ---
     nb_ts = 4
-    ts_idx = np.arange(0, nb_ts)
+    # train_idx = np.arange(0, nb_ts - 1)
+    train_idx = np.arange(0, nb_ts)
+    test_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 1
     input_seq_len = 24
@@ -318,14 +357,14 @@ def embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     # --- Initialization ---
     embeddings = TimeSeriesEmbeddings(
         (nb_ts, embedding_dim),
-        # encoding_type="normal",
-        encoding_type="sphere",
+        encoding_type="normal",
+        # encoding_type="sphere",
         seed=seed,
     )
     manual_seed(seed)
 
     # --- Load Data ---
-    pbar = tqdm(ts_idx, desc="Loading Data Progress")
+    pbar = tqdm(train_idx, desc="Loading Data Progress")
     train_dtl = None
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
@@ -419,7 +458,7 @@ def embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     plt.ylabel("MSE")
     plt.legend()
     plt.grid(True)
-    plt.savefig(os.path.join(out_dir, "training_mse.png"))
+    plt.savefig(os.path.join(out_dir, "training_mse.pdf"))
     plt.close()
 
     # Cosine Similarities
@@ -433,22 +472,22 @@ def embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     pca = PCA(n_components=2)
     embeddings_matrix = np.array(embed_mus)
     pca_result = pca.fit_transform(embeddings_matrix)
-    plt.figure(figsize=(8, 6))
-    plt.scatter(pca_result[:, 0], pca_result[:, 1], s=100)
+    plt.figure(figsize=(3, 2))
+    plt.scatter(pca_result[:, 0], pca_result[:, 1], s=50)
     for i, txt in enumerate(["Sin-Amp1", "Sin-Amp2", "Square-Amp1", "Square-Amp2"]):
-        plt.annotate(txt, (pca_result[i, 0], pca_result[i, 1]), fontsize=12)
-    plt.title("PCA of Time Series Embeddings")
+        plt.annotate(txt, (pca_result[i, 0], pca_result[i, 1]))
     plt.xlabel("PCA Component 1")
     plt.ylabel("PCA Component 2")
     plt.grid()
-    plt.savefig(os.path.join(out_dir, "pca_embeddings.png"))
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "pca_embeddings.pgf"))
     plt.close()
 
     # --- Testing ---
     m_preds = {i: [] for i in range(nb_ts)}
     var_preds = {i: [] for i in range(nb_ts)}
     m_true = {i: [] for i in range(nb_ts)}
-    pbar = tqdm(ts_idx, desc="Testing Progress")
+    pbar = tqdm(test_idx, desc="Testing Progress")
     for ts in pbar:
         test_dtl = GlobalTimeSeriesDataloader(
             x_file="data/toy_embedding/test_values.csv",
@@ -484,11 +523,14 @@ def embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
             seq_window[-1] = mean_pred
 
     true_dates = test_dtl.dataset["date_time"][input_seq_len:]
-    fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
-    for idx, ts in enumerate(ts_idx):
+    fig, axs = plt.subplots(2, 2, figsize=(5.5, 2.5), sharex=True, sharey=True)
+
+    for idx, ts in enumerate(test_idx):
         ax = axs.flat[idx]
-        ax.plot(true_dates, m_true[ts], color="red", label="True")
-        ax.plot(true_dates, m_preds[ts], color="blue", label="Predicted")
+        ax.plot(true_dates, m_true[ts], color="red", label=r"$y_t$")
+        ax.plot(
+            true_dates, m_preds[ts], color="blue", label=r"$\boldsymbol{\hat{Y}}_t$"
+        )
         ax.fill_between(
             true_dates,
             np.array(m_preds[ts]) - np.sqrt(np.array(var_preds[ts])),
@@ -496,12 +538,30 @@ def embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
             color="blue",
             alpha=0.3,
         )
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Value")
-        ax.legend()
+
+        if idx in [0, 2]:
+            ax.set_ylabel("Value")
+
+        if idx in [2, 3]:
+            ax.set_xlabel("Time")
+
+        # Remove x-axis tick labels
+        ax.tick_params(axis="x", labelbottom=False)
+        ax.tick_params(axis="both")
+
+        # Only show legend in top-left
+        if idx == 1:
+            ax.legend(
+                loc=(0, 1.01),
+                ncol=2,
+                frameon=False,
+            )
+        else:
+            ax.legend().remove()
+
     plt.ylim(-2, 2)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "predictions.png"))
+    plt.savefig(os.path.join(out_dir, "predictions.pgf"))
     plt.close()
 
 
@@ -512,7 +572,9 @@ def no_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     print("\nRunning without embeddings...")
     # --- Configuration ---
     nb_ts = 4
-    ts_idx = np.arange(0, nb_ts)
+    # train_idx = np.arange(0, nb_ts - 1)
+    train_idx = np.arange(0, nb_ts)
+    test_idx = np.arange(0, nb_ts)
     output_col = [0]
     num_features = 1
     input_seq_len = 24
@@ -521,7 +583,7 @@ def no_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     manual_seed(seed)
 
     # --- Load Data ---
-    pbar = tqdm(ts_idx, desc="Loading Data Progress")
+    pbar = tqdm(train_idx, desc="Loading Data Progress")
     train_dtl = None
     for ts in pbar:
         train_dtl_ = GlobalTimeSeriesDataloader(
@@ -601,7 +663,7 @@ def no_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     m_preds = {i: [] for i in range(nb_ts)}
     var_preds = {i: [] for i in range(nb_ts)}
     m_true = {i: [] for i in range(nb_ts)}
-    pbar = tqdm(ts_idx, desc="Testing Progress")
+    pbar = tqdm(test_idx, desc="Testing Progress")
     for ts in pbar:
         test_dtl = GlobalTimeSeriesDataloader(
             x_file="data/toy_embedding/test_values.csv",
@@ -630,11 +692,14 @@ def no_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
             seq_window[-1] = mean_pred
 
     true_dates = test_dtl.dataset["date_time"][input_seq_len:]
-    fig, axs = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
-    for idx, ts in enumerate(ts_idx):
+    fig, axs = plt.subplots(2, 2, figsize=(5.5, 2.5), sharex=True, sharey=True)
+
+    for idx, ts in enumerate(test_idx):
         ax = axs.flat[idx]
-        ax.plot(true_dates, m_true[ts], color="red", label="True")
-        ax.plot(true_dates, m_preds[ts], color="blue", label="Predicted")
+        ax.plot(true_dates, m_true[ts], color="red", label=r"$y_t$")
+        ax.plot(
+            true_dates, m_preds[ts], color="blue", label=r"$\boldsymbol{\hat{Y}}_t$"
+        )
         ax.fill_between(
             true_dates,
             np.array(m_preds[ts]) - np.sqrt(np.array(var_preds[ts])),
@@ -642,28 +707,46 @@ def no_embeddings_run(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
             color="blue",
             alpha=0.3,
         )
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Value")
-        ax.legend()
+
+        if idx in [0, 2]:
+            ax.set_ylabel("Value")
+
+        if idx in [2, 3]:
+            ax.set_xlabel("Time")
+
+        # Remove x-axis tick labels
+        ax.tick_params(axis="x", labelbottom=False)
+        ax.tick_params(axis="both")
+
+        # Only show legend in top-left
+        if idx == 1:
+            ax.legend(
+                loc=(0, 1.01),
+                ncol=2,
+                frameon=False,
+            )
+        else:
+            ax.legend().remove()
+
     plt.ylim(-2, 2)
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "predictions.png"))
+    plt.savefig(os.path.join(out_dir, "predictions.pgf"))
     plt.close()
 
 
-def main(num_epochs=20, batch_size=1, sigma_v=1.0, seed=1):
+def main(num_epochs=20, batch_size=1, sigma_v=1.0, seed=235):
     """
     Main function to run all experiments.
     """
-    shared_embeddings_run(
-        num_epochs=num_epochs, batch_size=batch_size, sigma_v=sigma_v, seed=seed
-    )
+    # shared_embeddings_run(
+    #     num_epochs=num_epochs, batch_size=batch_size, sigma_v=sigma_v, seed=seed
+    # )
     embeddings_run(
         num_epochs=num_epochs, batch_size=batch_size, sigma_v=sigma_v, seed=seed
     )
-    no_embeddings_run(
-        num_epochs=num_epochs, batch_size=batch_size, sigma_v=sigma_v, seed=seed
-    )
+    # no_embeddings_run(
+    #     num_epochs=num_epochs, batch_size=batch_size, sigma_v=sigma_v, seed=seed
+    # )
 
 
 if __name__ == "__main__":
