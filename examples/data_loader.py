@@ -554,6 +554,8 @@ class GlobalTimeSeriesDataloader:
         embed_at_end: Optional[
             bool
         ] = False,  # if True, embedding is added at the end of the input sequence
+        skip_if_invalid: Optional[bool] = False,
+        fillna: Optional[str] = None,
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -576,7 +578,42 @@ class GlobalTimeSeriesDataloader:
         self.embedding_dim = embedding_dim
         self.embedding = embedding
         self.embed_at_end = embed_at_end
+        self.skip_if_invalid = skip_if_invalid
+        self.fillna = fillna
         self.dataset = self.process_data()
+    @staticmethod
+    def _repair_nans(x: np.ndarray, method: Optional[str] = None) -> np.ndarray:
+        """Optionally repair NaNs in 2-D array.
+        method: None | 'ffill_bfill' | 'zero'
+        """
+        if method is None:
+            return x
+        x = x.copy()
+        if method == 'zero':
+            x[~np.isfinite(x)] = 0.0
+            return x
+        if method == 'ffill_bfill':
+            # forward fill then back fill per column
+            n, m = x.shape
+            for j in range(m):
+                col = x[:, j]
+                mask = ~np.isfinite(col)
+                if mask.all():
+                    # all-NaN/Inf: set to zero to avoid breakage
+                    col[:] = 0.0
+                else:
+                    # forward fill
+                    idx = np.where(~mask, np.arange(n), 0)
+                    np.maximum.accumulate(idx, out=idx)
+                    col = col[idx]
+                    # back fill leading NaNs (if any remained because first values were NaN)
+                    first_valid = np.where(~np.isnan(col) & np.isfinite(col))[0]
+                    if first_valid.size:
+                        col[: first_valid[0]] = col[first_valid[0]]
+                x[:, j] = col
+            return x
+        # unknown method -> no change
+        return x
 
     @staticmethod
     def load_data_from_csv(data_file: str) -> np.ndarray:
@@ -628,6 +665,64 @@ class GlobalTimeSeriesDataloader:
                 batch_indices
             ].flatten()
 
+    @staticmethod
+    def _strip_trailing_rows_sync(x: np.ndarray, dt: Optional[np.ndarray]):
+        """Trim trailing rows where the *first column* of x is NaN.
+        Returns (x_trimmed, dt_trimmed_or_none).
+        """
+        if x.ndim == 1:
+            mask = ~np.isnan(x)
+            if not mask.any():
+                raise ValueError("[GlobalTimeSeriesDataloader] series is all-NaN")
+            last = np.where(mask)[0].max()
+            x_trim = x[: last + 1]
+            dt_trim = dt[: last + 1] if dt is not None else None
+            return x_trim, dt_trim
+        else:
+            # use leading/target column (col 0) to decide valid extent
+            mask = ~np.isnan(x[:, 0])
+            if not mask.any():
+                raise ValueError("[GlobalTimeSeriesDataloader] series is all-NaN in first column")
+            last = np.where(mask)[0].max()
+            x_trim = x[: last + 1]
+            dt_trim = dt[: last + 1] if dt is not None else None
+            return x_trim, dt_trim
+
+    @staticmethod
+    def _validate_series_for_windows(
+        x: np.ndarray,
+        input_len: int,
+        output_len: int,
+        stride: int,
+        num_features: int,
+    ) -> np.ndarray:
+        """Ensure x is 2-D, finite, long enough, correct feature count, and float32 contiguous."""
+        if stride <= 0:
+            raise ValueError(f"[GlobalTimeSeriesDataloader] stride must be > 0 (got {stride})")
+
+        if x.ndim != 2:
+            raise ValueError(f"[GlobalTimeSeriesDataloader] expected 2-D array, got shape {x.shape}")
+
+        if x.shape[1] != num_features:
+            raise ValueError(
+                f"[GlobalTimeSeriesDataloader] num_features mismatch: x has {x.shape[1]} columns, expected {num_features}. "
+                "Make sure `num_features` includes covariates that were concatenated."
+            )
+
+        if not np.isfinite(x).all():
+            # find first few offending indices for easier debugging
+            bad = np.argwhere(~np.isfinite(x))
+            bad_list = [tuple(b) for b in bad[:5]]
+            raise ValueError(f"[GlobalTimeSeriesDataloader] non-finite values detected at {bad_list} (showing up to 5)")
+
+        min_len = input_len + output_len
+        if x.shape[0] < min_len:
+            raise ValueError(
+                f"[GlobalTimeSeriesDataloader] too short after trimming: len={x.shape[0]} < {min_len} (input+output)"
+            )
+
+        return np.ascontiguousarray(x.astype(np.float32))
+
     def process_data(self) -> dict:
         """Process time series"""
         # Initialization
@@ -635,21 +730,14 @@ class GlobalTimeSeriesDataloader:
 
         # Load data
         x = self.load_data_from_csv(self.x_file)
-        x = x[:, self.ts_idx : self.ts_idx + 1]  # choose time series column
         date_time = self.load_data_from_csv(self.date_time_file)
-        # x = self.load_data_from_csv(self.x_file)
-        # x = x[:, self.ts_idx : self.ts_idx + 1]  # choose time series column
-        # date_time = self.load_data_from_csv(self.date_time_file)
-        # if date_time.shape[1] > 1:
-        #     date_time = date_time[
-        #         :, self.ts_idx : self.ts_idx + 1
-        #     ]  # choose time series column
+        # choose target column
+        x = x[:, self.ts_idx : self.ts_idx + 1]
+        date_time = date_time[:, self.ts_idx : self.ts_idx + 1]
 
-        # # get index of first non-nan value
-        # first_non_nan = np.argmax(np.isfinite(x), axis=0)
-        # # slice x and date_time to remove the nan values
-        # x = x[first_non_nan[0] :, :]
-        # date_time = date_time[first_non_nan[0] :, :]
+        # Trim trailing padded NaNs using the target (first) column, and keep date_time in sync
+        x, date_time = self._strip_trailing_rows_sync(x, date_time)
+
 
         # Add time covariates
         if self.time_covariates is not None:
@@ -711,15 +799,48 @@ class GlobalTimeSeriesDataloader:
                     data=x[:, 0], mu=self.x_mean, std=self.x_std
                 )
 
-        # Create rolling windows
-        x_rolled, y_rolled = utils.create_rolling_window(
-            data=x,
-            output_col=self.output_col,
-            input_seq_len=self.input_seq_len,
-            output_seq_len=self.output_seq_len,
-            num_features=self.num_features,
-            stride=self.stride,
-        )
+        # Optional NaN repair
+        x = self._repair_nans(x, method=self.fillna)
+
+        # Finalize features and validate before windowing
+        try:
+            x = np.asarray(x, dtype=np.float32)  # ensures float32
+            if x.ndim == 1:
+                x = x.reshape(-1, 1)
+
+            # If num_features was passed incorrectly, fail fast with a clear message
+            if self.num_features is None:
+                self.num_features = x.shape[1]
+
+            # Validate series (length, finiteness, matching num_features, stride)
+            # x = self._validate_series_for_windows(
+            #     x=x,
+            #     input_len=self.input_seq_len,
+            #     output_len=self.output_seq_len,
+            #     stride=self.stride,
+            #     num_features=self.num_features,
+            # )
+
+            # Create rolling windows
+            x_rolled, y_rolled = utils.create_rolling_window(
+                data=x,
+                output_col=self.output_col,
+                input_seq_len=self.input_seq_len,
+                output_seq_len=self.output_seq_len,
+                num_features=self.num_features,
+                stride=self.stride,
+            )
+
+            x_rolled = np.ascontiguousarray(x_rolled, dtype=np.float32)
+            y_rolled = np.ascontiguousarray(y_rolled, dtype=np.float32)
+        except Exception as e:
+            if self.skip_if_invalid:
+                print(f"[WARN] Skipping TS {self.ts_idx} due to: {e}")
+                # Produce empty shapes consistent with expected downstream usage
+                x_rolled = np.zeros((0, self.input_seq_len * self.num_features), dtype=np.float32)
+                y_rolled = np.zeros((0, self.output_seq_len), dtype=np.float32)
+            else:
+                raise
 
         # Create embedding for time series index
         if self.embedding_dim is not None or self.embedding is not None:
@@ -742,7 +863,7 @@ class GlobalTimeSeriesDataloader:
         dataset["value"] = (x_rolled, y_rolled)
 
         # NOTE: Datetime is saved for the visualization purpose
-        dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
+        # dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
 
         # store weights for weighted sampling. Default is uniform sampling
         if self.global_scale == "deepAR":
