@@ -2,6 +2,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import copy
 
 from examples.embedding_loader import (
     TimeSeriesEmbeddings,
@@ -111,37 +112,44 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
     print("Running local models...")
     ts_idx = np.arange(0, nb_ts)
-    output_col = [0]
-    num_features = 1
-    input_seq_len = 52
-    output_seq_len = 1
-    seq_stride = 1
-    early_stopping_criteria = "log_lik"
-    log_lik_optim = -1e100
-    mse_optim = 1e100
-    epoch_optim = 10
-    patience = 20
-    rolling_window = 52
-
-    # set random seed for reproducibility
-    manual_seed(seed)
 
     # --- Output Directory ---
     out_dir = "out/experiment01_local"
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
-    # create placeholders with dynamic length
+    # create placeholders
     ytestPd = np.full((272, nb_ts), np.nan)
     SytestPd = np.full((272, nb_ts), np.nan)
     ytestTr = np.full((272, nb_ts), np.nan)
 
+    # save sigma_v
+    sigma_v_max = copy.copy(sigma_v)
+
     # --- Load Data ---
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
     for ts in pbar:
+
+        output_col = [0]
+        num_features = 2
+        input_seq_len = 52
+        output_seq_len = 1
+        seq_stride = 1
+        early_stopping_criteria = "mse"
+        log_lik_optim = -1e100
+        mse_optim = 1e100
+        epoch_optim = 0
+        net_optim = []
+        patience = 10
+        sigma_v = sigma_v_max
+
+        # set random seed for reproducibility
+        manual_seed(seed)
+
         train_dtl = GlobalTimeSeriesDataloader(
             x_file="data/hq/split_train_values.csv",
             date_time_file="data/hq/split_train_datetimes.csv",
+            time_covariates=["week_of_year"],
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -149,11 +157,13 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             stride=seq_stride,
             ts_idx=ts,
             global_scale="standard",
+            scale_covariates=True,
         )
 
         val_dtl = GlobalTimeSeriesDataloader(
             x_file="data/hq/split_val_values.csv",
             date_time_file="data/hq/split_val_datetimes.csv",
+            time_covariates=["week_of_year"],
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -163,11 +173,15 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             x_mean=train_dtl.x_mean,
             x_std=train_dtl.x_std,
             global_scale="standard",
+            scale_covariates=True,
+            covariate_means=train_dtl.covariate_means,
+            covariate_stds=train_dtl.covariate_stds,
         )
 
         test_dtl = GlobalTimeSeriesDataloader(
             x_file="data/hq/split_test_values.csv",
             date_time_file="data/hq/split_test_datetimes.csv",
+            time_covariates=["week_of_year"],
             output_col=output_col,
             input_seq_len=input_seq_len,
             output_seq_len=output_seq_len,
@@ -177,6 +191,9 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             x_mean=train_dtl.x_mean,
             x_std=train_dtl.x_std,
             global_scale="standard",
+            scale_covariates=True,
+            covariate_means=train_dtl.covariate_means,
+            covariate_stds=train_dtl.covariate_stds,
         )
 
         # --- Define Model ---
@@ -185,15 +202,16 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             LSTM(40, 40, 1),
             Linear(40, 1),
         )
-        net.set_threads(8)
+        net.set_threads(1)
         out_updater = OutputUpdater(net.device)
-        sigma_v = 1
 
         # --- Training ---
-        mses = []
         pbar = tqdm(range(num_epochs), desc="Training Progress")
         for epoch in pbar:
-            batch_iter = train_dtl.create_data_loader(batch_size, shuffle=True)
+            mu_preds = []
+            train_obs = []
+
+            batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False)
 
             # Decaying observation's variance
             sigma_v = exponential_scheduler(
@@ -202,9 +220,26 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             var_y = np.full(
                 (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
             )
+
+            look_back_buffer = None
+
             for x, y in batch_iter:
+
+                # replace nans in x with zeros
+                x = np.nan_to_num(x, nan=0.0)
+
+                if look_back_buffer is None:
+                    look_back_buffer = x[:input_seq_len]
+                else:
+                    look_back_buffer[:-1] = look_back_buffer[1:]  # shift left
+                    look_back_buffer[-1] = float(
+                        np.ravel(m_pred)[-1]
+                    )  # append most recent pred
+                    x[:input_seq_len] = look_back_buffer  # update input sequence
+                    x = x.astype(np.float32)
+
                 # Feed forward
-                m_pred, _ = net(x)
+                m_pred, v_pred = net(x)
 
                 # Update output layer
                 out_updater.update(
@@ -218,13 +253,22 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
                 net.backward()
                 net.step()
 
-                # Training metric
-                pred = normalizer.unstandardize(
-                    m_pred, train_dtl.x_mean, train_dtl.x_std
-                )
-                obs = normalizer.unstandardize(y, train_dtl.x_mean, train_dtl.x_std)
-                mse = metric.mse(pred, obs)
-                mses.append(mse)
+                mu_preds.extend(m_pred)
+                train_obs.extend(y)
+
+                if not np.isnan(y).any():
+                    K = v_pred / (v_pred + sigma_v**2)  # Kalman gain
+                    m_pred = m_pred + K * (y - m_pred)  # posterior mean
+                    v_pred = (1.0 - K) * v_pred  # posterior variance
+                    m_pred = m_pred.astype(np.float32)
+                    v_pred = v_pred.astype(np.float32)
+
+            mu_preds = np.array(mu_preds)
+            train_obs = np.array(train_obs)
+
+            pred = normalizer.unstandardize(mu_preds, train_dtl.x_mean, train_dtl.x_std)
+            obs = normalizer.unstandardize(train_obs, train_dtl.x_mean, train_dtl.x_std)
+            train_mse = metric.mse(pred, obs)
 
             # Validation
             val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
@@ -234,7 +278,22 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             y_val = []
             x_val = []
 
+            # define the lookback buffer for recursive prediction
+            look_back_buffer_val = copy.copy(look_back_buffer)
+
+            # One-step recursive prediction over the validation stream
             for x, y in val_batch_iter:
+
+                if look_back_buffer_val is None:
+                    look_back_buffer_val = x[:input_seq_len]
+                else:
+                    look_back_buffer_val[:-1] = look_back_buffer_val[1:]  # shift left
+                    look_back_buffer_val[-1] = float(
+                        np.ravel(m_pred)[-1]
+                    )  # append most recent pred
+                    x[:input_seq_len] = look_back_buffer_val  # update input sequence
+                    x = x.astype(np.float32)
+
                 # Predicion
                 m_pred, v_pred = net(x)
 
@@ -246,7 +305,6 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             mu_preds = np.array(mu_preds)
             std_preds = np.array(var_preds) ** 0.5
             y_val = np.array(y_val)
-            x_val = np.array(x_val)
 
             mu_preds = normalizer.unstandardize(
                 mu_preds, train_dtl.x_mean, train_dtl.x_std
@@ -263,7 +321,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
             # Progress bar
             pbar.set_description(
-                f"Ts #{ts+1}/{nb_ts} | Epoch {epoch + 1}/{num_epochs}| mse: {sum(mses)/(len(mses)):>7.4f}",
+                f"Ts #{ts+1}/{nb_ts} | Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| mse_val: {mse_val:>7.4f} | log_lik_val: {log_lik_val:>7.4f} | sigma_v: {sigma_v:.4f}",
                 refresh=True,
             )
 
@@ -294,11 +352,24 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         y_test = []
         x_test = []
 
-        for RW_idx_, (x, y) in enumerate(test_batch_iter):
-            # Rolling window predictions
-            RW_idx = RW_idx_ % (rolling_window)
-            if RW_idx > 0:
-                x[-RW_idx * num_features :: num_features] = mu_preds[-RW_idx:]
+        # define the lookback buffer for recursive prediction
+        look_back_buffer = None
+
+        # One-step recursive prediction over the validation stream
+        for x, y in test_batch_iter:
+
+            if look_back_buffer is None:
+                look_back_buffer = x[:input_seq_len]
+            else:
+                look_back_buffer[:-1] = look_back_buffer[1:]  # shift left
+                look_back_buffer[-1] = float(
+                    np.ravel(m_pred)[-1]
+                )  # append most recent pred
+                x[:input_seq_len] = look_back_buffer  # update input sequence
+                x = x.astype(np.float32)
+
+            # replace nans in x with zeros
+            x = np.nan_to_num(x, nan=0.0)
 
             # Predicion
             m_pred, v_pred = net(x)
@@ -1240,7 +1311,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     np.savetxt(out_dir + "/ytestTr.csv", ytestTr, delimiter=",")
 
 
-def main(nb_ts=5, num_epochs=100, batch_size=32, sigma_v=1, seed=235):
+def main(nb_ts=135, num_epochs=100, batch_size=1, sigma_v=1, seed=1):
     """
     Main function to run all experiments on 186 time series
     """
