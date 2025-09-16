@@ -538,7 +538,7 @@ class GlobalTimeSeriesDataloader:
         output_seq_len: int,
         num_features: int,
         stride: int,
-        ts_idx: Optional[int] = 0,
+        ts_idx: Optional[int] = None,
         x_mean: Optional[np.ndarray] = None,
         x_std: Optional[np.ndarray] = None,
         time_covariates: Optional[str] = None,
@@ -639,22 +639,23 @@ class GlobalTimeSeriesDataloader:
         x = self.load_data_from_csv(self.x_file)
         date_time = self.load_data_from_csv(self.date_time_file)
         # choose target column
-        x = x[:, self.ts_idx : self.ts_idx + 1]
-        date_time = date_time[:, self.ts_idx : self.ts_idx + 1]
+        if self.ts_idx is not None:
+            x = x[:, self.ts_idx : self.ts_idx + 1]
+            date_time = date_time[:, self.ts_idx : self.ts_idx + 1]
 
-        # TODO: remove padded nan rows
-        last_valid_idx = np.where(~np.isnan(x))[0][-1]
-        x = x[: last_valid_idx + 1]
-        date_time = date_time[: last_valid_idx + 1]
+            # TODO: remove padded nan rows
+            last_valid_idx = np.where(~np.isnan(x))[0][-1]
+            x = x[: last_valid_idx + 1]
+            date_time = date_time[: last_valid_idx + 1]
 
-        # check if len of x is sufficient
-        min_len = self.input_seq_len + self.output_seq_len
-        try:
-            assert len(x) >= min_len
-        except AssertionError:
-            raise ValueError(
-                f"Time series {self.ts_idx} is too short. It should be at least {min_len} long."
-            )
+        # # check if len of x is sufficient
+        # min_len = self.input_seq_len + self.output_seq_len
+        # try:
+        #     assert len(x) >= min_len
+        # except AssertionError:
+        #     raise ValueError(
+        #         f"Time series {self.ts_idx} is too short. It should be at least {min_len} long."
+        #     )
 
         # Add time covariates
         if self.time_covariates is not None:
@@ -787,15 +788,15 @@ class GlobalTimeSeriesDataloader:
         return new_x_rolled.astype(np.float32)
 
     def remove_time_cov(self, x):
-            x_new = np.zeros(
-                (len(x), self.input_seq_len + self.num_features - 1),
-                dtype=np.float32,
-            )
-            for i in range(0, len(x)):
-                x_ = x[i]
-                keep_idx = np.arange(0, len(x_), self.num_features)
-                x_new[i] = np.concatenate((x_[keep_idx], x_[-self.num_features + 1 :]))
-            return x_new
+        x_new = np.zeros(
+            (len(x), self.input_seq_len + self.num_features - 1),
+            dtype=np.float32,
+        )
+        for i in range(0, len(x)):
+            x_ = x[i]
+            keep_idx = np.arange(0, len(x_), self.num_features)
+            x_new[i] = np.concatenate((x_[keep_idx], x_[-self.num_features + 1 :]))
+        return x_new
 
     def create_data_loader(
         self,
@@ -812,3 +813,567 @@ class GlobalTimeSeriesDataloader:
             weights,
             num_samples,
         )
+
+
+import numpy as np
+import pandas as pd
+from typing import Generator, Tuple, Optional, List, Dict
+
+
+class GlobalInterleavedTimeSeriesDataloader:
+    """
+    Multi-TS dataloader with configurable ordering of (x, y) windows.
+
+    Each column in x_file is a separate time series (target is col 0 before covariates are appended).
+    date_time_file must have the same shape and correspond to x_file column-wise for covariates.
+
+    order_mode:
+        - "by_window": Take window #0 from ts0, ts1, ..., tsN-1; then window #1 from ts0, ts1, ..., tsN-1; etc.
+                       (Preserves CSV series order; this is the default.)
+        - "by_series": All windows of ts0, then all windows of ts1, ..., tsN-1.
+        - "interleave": Round-robin across series (your original behavior).
+    """
+
+    def __init__(
+        self,
+        x_file: str,
+        date_time_file: str,
+        output_col: np.ndarray,
+        input_seq_len: int,
+        output_seq_len: int,
+        num_features: int,  # target + covariates count expected *before* embeddings
+        stride: int,
+        # --- scaling / normalization ---
+        global_scale: Optional[str] = None,  # 'standard' | 'deepAR' | None
+        x_mean: Optional[float] = None,
+        x_std: Optional[float] = None,
+        scale_covariates: bool = False,
+        covariate_means: Optional[np.ndarray] = None,
+        covariate_stds: Optional[np.ndarray] = None,
+        # --- covariates ---
+        time_covariates: Optional[List[str]] = None,  # e.g. ["hour_of_day", "day_of_week"]
+        keep_last_time_cov: bool = True,
+        # --- embeddings / identifiers ---
+        embedding_dim: Optional[int] = None,  # if provided without `embedding`, will create an index vector
+        embedding: Optional[np.ndarray] = None,  # shape (n_ts, emb_dim) or (emb_dim,) broadcast
+        embed_at_end: bool = False,  # if True, append embedding after the rolled time steps
+        idx_as_feature: bool = False,  # append numeric series id as extra feature per step
+        # --- sampling ---
+        min_len_guard: bool = True,  # skip series shorter than in+out, instead of raising
+        # --- ordering ---
+        order_mode: str = "by_window",  # "by_window" | "by_series" | "interleave"
+    ) -> None:
+        self.x_file = x_file
+        self.date_time_file = date_time_file
+        self.output_col = output_col
+        self.input_seq_len = input_seq_len
+        self.output_seq_len = output_seq_len
+        self.stride = stride
+        self.num_features = int(num_features)
+        self.time_covariates = time_covariates or []
+        self.keep_last_time_cov = keep_last_time_cov
+
+        self.global_scale = (global_scale or "").strip().lower() or None
+        self.x_mean = x_mean
+        self.x_std = x_std
+        self.scale_covariates = scale_covariates
+        self.covariate_means = covariate_means
+        self.covariate_stds = covariate_stds
+
+        self.embedding_dim = embedding_dim
+        self.embedding = embedding
+        self.embed_at_end = embed_at_end
+        self.idx_as_feature = idx_as_feature
+        self.min_len_guard = min_len_guard
+
+        self.order_mode = order_mode  # <— new
+
+        # processed outputs
+        self.dataset = self._process_all()
+
+    # -------------------------------
+    # Public API
+    # -------------------------------
+
+    @staticmethod
+    def load_data_from_csv(data_file: str) -> np.ndarray:
+        """Load CSV -> 2D numpy (T, N). Skips the first row (header)."""
+        df = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
+        return df.values
+
+    def create_data_loader(
+        self,
+        batch_size: int,
+        shuffle: bool = False,  # default False to preserve defined ordering
+        weighted_sampling: bool = False,
+        weights: Optional[np.ndarray] = None,
+        num_samples: Optional[int] = None,
+    ) -> Generator[Tuple[np.ndarray, ...], None, None]:
+        x_rolled, y_rolled = self.dataset["value"]
+
+        # Prepare sampling indices
+        n = x_rolled.shape[0]
+        indices = np.arange(n)
+        if shuffle:
+            np.random.shuffle(indices)
+
+        if num_samples is not None:
+            num_samples = min(n, num_samples)
+            if weighted_sampling and (weights is not None):
+                chosen = np.random.choice(
+                    indices, size=num_samples, replace=True, p=weights / np.sum(weights)
+                )
+            else:
+                chosen = np.random.choice(indices, size=num_samples, replace=False)
+        else:
+            chosen = indices
+
+        total_batches = int(np.ceil(len(chosen) / batch_size))
+
+        for b in range(total_batches):
+            sl = chosen[b * batch_size : (b + 1) * batch_size]
+            # Keep output flattened (backward-compatible with your current training loop)
+            yield x_rolled[sl].reshape(len(sl), -1), y_rolled[sl].reshape(len(sl), -1)
+
+    # -------------------------------
+    # Core processing
+    # -------------------------------
+
+    def _process_all(self) -> Dict[str, np.ndarray]:
+        # Load matrices (T, N)
+        X_all = self.load_data_from_csv(self.x_file)
+        DT_all = self.load_data_from_csv(self.date_time_file)
+        assert (
+            X_all.shape == DT_all.shape
+        ), "Values CSV and datetime CSV must have identical shapes (T, N)."
+
+        T, N = X_all.shape
+        n_ts = N
+
+        # Build embeddings per series (if requested)
+        emb_mat = self._prepare_embeddings(n_ts)
+
+        # Precompute covariates per series; also collect to compute global cov stats if needed
+        per_ts_series = []
+        cov_collect = []  # for global cov means/stds if scale_covariates is True
+
+        for j in range(n_ts):
+            xj, dtj = X_all[:, j], DT_all[:, j]
+            xj, dtj = self._trim_trailing_nans(xj, dtj)
+
+            # Build [target, covs...]
+            covs = self._time_covariates_from_datetime_column(dtj)
+            # Optionally add numeric series id as a feature (per step)
+            if self.idx_as_feature:
+                sid = np.full((len(xj), 1), float(j), dtype=np.float32)
+                covs = sid if covs is None else np.concatenate([covs, sid], axis=1)
+
+            if covs is None:
+                Xj = xj.reshape(-1, 1).astype(np.float32)
+            else:
+                Xj = np.concatenate(
+                    [xj.reshape(-1, 1), covs.astype(np.float32)], axis=1
+                )
+
+            per_ts_series.append({"X": Xj, "dt": dtj})
+            if self.scale_covariates and Xj.shape[1] > 1:
+                cov_collect.append(Xj[:, 1:])
+
+        # Compute global cov means/stds if requested
+        if self.scale_covariates and len(cov_collect) > 0:
+            all_cov = np.concatenate([c for c in cov_collect if c.size > 0], axis=0)
+            if self.covariate_means is None or self.covariate_stds is None:
+                self.covariate_means = np.nanmean(all_cov, axis=0)
+                self.covariate_stds = np.nanstd(all_cov, axis=0)
+                self.covariate_stds[self.covariate_stds == 0.0] = 1.0
+
+        # Compute global x mean/std for 'standard' scaling if needed
+        if self.global_scale == "standard" and (
+            self.x_mean is None or self.x_std is None
+        ):
+            all_targets = np.concatenate(
+                [
+                    s["X"][:, 0][~np.isnan(s["X"][:, 0])]
+                    for s in per_ts_series
+                    if len(s["X"])
+                ],
+                axis=0,
+            )
+            self.x_mean = float(np.mean(all_targets))
+            self.x_std = (
+                float(np.std(all_targets)) if np.std(all_targets) != 0.0 else 1.0
+            )
+
+        # Roll per series (with scaling, cov scaling, embedding packing)
+        rolled_per_ts = []
+        scale_is_per_window = []  # deepAR weights, aligned later
+        for j, s in enumerate(per_ts_series):
+            Xj = s["X"].copy()
+
+            # Covariate scaling
+            if self.scale_covariates and Xj.shape[1] > 1:
+                mu, sig = self.covariate_means, self.covariate_stds
+                Xj[:, 1:] = (Xj[:, 1:] - mu) / sig
+
+            # Target scaling
+            scale_i_for_deepar = None
+            if self.global_scale == "deepar":
+                # per-series scale following deepAR style (mean abs + 1)
+                scale_i_for_deepar = 1.0 + float(np.nanmean(np.abs(Xj[:, 0])))
+                Xj[:, 0] = Xj[:, 0] / scale_i_for_deepar
+            elif self.global_scale == "standard":
+                Xj[:, 0] = (Xj[:, 0] - self.x_mean) / self.x_std
+
+            # Roll windows for this series
+            xw, yw = self._create_rolling_windows(
+                Xj,
+                input_seq_len=self.input_seq_len,
+                output_seq_len=self.output_seq_len,
+                stride=self.stride,
+            )
+
+            # Optionally keep only last-step covariates
+            if self.keep_last_time_cov and Xj.shape[1] > 1:
+                xw = self._keep_last_cov_only(xw, Xj.shape[1])
+
+            # Add embeddings
+            if emb_mat is not None:
+                ej = emb_mat[j]
+                xw = self._append_embedding_to_windows(
+                    xw,
+                    emb_vec=ej,
+                    input_seq_len=self.input_seq_len,
+                    feat_count=(Xj.shape[1]),
+                    embed_at_end=self.embed_at_end,
+                )
+
+            rolled_per_ts.append((xw.astype(np.float32), yw.astype(np.float32)))
+
+            # Store deepAR weights for each window (series-specific)
+            if self.global_scale == "deepar":
+                scale_is_per_window.append(
+                    np.full((len(yw),), scale_i_for_deepar, dtype=np.float32)
+                )
+            else:
+                scale_is_per_window.append(None)
+
+        # ---------- NEW: choose ordering ----------
+        if self.order_mode == "by_window":
+            X, Y, W = self._order_by_window_index(rolled_per_ts, scale_is_per_window)
+        elif self.order_mode == "by_series":
+            X, Y, W = self._order_by_series(rolled_per_ts, scale_is_per_window)
+        elif self.order_mode == "interleave":
+            X, Y, W = self._interleave_round_robin(rolled_per_ts, scale_is_per_window)
+        else:
+            raise ValueError(f"Unknown order_mode: {self.order_mode}")
+        # ------------------------------------------
+
+        dataset: Dict[str, np.ndarray] = {"value": (X, Y)}
+        if W is not None:
+            dataset["weights"] = W
+
+        # Keep None here to avoid mixing dt across interleaving/ordering
+        dataset["date_time"] = None
+        return dataset
+
+    # -------------------------------
+    # Helpers
+    # -------------------------------
+
+    @staticmethod
+    def _trim_trailing_nans(
+        x: np.ndarray, dt: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Trim padded trailing NaNs in the *target* series, keep the same cut for datetime."""
+        if len(x) == 0:
+            return x, dt
+        valid = ~np.isnan(x)
+        if not np.any(valid):
+            return np.array([], dtype=np.float32), np.array([], dtype="datetime64[ns]")
+        last = np.where(valid)[0][-1]
+        x = x[: last + 1]
+        dt = dt[: last + 1]
+        # ensure datetime dtype
+        if not np.issubdtype(dt.dtype, np.datetime64):
+            dt = np.array(dt, dtype="datetime64[ns]")
+        return x.astype(np.float32), dt
+
+    def _time_covariates_from_datetime_column(
+        self, dt_col: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """Build covariates for a single datetime column."""
+        if not self.time_covariates:
+            return None
+        dt = dt_col.astype("datetime64[ns]")
+        cols = []
+        for cov in self.time_covariates:
+            c = cov.lower()
+            if c == "hour_of_day":
+                cols.append(
+                    (dt.astype("datetime64[h]").astype(int) % 24).reshape(-1, 1)
+                )
+            elif c == "day_of_week":
+                cols.append((dt.astype("datetime64[D]").astype(int) % 7).reshape(-1, 1))
+            elif c == "week_of_year":
+                # ISO weeks are tricky; this approximates with 0-51
+                cols.append(
+                    ((dt.astype("datetime64[W]").astype(int) % 52) + 1).reshape(-1, 1)
+                )
+            elif c == "month_of_year":
+                cols.append(
+                    ((dt.astype("datetime64[M]").astype(int) % 12) + 1).reshape(-1, 1)
+                )
+            elif c == "quarter_of_year":
+                month = (dt.astype("datetime64[M]").astype(int) % 12) + 1
+                quarter = ((month - 1) // 3 + 1).reshape(-1, 1)
+                cols.append(quarter)
+            else:
+                # silently skip unknown covariates
+                pass
+        if not cols:
+            return None
+        return np.concatenate(cols, axis=1).astype(np.float32)
+
+    @staticmethod
+    def _create_rolling_windows(
+        X: np.ndarray,
+        input_seq_len: int,
+        output_seq_len: int,
+        stride: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        X: (T, F) with first column the (scaled) target.
+        Returns:
+            x_windows: (Nw, input_seq_len * F)
+            y_windows: (Nw, output_seq_len)    # only target for outputs
+        """
+        T, F = X.shape
+        min_len = input_seq_len + output_seq_len
+        if T < min_len:
+            return np.empty((0, input_seq_len * F), dtype=np.float32), np.empty(
+                (0, output_seq_len), dtype=np.float32
+            )
+
+        n_win = 1 + (T - min_len) // stride
+        xw = np.zeros((n_win, input_seq_len * F), dtype=np.float32)
+        yw = np.zeros((n_win, output_seq_len), dtype=np.float32)
+
+        for i in range(n_win):
+            s = i * stride
+            x_slice = X[s : s + input_seq_len, :]  # (L, F)
+            y_slice = X[
+                s + input_seq_len : s + input_seq_len + output_seq_len, 0
+            ]  # target only
+            xw[i] = x_slice.reshape(-1)
+            yw[i] = y_slice.reshape(-1)
+        return xw, yw
+
+    def _keep_last_cov_only(self, xw: np.ndarray, feat_count: int) -> np.ndarray:
+        """
+        From xw shaped (Nw, input_seq_len * F), keep:
+          - all target values over the input window (the first column of each step),
+          - and ONLY the covariates (F-1) from the **last** time step.
+        Output shape: (Nw, input_seq_len + (F-1))
+        """
+        Nw = xw.shape[0]
+        L = self.input_seq_len
+        F = feat_count
+        out = np.zeros((Nw, L + (F - 1)), dtype=np.float32)
+        # indices of target over the window
+        tgt_idx = np.arange(0, L * F, F)
+        # last step covariates:
+        last_cov_start = (L - 1) * F + 1
+        last_cov = xw[:, last_cov_start : last_cov_start + (F - 1)]
+        out[:, :L] = xw[:, tgt_idx]
+        out[:, L:] = last_cov
+        return out
+
+    @staticmethod
+    def _append_embedding_to_windows(
+        xw: np.ndarray,
+        emb_vec: np.ndarray,
+        input_seq_len: int,
+        feat_count: int,
+        embed_at_end: bool,
+    ) -> np.ndarray:
+        """
+        Append embedding either:
+          - per step across the window (if embed_at_end=False), or
+          - as a tail block (if embed_at_end=True).
+        """
+        emb_vec = np.asarray(emb_vec, dtype=np.float32).reshape(-1)
+        emb_dim = emb_vec.shape[0]
+
+        if embed_at_end:
+            # xw: (Nw, L*F)  -> concat (Nw, emb_dim)
+            emb_block = np.tile(emb_vec, (xw.shape[0], 1))
+            return np.concatenate([xw, emb_block], axis=1).astype(np.float32)
+
+        # else: repeat at each time step
+        Nw = xw.shape[0]
+        seq = xw.reshape(Nw, input_seq_len, feat_count)
+        emb_rep = np.tile(emb_vec.reshape(1, 1, emb_dim), (Nw, input_seq_len, 1))
+        seq_cat = np.concatenate([seq, emb_rep], axis=2)
+        return seq_cat.reshape(Nw, input_seq_len * (feat_count + emb_dim)).astype(
+            np.float32
+        )
+
+    def _prepare_embeddings(self, n_ts: int) -> Optional[np.ndarray]:
+        """
+        Returns matrix of shape (n_ts, emb_dim) or None.
+        - If self.embedding is provided as (n_ts, D): use it
+        - If provided as (D,): broadcast to all series
+        - If not provided but embedding_dim is set: create a vector filled with the series index j
+        """
+        if self.embedding is None and self.embedding_dim is None:
+            return None
+
+        if self.embedding is not None:
+            emb = np.asarray(self.embedding, dtype=np.float32)
+            if emb.ndim == 1:
+                emb = np.tile(emb.reshape(1, -1), (n_ts, 1))
+            else:
+                assert (
+                    emb.shape[0] == n_ts
+                ), "Embedding matrix must have shape (n_ts, emb_dim)."
+            return emb
+
+        # create simple index-based embeddings
+        D = int(self.embedding_dim)
+        out = np.zeros((n_ts, D), dtype=np.float32)
+        for j in range(n_ts):
+            out[j, :] = float(j)
+        return out
+
+    # -------------------------------
+    # Ordering helpers
+    # -------------------------------
+
+    @staticmethod
+    def _interleave_round_robin(
+        rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
+        per_ts_deepar_weights: List[Optional[np.ndarray]],
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+        """
+        Round-robin interleaving (original behavior).
+        """
+        n_ts = len(rolled_per_ts)
+        counts = [len(yw) for (_, yw) in rolled_per_ts]
+        if max(counts, default=0) == 0:
+            return (
+                np.empty((0, 0), dtype=np.float32),
+                np.empty((0, 0), dtype=np.float32),
+                None,
+            )
+
+        sample_x = next((x for (x, y) in rolled_per_ts if len(y) > 0), None)
+        sample_y = next((y for (x, y) in rolled_per_ts if len(y) > 0), None)
+        feat_x = sample_x.shape[1]
+        feat_y = sample_y.shape[1]
+
+        total = sum(counts)
+        X = np.zeros((total, feat_x), dtype=np.float32)
+        Y = np.zeros((total, feat_y), dtype=np.float32)
+        W = (
+            np.zeros((total,), dtype=np.float32)
+            if any(w is not None for w in per_ts_deepar_weights)
+            else None
+        )
+
+        write = 0
+        max_k = max(counts)
+        for k in range(max_k):
+            for j in range(n_ts):
+                xj, yj = rolled_per_ts[j]
+                if k < len(yj):
+                    X[write] = xj[k]
+                    Y[write] = yj[k]
+                    if W is not None and per_ts_deepar_weights[j] is not None:
+                        W[write] = per_ts_deepar_weights[j][k]
+                    write += 1
+
+        if W is not None:
+            return X[:write], Y[:write], W[:write]
+        return X[:write], Y[:write], None
+
+    @staticmethod
+    def _order_by_window_index(
+        rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
+        per_ts_deepar_weights: List[Optional[np.ndarray]],
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+        """
+        Group by window index across series (preserve CSV column order).
+        Sequence: (ts0,w0),(ts1,w0),...,(tsN-1,w0),(ts0,w1),(ts1,w1),...
+        Skips a (ts,w) if that series has fewer windows.
+        """
+        n_ts = len(rolled_per_ts)
+        counts = [len(yw) for (_, yw) in rolled_per_ts]
+        if max(counts, default=0) == 0:
+            return (
+                np.empty((0, 0), dtype=np.float32),
+                np.empty((0, 0), dtype=np.float32),
+                None,
+            )
+
+        sample_x = next((x for (x, y) in rolled_per_ts if len(y) > 0), None)
+        sample_y = next((y for (x, y) in rolled_per_ts if len(y) > 0), None)
+        feat_x = sample_x.shape[1]
+        feat_y = sample_y.shape[1]
+
+        total = sum(counts)
+        X = np.zeros((total, feat_x), dtype=np.float32)
+        Y = np.zeros((total, feat_y), dtype=np.float32)
+        W = (
+            np.zeros((total,), dtype=np.float32)
+            if any(w is not None for w in per_ts_deepar_weights)
+            else None
+        )
+
+        write = 0
+        max_k = max(counts)
+        for k in range(max_k):        # window index
+            for j in range(n_ts):     # CSV series order
+                xj, yj = rolled_per_ts[j]
+                if k < len(yj):
+                    X[write] = xj[k]
+                    Y[write] = yj[k]
+                    if W is not None and per_ts_deepar_weights[j] is not None:
+                        W[write] = per_ts_deepar_weights[j][k]
+                    write += 1
+
+        if W is not None:
+            return X[:write], Y[:write], W[:write]
+        return X[:write], Y[:write], None
+
+    @staticmethod
+    def _order_by_series(
+        rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
+        per_ts_deepar_weights: List[Optional[np.ndarray]],
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+        """
+        Concatenate all windows of ts0, then ts1, ..., tsN-1 (CSV order).
+        """
+        xs, ys, ws = [], [], []
+        for j, (xj, yj) in enumerate(rolled_per_ts):
+            if len(yj) == 0:
+                continue
+            xs.append(xj)
+            ys.append(yj)
+            if per_ts_deepar_weights[j] is not None:
+                ws.append(per_ts_deepar_weights[j])
+
+        if not xs:
+            return (
+                np.empty((0, 0), dtype=np.float32),
+                np.empty((0, 0), dtype=np.float32),
+                None,
+            )
+
+        X = np.concatenate(xs, axis=0).astype(np.float32)
+        Y = np.concatenate(ys, axis=0).astype(np.float32)
+        W = (
+            np.concatenate(ws, axis=0).astype(np.float32)
+            if ws
+            else None
+        )
+        return X, Y, W
