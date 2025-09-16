@@ -7,7 +7,10 @@ import copy
 from examples.embedding_loader import (
     TimeSeriesEmbeddings,
 )
-from examples.data_loader import GlobalTimeSeriesDataloader
+from examples.data_loader import (
+    GlobalTimeSeriesDataloader,
+    GlobalInterleavedTimeSeriesDataloader,
+)
 from pytagi import exponential_scheduler, manual_seed
 import pytagi.metric as metric
 from pytagi import Normalizer as normalizer
@@ -411,162 +414,203 @@ def local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
 def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     """
-    Run on global model on all time series
+    Run a single global model across ALL time series using the interleaved dataloader.
+    Training/validation: all series at once (round-robin windows).
+    Testing: per-series loop preserved (using ts_indices filter) to keep your 1-step recursive logic.
     """
 
-    # Dataset
+    # Config
     ts_idx = np.arange(0, nb_ts)
     output_col = [0]
-    num_features = 1
+    num_features = 2
     input_seq_len = 52
     output_seq_len = 1
     seq_stride = 1
-    rolling_window = 52  # for rolling window predictions in the test set
+    early_stopping_criteria = "mse"
+    log_lik_optim = -1e100
+    mse_optim = 1e100
+    epoch_optim = 0
+    net_optim = []
+    patience = 10
+    rolling_window = input_seq_len  # for your recursive update below
 
-    # set random seed for reproducibility
+    # Seed
     manual_seed(seed)
 
     # --- Output Directory ---
     out_dir = "out/experiment01_global"
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
 
-    ytestPd = np.full((272, nb_ts), np.nan)
-    SytestPd = np.full((272, nb_ts), np.nan)
-    ytestTr = np.full((272, nb_ts), np.nan)
+    # Pre-allocate final CSVs
+    horizon_cap = 272
+    ytestPd = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
+    SytestPd = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
+    ytestTr = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
 
-    pbar = tqdm(ts_idx, desc="Loading Data Progress")
+    # Build TRAIN loader over ALL series (interleaved)
+    train_dtl = GlobalInterleavedTimeSeriesDataloader(
+        x_file="data/hq/split_train_values.csv",
+        date_time_file="data/hq/split_train_datetimes.csv",
+        output_col=output_col,
+        input_seq_len=input_seq_len,
+        output_seq_len=output_seq_len,
+        num_features=num_features,
+        stride=seq_stride,
+        time_covariates=["week_of_year"],
+        keep_last_time_cov=True,
+        global_scale="standard",  # GLOBAL mean/std across all series
+        scale_covariates=True,  # set True if you add covariates
+    )
 
-    mean_train = [0.0] * nb_ts
-    std_train = [1.0] * nb_ts
+    # Use the SAME scaling for validation/test
+    global_mean = train_dtl.x_mean
+    global_std = train_dtl.x_std
 
-    for ts in pbar:
-        train_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/hq/split_train_values.csv",
-            date_time_file="data/hq/split_train_datetimes.csv",
-            output_col=output_col,
-            input_seq_len=input_seq_len,
-            output_seq_len=output_seq_len,
-            num_features=num_features,
-            stride=seq_stride,
-            ts_idx=ts,
-            global_scale="standard",
-        )
+    val_dtl = GlobalInterleavedTimeSeriesDataloader(
+        x_file="data/hq/split_val_values.csv",
+        date_time_file="data/hq/split_val_datetimes.csv",
+        output_col=output_col,
+        input_seq_len=input_seq_len,
+        output_seq_len=output_seq_len,
+        num_features=num_features,
+        stride=seq_stride,
+        time_covariates=["week_of_year"],
+        keep_last_time_cov=True,
+        global_scale="standard",
+        x_mean=global_mean,
+        x_std=global_std,
+        scale_covariates=True,
+    )
 
-        # Store scaling factors
-        mean_train[ts] = train_dtl_.x_mean
-        std_train[ts] = train_dtl_.x_std
-
-        val_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/hq/split_val_values.csv",
-            date_time_file="data/hq/split_val_datetimes.csv",
-            output_col=output_col,
-            input_seq_len=input_seq_len,
-            output_seq_len=output_seq_len,
-            num_features=num_features,
-            stride=seq_stride,
-            ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
-            global_scale="standard",
-        )
-
-        if ts == 0:
-            train_dtl = train_dtl_
-            val_dtl = val_dtl_
-        else:
-            train_dtl = concat_ts_sample(train_dtl, train_dtl_)
-            val_dtl = concat_ts_sample(val_dtl, val_dtl_)
-
+    # -----------------------
     # Network
     net = Sequential(
-        LSTM(num_features + input_seq_len - 1, 40, 1),
+        LSTM(input_seq_len + num_features - 1, 40, 1),
         LSTM(40, 40, 1),
         Linear(40, 1),
     )
-    net.set_threads(8)
+    net.set_threads(1)
     out_updater = OutputUpdater(net.device)
 
-    # input state update
-    net.input_state_update = True
+    # Training loop
+    mses, mses_val, ll_val = [], [], []
 
-    # --- Training ---
-    mses = []
-    mses_val = []  # to save mse_val for plotting
-    ll_val = []  # to save log likelihood for plotting
-
-    # options for early stopping
     log_lik_optim = -1e100
     mse_optim = 1e100
-    epoch_optim = 1
+    epoch_optim = 0
     early_stopping_criteria = "mse"
     patience = 10
     net_optim = []
 
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
+        mu_preds = []
+        train_obs = []
 
         batch_iter = train_dtl.create_data_loader(
-            batch_size,
-            shuffle=True,
+            batch_size=batch_size,
+            shuffle=False,
         )
 
-        if sigma_v != None:
-            # Decaying observation's variance
-            sigma_v = exponential_scheduler(
-                curr_v=sigma_v, min_v=0.5, decaying_factor=0.99, curr_iter=epoch
-            )
-            var_y = np.full(
-                (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
-            )
+        # observation noise schedule
+        sigma_v = exponential_scheduler(
+            curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
+        )
+        var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
-        for x, y in batch_iter:
+        # TODO
+        # create array for each row in each batch where the number of rows is the nb of time series
+        look_back_buffer
 
-            # Feed forward
-            m_pred, _ = net(x)
+        for rw_idx, (x, y) in enumerate(batch_iter):
+
+            # replace nans in x with zeros
+            x = np.nan_to_num(x, nan=0.0)
+
+            if look_back_buffer is None:
+                look_back_buffer[rw_idx] = x[:input_seq_len]
+
+            # Forward
+            m_pred, v_pred = net(x)
 
             # Update output layer
             out_updater.update(
                 output_states=net.output_z_buffer,
-                mu_obs=y,
-                var_obs=var_y,
+                mu_obs=y.flatten(),
+                var_obs=var_y.flatten(),
                 delta_states=net.input_delta_z_buffer,
             )
 
-            # Feed backward
+            # Backward + step
             net.backward()
             net.step()
 
-            pred = m_pred
-            obs = y
+            mu_preds.extend(m_pred)
+            train_obs.extend(y)
 
-            # Training metric
-            mse = metric.mse(pred, obs)
-            mses.append(mse)
+            if not np.isnan(y).any():
+                K = v_pred / (v_pred + sigma_v**2)  # Kalman gain
+                m_pred = m_pred + K * (y - m_pred)  # posterior mean
+                v_pred = (1.0 - K) * v_pred  # posterior variance
+                m_pred = m_pred.astype(np.float32)
+                v_pred = v_pred.astype(np.float32)
+
+            if look_back_buffer is not None:
+                look_back_buffer[rw_idx][:-1] = look_back_buffer[1:]  # shift left
+                look_back_buffer[rw_idx][-1] = float(
+                    np.ravel(m_pred)[-1]
+                )  # append most recent pred
+                x[:input_seq_len] = look_back_buffer[rw_idx]  # update input sequence
+                x = x.astype(np.float32)
+
+        mu_preds = np.array(mu_preds)
+        train_obs = np.array(train_obs)
+
+        pred = normalizer.unstandardize(mu_preds, train_dtl.x_mean, train_dtl.x_std)
+        obs = normalizer.unstandardize(train_obs, train_dtl.x_mean, train_dtl.x_std)
+        train_mse = metric.mse(pred, obs)
 
         # Validation
-        val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=True)
+        val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=False)
 
         mu_preds = []
         var_preds = []
         y_val = []
         x_val = []
 
+        # define the lookback buffer for recursive prediction
+        # look_back_buffer_val = copy.copy(look_back_buffer)
+        look_back_buffer_val = None
+
+        # One-step recursive prediction over the validation stream
         for x, y in val_batch_iter:
 
-            # Prediction
+            if look_back_buffer_val is None:
+                look_back_buffer_val = x[:input_seq_len]
+            else:
+                look_back_buffer_val[:-1] = look_back_buffer_val[1:]  # shift left
+                look_back_buffer_val[-1] = float(
+                    np.ravel(m_pred)[-1]
+                )  # append most recent pred
+                x[:input_seq_len] = look_back_buffer_val  # update input sequence
+                x = x.astype(np.float32)
+
+            # Predicion
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
             var_preds.extend(v_pred + sigma_v**2)
-
             x_val.extend(x)
             y_val.extend(y)
 
         mu_preds = np.array(mu_preds)
         std_preds = np.array(var_preds) ** 0.5
         y_val = np.array(y_val)
-        x_val = np.array(x_val)
+
+        mu_preds = normalizer.unstandardize(mu_preds, train_dtl.x_mean, train_dtl.x_std)
+        std_preds = normalizer.unstandardize_std(std_preds, train_dtl.x_std)
+
+        y_val = normalizer.unstandardize(y_val, train_dtl.x_mean, train_dtl.x_std)
 
         # Compute log-likelihood for validation set
         mse_val = metric.mse(mu_preds, y_val)
@@ -574,17 +618,11 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             prediction=mu_preds, observation=y_val, std=std_preds
         )
 
-        # Save mse_val and log likelihood for plotting
-        mses_val.append(mse_val)
-        ll_val.append(log_lik_val)
-
         # Progress bar
-        pbar.set_postfix(
-            mse=f"{np.mean(mses):.4f}",
-            mse_val=f"{mse_val:.4f}",
-            log_lik_val=f"{log_lik_val:.4f}",
+        pbar.set_description(
+            f"Ts #{ts+1}/{nb_ts} | Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| mse_val: {mse_val:>7.4f} | log_lik_val: {log_lik_val:>7.4f} | sigma_v: {sigma_v:.4f}",
+            refresh=True,
         )
-        # pbar.set_postfix(mse=f"{np.mean(mses):.4f}", sigma_v=f"{sigma_v:.4f}")
 
         # early-stopping
         if early_stopping_criteria == "mse":
@@ -602,19 +640,18 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         if int(epoch) - int(epoch_optim) > patience:
             break
 
-    # load optimal model
+    # Load optimal model
     if net_optim:
         net.load_state_dict(net_optim)
 
-    # save the model
-    net.save(out_dir + "/param/model.pth")
+    # Save model
+    net.save(os.path.join(out_dir, "param/model.pth"))
 
-    # Testing
+    # Testing (per-series with recursive 1-step)
     pbar = tqdm(ts_idx, desc="Testing Progress")
 
     for ts in pbar:
-
-        test_dtl = GlobalTimeSeriesDataloader(
+        test_dtl = GlobalInterleavedTimeSeriesDataloader(
             x_file="data/hq/split_test_values.csv",
             date_time_file="data/hq/split_test_datetimes.csv",
             output_col=output_col,
@@ -622,11 +659,13 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             output_seq_len=output_seq_len,
             num_features=num_features,
             stride=seq_stride,
-            ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
+            time_covariates=["week_of_year"],
+            keep_last_time_cov=True,
             global_scale="standard",
+            x_mean=global_mean,
+            x_std=global_std,
             scale_covariates=True,
+            ts_indices=[int(ts)],
         )
 
         test_batch_iter = test_dtl.create_data_loader(1, shuffle=False)
@@ -636,19 +675,30 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         y_test = []
         x_test = []
 
-        # Rolling window predictions
-        for RW_idx_, (x, y) in enumerate(test_batch_iter):
-            # Rolling window predictions
-            RW_idx = RW_idx_ % rolling_window
-            if RW_idx > 0:
-                x[-RW_idx * (num_features) :: (num_features)] = mu_preds[-RW_idx:]
+        # define the lookback buffer for recursive prediction
+        look_back_buffer = None
 
-            # Prediction
+        # One-step recursive prediction over the validation stream
+        for x, y in test_batch_iter:
+
+            if look_back_buffer is None:
+                look_back_buffer = x[:input_seq_len]
+            else:
+                look_back_buffer[:-1] = look_back_buffer[1:]  # shift left
+                look_back_buffer[-1] = float(
+                    np.ravel(m_pred)[-1]
+                )  # append most recent pred
+                x[:input_seq_len] = look_back_buffer  # update input sequence
+                x = x.astype(np.float32)
+
+            # replace nans in x with zeros
+            x = np.nan_to_num(x, nan=0.0)
+
+            # Predicion
             m_pred, v_pred = net(x)
 
             mu_preds.extend(m_pred)
             var_preds.extend(v_pred + sigma_v**2)
-
             x_test.extend(x)
             y_test.extend(y)
 
@@ -657,10 +707,9 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         y_test = np.array(y_test)
         x_test = np.array(x_test)
 
-        # Unscale the predictions
-        mu_preds = normalizer.unstandardize(mu_preds, mean_train[ts], std_train[ts])
-        std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-        y_test = normalizer.unstandardize(y_test, mean_train[ts], std_train[ts])
+        mu_preds = normalizer.unstandardize(mu_preds, train_dtl.x_mean, train_dtl.x_std)
+        std_preds = normalizer.unstandardize_std(std_preds, train_dtl.x_std)
+        y_test = normalizer.unstandardize(y_test, train_dtl.x_mean, train_dtl.x_std)
 
         # save test predicitons for each time series
         # Pad predictions to ensure length is 272
@@ -1316,10 +1365,10 @@ def main(nb_ts=135, num_epochs=100, batch_size=1, sigma_v=1, seed=1):
     Main function to run all experiments on 186 time series
     """
     # Run1 --> local model
-    local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
+    # local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
 
     # Run2 --> global model
-    # global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
+    global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
 
     # Run3 --> global model with embeddings
     # embed_model_run(nb_ts, num_epochs, batch_size, sigma_v=sigma_v, seed=seed)
