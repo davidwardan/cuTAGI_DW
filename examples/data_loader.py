@@ -851,11 +851,17 @@ class GlobalInterleavedTimeSeriesDataloader:
         covariate_means: Optional[np.ndarray] = None,
         covariate_stds: Optional[np.ndarray] = None,
         # --- covariates ---
-        time_covariates: Optional[List[str]] = None,  # e.g. ["hour_of_day", "day_of_week"]
+        time_covariates: Optional[
+            List[str]
+        ] = None,  # e.g. ["hour_of_day", "day_of_week"]
         keep_last_time_cov: bool = True,
         # --- embeddings / identifiers ---
-        embedding_dim: Optional[int] = None,  # if provided without `embedding`, will create an index vector
-        embedding: Optional[np.ndarray] = None,  # shape (n_ts, emb_dim) or (emb_dim,) broadcast
+        embedding_dim: Optional[
+            int
+        ] = None,  # if provided without `embedding`, will create an index vector
+        embedding: Optional[
+            np.ndarray
+        ] = None,  # shape (n_ts, emb_dim) or (emb_dim,) broadcast
         embed_at_end: bool = False,  # if True, append embedding after the rolled time steps
         idx_as_feature: bool = False,  # append numeric series id as extra feature per step
         # --- sampling ---
@@ -947,7 +953,7 @@ class GlobalInterleavedTimeSeriesDataloader:
             X_all.shape == DT_all.shape
         ), "Values CSV and datetime CSV must have identical shapes (T, N)."
 
-        T, N = X_all.shape
+        T, N = X_all.shape  # T is time steps, N is number of series
         n_ts = N
 
         # Build embeddings per series (if requested)
@@ -959,7 +965,9 @@ class GlobalInterleavedTimeSeriesDataloader:
 
         for j in range(n_ts):
             xj, dtj = X_all[:, j], DT_all[:, j]
-            xj, dtj = self._trim_trailing_nans(xj, dtj)
+            xj, dtj = self._trim_trailing_nans(
+                xj, dtj
+            )  # needed for some series that are shorter than T
 
             # Build [target, covs...]
             covs = self._time_covariates_from_datetime_column(dtj)
@@ -1057,7 +1065,7 @@ class GlobalInterleavedTimeSeriesDataloader:
             else:
                 scale_is_per_window.append(None)
 
-        # ---------- NEW: choose ordering ----------
+        # ordering of windows (this is only effective if shuffle=False in create_data_loader)
         if self.order_mode == "by_window":
             X, Y, W = self._order_by_window_index(rolled_per_ts, scale_is_per_window)
         elif self.order_mode == "by_series":
@@ -1066,20 +1074,16 @@ class GlobalInterleavedTimeSeriesDataloader:
             X, Y, W = self._interleave_round_robin(rolled_per_ts, scale_is_per_window)
         else:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
-        # ------------------------------------------
 
         dataset: Dict[str, np.ndarray] = {"value": (X, Y)}
         if W is not None:
             dataset["weights"] = W
 
-        # Keep None here to avoid mixing dt across interleaving/ordering
+        # TODO: store datetimes for visualization?
         dataset["date_time"] = None
         return dataset
 
-    # -------------------------------
     # Helpers
-    # -------------------------------
-
     @staticmethod
     def _trim_trailing_nans(
         x: np.ndarray, dt: np.ndarray
@@ -1331,8 +1335,8 @@ class GlobalInterleavedTimeSeriesDataloader:
 
         write = 0
         max_k = max(counts)
-        for k in range(max_k):        # window index
-            for j in range(n_ts):     # CSV series order
+        for k in range(max_k):  # window index
+            for j in range(n_ts):  # CSV series order
                 xj, yj = rolled_per_ts[j]
                 if k < len(yj):
                     X[write] = xj[k]
@@ -1371,9 +1375,5 @@ class GlobalInterleavedTimeSeriesDataloader:
 
         X = np.concatenate(xs, axis=0).astype(np.float32)
         Y = np.concatenate(ys, axis=0).astype(np.float32)
-        W = (
-            np.concatenate(ws, axis=0).astype(np.float32)
-            if ws
-            else None
-        )
+        W = np.concatenate(ws, axis=0).astype(np.float32) if ws else None
         return X, Y, W

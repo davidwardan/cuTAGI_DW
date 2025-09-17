@@ -33,22 +33,6 @@ mpl.rcParams.update(
 )
 
 
-def concat_ts_sample(data, data_add):
-    """Concatenates two time series datasets."""
-    x_combined = np.concatenate(
-        (data.dataset["value"][0], data_add.dataset["value"][0]), axis=0
-    )
-    y_combined = np.concatenate(
-        (data.dataset["value"][1], data_add.dataset["value"][1]), axis=0
-    )
-    # time_combined = np.concatenate(
-    #     (data.dataset["date_time"], data_add.dataset["date_time"])
-    # )
-    data.dataset["value"] = (x_combined, y_combined)
-    # data.dataset["date_time"] = time_combined
-    return data
-
-
 # --- Helper functions for embedding batched input ---
 def prepare_batch_embeddings(x, input_seq_len, num_features, embed_dim, embeddings):
     """Fill the embedding tail for each sample block in a *flat* batched x.
@@ -466,6 +450,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     # Use the SAME scaling for validation/test
     global_mean = train_dtl.x_mean
     global_std = train_dtl.x_std
+    covariate_means = train_dtl.covariate_means
+    covariate_stds = train_dtl.covariate_stds
 
     val_dtl = GlobalInterleavedTimeSeriesDataloader(
         x_file="data/hq/split_val_values.csv",
@@ -481,6 +467,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         x_mean=global_mean,
         x_std=global_std,
         scale_covariates=True,
+        covariate_means=covariate_means,
+        covariate_stds=covariate_stds,
         order_mode="by_window",
     )
 
@@ -506,8 +494,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         )
 
         # how many batches will be produced
-        n = train_dtl.dataset["value"][0].shape[0]         # total samples
-        num_batches = math.ceil(n / batch_size)         # same logic as your loader
+        n = train_dtl.dataset["value"][0].shape[0]  # total samples
+        num_batches = math.ceil(n / batch_size)  # same logic as your loader
 
         # observation noise schedule
         sigma_v = exponential_scheduler(
@@ -518,13 +506,17 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         # define the lookback buffer for recursive prediction
         look_back_buffer = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
 
-        print("Training...")
-        for rw_idx, (x, y) in tqdm(
-            enumerate(batch_iter),
+        batch_bar = tqdm(
+            batch_iter,
             total=num_batches,
-            desc="Batches",
+            desc=f"Batches (epoch {epoch+1}/{num_epochs})",
             unit="batch",
-        ):
+            leave=False,  # <- don't leave stale bars behind
+            dynamic_ncols=True,
+        )
+
+        print("Training...")
+        for rw_idx, (x, y) in enumerate(batch_bar):
 
             # get ts_idx from rw_idx
             rw_idx = rw_idx % nb_ts
@@ -572,8 +564,10 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
                     np.ravel(m_pred)[-1]
                 )  # append most recent pred
 
+        batch_bar.close()
+
         mu_preds = np.array(mu_preds)
-        train_obs = np.array(train_obs)
+        train_obs = np.array(train_obs).reshape(-1)
 
         pred = normalizer.unstandardize(mu_preds, train_dtl.x_mean, train_dtl.x_std)
         obs = normalizer.unstandardize(train_obs, train_dtl.x_mean, train_dtl.x_std)
@@ -605,7 +599,9 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
             if np.isnan(look_back_buffer_val[rw_idx]).all():
                 look_back_buffer_val[rw_idx] = x[:input_seq_len]
             else:
-                x[:input_seq_len] = look_back_buffer_val[rw_idx]  # update input sequence
+                x[:input_seq_len] = look_back_buffer_val[
+                    rw_idx
+                ]  # update input sequence
                 x = x.astype(np.float32)
 
             # Predicion
@@ -641,7 +637,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
         # Progress bar
         pbar.set_description(
-            f"Ts #{ts+1}/{nb_ts} | Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| mse_val: {mse_val:>7.4f} | log_lik_val: {log_lik_val:>7.4f} | sigma_v: {sigma_v:.4f}",
+            f"Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| mse_val: {mse_val:>7.4f} | log_lik_val: {log_lik_val:>7.4f} | sigma_v: {sigma_v:.4f}",
             refresh=True,
         )
 
