@@ -780,7 +780,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     manual_seed(seed)
 
     # --- Output Directory ---
-    out_dir = "out/experiment01_global"
+    out_dir = "out/experiment01_embed"
     os.makedirs(out_dir, exist_ok=True)
 
     # Pre-allocate final CSVs
@@ -956,7 +956,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
                 x = x.astype(np.float32)
 
             # Append embeddings
-            embed_mu, embed_var = embeddings.get_embedding(ts_id)
+            ts_i = int(np.asarray(ts_id).squeeze())
+            embed_mu, embed_var = embeddings.get_embedding(ts_i)
 
             x_var = np.concatenate(
                 (np.zeros_like(x), embed_var.flatten()), dtype=np.float32
