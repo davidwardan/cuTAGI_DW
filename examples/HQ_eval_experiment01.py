@@ -305,10 +305,61 @@ def main():
         Y = np.concatenate(stacks_y)
         P = np.concatenate(stacks_p)
         S = np.concatenate(stacks_s)
-        overall = calc_metrics(Y, P, S,std_factor=args.std_factor)
+        overall = calc_metrics(Y, P, S, std_factor=args.std_factor)
 
     overall_df = pd.DataFrame([overall])
     overall_df.to_csv(in_dir / "metrics_overall.csv", index=False, float_format="%.6g")
+
+    # check if embeddings file exists
+    if True:
+
+        data = np.load(in_dir / "param/embeddings_start.npz")
+        mu_embedding = data["mu_embedding"]
+        var_embedding = data["var_embedding"]
+
+        # apply PCA to reduce to 2D
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=2)
+        mu_emb_2d = pca.fit_transform(mu_embedding)
+
+        # plot embeddings
+        plt.figure(figsize=(8, 6))
+        plt.scatter(mu_emb_2d[:, 0], mu_emb_2d[:, 1], c="blue", alpha=0.7)
+        for i in range(n_series):
+            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], str(i), fontsize=9)
+        plt.xlabel("Principal Component 1")
+        plt.ylabel("Principal Component 2")
+        plt.grid(True)
+        plt.tight_layout()
+        emb_plot_path = in_dir / "embeddings_mu_pca_start.png"
+        plt.savefig(emb_plot_path, dpi=160)
+        plt.close()
+
+    if True:
+
+        data = np.load(in_dir / "param/embeddings_end.npz")
+        mu_embedding = data["mu_embedding"]
+        var_embedding = data["var_embedding"]
+
+        # apply PCA to reduce to 2D
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=2)
+        mu_emb_2d = pca.fit_transform(mu_embedding)
+
+        # plot embeddings
+        plt.figure(figsize=(8, 6))
+        plt.scatter(mu_emb_2d[:, 0], mu_emb_2d[:, 1], c="blue", alpha=0.7)
+        for i in range(n_series):
+            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], str(i), fontsize=9)
+        plt.xlabel("Principal Component 1")
+        plt.ylabel("Principal Component 2")
+        plt.grid(True)
+        plt.tight_layout()
+        emb_plot_path = in_dir / "embeddings_mu_pca_end.png"
+        plt.savefig(emb_plot_path, dpi=160)
+        plt.close()
 
     print(
         f"[OK] Wrote {in_dir/'metrics_per_series.csv'} and {in_dir/'metrics_overall.csv'}"

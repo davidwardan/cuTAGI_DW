@@ -192,7 +192,7 @@ Args:
             delta_var[col] = zero_pad;
         } else {
             float obs_diff = obs[col / 2] - mu_a_col;
-            delta_mu[col] = tmp * obs_diff;
+            delta_mu[col] = tmp2 * obs_diff;
             delta_var[col] = -tmp * jcb_col;
         }
 
