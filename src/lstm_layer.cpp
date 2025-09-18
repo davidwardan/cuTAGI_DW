@@ -1294,6 +1294,10 @@ void LSTM::forward(BaseHiddenStates &input_states,
                             this->lstm_states.var_c_prev);
     }
 
+    // TODO: remove this
+    // temporary change
+    // this->lstm_states.reset_zeros();
+
     this->prepare_input(input_states);
     this->forget_gate(batch_size);
     this->input_gate(batch_size);

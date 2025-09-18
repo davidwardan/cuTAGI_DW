@@ -48,10 +48,19 @@ class TimeSeriesEmbeddings:
         return self.mu_embedding[idx], self.var_embedding[idx]
 
     def save(self, out_dir: str):
-        np.savetxt(out_dir + "/embeddings_mu.csv", self.mu_embedding, delimiter=",")
-        np.savetxt(out_dir + "/embeddings_var.csv", self.var_embedding, delimiter=",")
+        np.savez(
+            out_dir,
+            mu_embedding=self.mu_embedding,
+            var_embedding=self.var_embedding,
+        )
+
+    def load(self, in_dir: str):
+        data = np.load(in_dir)
+        self.mu_embedding = data["mu_embedding"]
+        self.var_embedding = data["var_embedding"]
 
 
+# TODO: remove this
 def build_vector(x_len: int, num_features_len: int, embedding_dim: int) -> np.ndarray:
     """
     Build a vector of length x_len, where each cycle consists of num_features_len zeros followed by embedding_dim ones.
@@ -62,13 +71,13 @@ def build_vector(x_len: int, num_features_len: int, embedding_dim: int) -> np.nd
     # Positions >= num_features_len are embedding slots
     return (idx >= num_features_len).astype(float)
 
-
+# TODO: remove this
 def reduce_vector(x: np.ndarray, vector: np.ndarray, embedding_dim: int) -> np.ndarray:
     x = (x + 1) * vector
     x = x[x != 0] - 1  # remove zeros and reset index
     return x.reshape(-1, embedding_dim)
 
-
+# TODO: remove this
 def input_embeddings(x, embeddings, num_features, embedding_dim):
     """
     Reads embeddings into the input vector without explicit loops.

@@ -525,7 +525,7 @@ class TimeSeriesDataloader:
 #     def create_data_loader(self, batch_size: int, shuffle: bool = True):
 #         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
 
-
+# TODO: remove this version
 class GlobalTimeSeriesDataloader:
     """Similar to TimeSeriesDataloader but with global normalization"""
 
@@ -543,7 +543,7 @@ class GlobalTimeSeriesDataloader:
         x_std: Optional[np.ndarray] = None,
         time_covariates: Optional[str] = None,
         scale_i: Optional[float] = None,
-        global_scale: Optional[str] = None,  # other options: 'standard', 'deepAR'
+        scale_method: Optional[str] = None,  # other options: 'standard', 'deepAR'
         idx_as_feature: Optional[bool] = False,
         min_max_scaler: Optional[list] = None,
         scale_covariates: Optional[bool] = False,
@@ -566,7 +566,7 @@ class GlobalTimeSeriesDataloader:
         self.ts_idx = ts_idx  # add time series index when data having multiple ts
         self.time_covariates = time_covariates  # for adding time covariates
         self.scale_i = scale_i  # scaling factor for ith time series
-        self.global_scale = global_scale
+        self.scale_method = scale_method
         self.x_mean = x_mean
         self.x_std = x_std
         self.idx_as_feature = idx_as_feature
@@ -698,8 +698,8 @@ class GlobalTimeSeriesDataloader:
             x[:, cov_idx] = (x[:, cov_idx] - self.covariate_means[cov_idx]) / stds
 
         # scale the observations using time series dependent scaling factors
-        if self.global_scale:
-            mode = self.global_scale.strip().lower()
+        if self.scale_method:
+            mode = self.scale_method.strip().lower()
 
             # --- deepAR scaling ---
             if mode == "deepar":
@@ -755,7 +755,7 @@ class GlobalTimeSeriesDataloader:
         dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
 
         # store weights for weighted sampling. Default is uniform sampling
-        if self.global_scale == "deepAR":
+        if self.scale_method == "deepAR":
             dataset["weights"] = self.scale_i * np.ones(x_rolled.shape[0])
 
         return dataset
@@ -820,7 +820,7 @@ import pandas as pd
 from typing import Generator, Tuple, Optional, List, Dict
 
 
-class GlobalInterleavedTimeSeriesDataloader:
+class GlobalTimeSeriesDataloaderV2:
     """
     Multi-TS dataloader with configurable ordering of (x, y) windows.
 
@@ -843,19 +843,16 @@ class GlobalInterleavedTimeSeriesDataloader:
         output_seq_len: int,
         num_features: int,  # target + covariates count expected *before* embeddings
         stride: int,
-        # --- scaling / normalization ---
-        global_scale: Optional[str] = None,  # 'standard' | 'deepAR' | None
-        x_mean: Optional[float] = None,
-        x_std: Optional[float] = None,
+        scale_method: Optional[str] = None,  # 'standard' | 'deepAR' | None
+        x_mean: Optional[List[float]] = None,
+        x_std: Optional[List[float]] = None,
         scale_covariates: bool = False,
         covariate_means: Optional[np.ndarray] = None,
         covariate_stds: Optional[np.ndarray] = None,
-        # --- covariates ---
         time_covariates: Optional[
             List[str]
         ] = None,  # e.g. ["hour_of_day", "day_of_week"]
         keep_last_time_cov: bool = True,
-        # --- embeddings / identifiers ---
         embedding_dim: Optional[
             int
         ] = None,  # if provided without `embedding`, will create an index vector
@@ -863,10 +860,7 @@ class GlobalInterleavedTimeSeriesDataloader:
             np.ndarray
         ] = None,  # shape (n_ts, emb_dim) or (emb_dim,) broadcast
         embed_at_end: bool = False,  # if True, append embedding after the rolled time steps
-        idx_as_feature: bool = False,  # append numeric series id as extra feature per step
-        # --- sampling ---
-        min_len_guard: bool = True,  # skip series shorter than in+out, instead of raising
-        # --- ordering ---
+        min_len_guard: bool = False,  # skip series shorter than in+out, instead of raising
         order_mode: str = "by_window",  # "by_window" | "by_series" | "interleave"
     ) -> None:
         self.x_file = x_file
@@ -879,7 +873,7 @@ class GlobalInterleavedTimeSeriesDataloader:
         self.time_covariates = time_covariates or []
         self.keep_last_time_cov = keep_last_time_cov
 
-        self.global_scale = (global_scale or "").strip().lower() or None
+        self.scale_method = (scale_method or "").strip().lower() or None
         self.x_mean = x_mean
         self.x_std = x_std
         self.scale_covariates = scale_covariates
@@ -889,17 +883,12 @@ class GlobalInterleavedTimeSeriesDataloader:
         self.embedding_dim = embedding_dim
         self.embedding = embedding
         self.embed_at_end = embed_at_end
-        self.idx_as_feature = idx_as_feature
         self.min_len_guard = min_len_guard
 
-        self.order_mode = order_mode  # <— new
+        self.order_mode = order_mode
 
         # processed outputs
         self.dataset = self._process_all()
-
-    # -------------------------------
-    # Public API
-    # -------------------------------
 
     @staticmethod
     def load_data_from_csv(data_file: str) -> np.ndarray:
@@ -914,8 +903,11 @@ class GlobalInterleavedTimeSeriesDataloader:
         weighted_sampling: bool = False,
         weights: Optional[np.ndarray] = None,
         num_samples: Optional[int] = None,
+        include_ids: bool = False,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         x_rolled, y_rolled = self.dataset["value"]
+        series_id = self.dataset.get("series_id", None)
+        window_id = self.dataset.get("window_id", None)
 
         # Prepare sampling indices
         n = x_rolled.shape[0]
@@ -938,13 +930,16 @@ class GlobalInterleavedTimeSeriesDataloader:
 
         for b in range(total_batches):
             sl = chosen[b * batch_size : (b + 1) * batch_size]
-            # Keep output flattened (backward-compatible with your current training loop)
-            yield x_rolled[sl].reshape(len(sl), -1), y_rolled[sl].reshape(len(sl), -1)
+            Xb = x_rolled[sl].reshape(len(sl), -1)
+            Yb = y_rolled[sl].reshape(len(sl), -1)
+            if include_ids and (series_id is not None) and (window_id is not None):
+                Sb = series_id[sl]
+                Kb = window_id[sl]
+                yield Xb, Yb, Sb, Kb
+            else:
+                yield Xb, Yb
 
-    # -------------------------------
     # Core processing
-    # -------------------------------
-
     def _process_all(self) -> Dict[str, np.ndarray]:
         # Load matrices (T, N)
         X_all = self.load_data_from_csv(self.x_file)
@@ -971,10 +966,6 @@ class GlobalInterleavedTimeSeriesDataloader:
 
             # Build [target, covs...]
             covs = self._time_covariates_from_datetime_column(dtj)
-            # Optionally add numeric series id as a feature (per step)
-            if self.idx_as_feature:
-                sid = np.full((len(xj), 1), float(j), dtype=np.float32)
-                covs = sid if covs is None else np.concatenate([covs, sid], axis=1)
 
             if covs is None:
                 Xj = xj.reshape(-1, 1).astype(np.float32)
@@ -995,22 +986,32 @@ class GlobalInterleavedTimeSeriesDataloader:
                 self.covariate_stds = np.nanstd(all_cov, axis=0)
                 self.covariate_stds[self.covariate_stds == 0.0] = 1.0
 
-        # Compute global x mean/std for 'standard' scaling if needed
-        if self.global_scale == "standard" and (
-            self.x_mean is None or self.x_std is None
-        ):
-            all_targets = np.concatenate(
-                [
-                    s["X"][:, 0][~np.isnan(s["X"][:, 0])]
-                    for s in per_ts_series
-                    if len(s["X"])
-                ],
-                axis=0,
+        # Compute per-series mean/std for 'standard' scaling
+        if self.scale_method == "standard":
+            # use if provided, else compute if missing
+            need_compute = (
+                self.x_mean is None
+                or self.x_std is None
+                or (
+                    isinstance(self.x_mean, (list, np.ndarray))
+                    and len(self.x_mean) == 0
+                )
+                or (isinstance(self.x_std, (list, np.ndarray)) and len(self.x_std) == 0)
             )
-            self.x_mean = float(np.mean(all_targets))
-            self.x_std = (
-                float(np.std(all_targets)) if np.std(all_targets) != 0.0 else 1.0
-            )
+            if need_compute:
+                per_means: List[float] = []
+                per_stds: List[float] = []
+                for s in per_ts_series:
+                    t = s["X"][:, 0]
+                    # robust to potential NaNs
+                    mu = float(np.nanmean(t)) if t.size else 0.0
+                    sd = float(np.nanstd(t)) if t.size else 1.0
+                    if sd == 0.0 or np.isnan(sd):
+                        sd = 1.0
+                    per_means.append(mu)
+                    per_stds.append(sd)
+                self.x_mean = per_means
+                self.x_std = per_stds
 
         # Roll per series (with scaling, cov scaling, embedding packing)
         rolled_per_ts = []
@@ -1025,12 +1026,24 @@ class GlobalInterleavedTimeSeriesDataloader:
 
             # Target scaling
             scale_i_for_deepar = None
-            if self.global_scale == "deepar":
+            if self.scale_method == "deepar":
                 # per-series scale following deepAR style (mean abs + 1)
                 scale_i_for_deepar = 1.0 + float(np.nanmean(np.abs(Xj[:, 0])))
                 Xj[:, 0] = Xj[:, 0] / scale_i_for_deepar
-            elif self.global_scale == "standard":
-                Xj[:, 0] = (Xj[:, 0] - self.x_mean) / self.x_std
+            elif self.scale_method == "standard":
+                # Per-series standardization
+                if isinstance(self.x_mean, (list, np.ndarray)) and isinstance(
+                    self.x_std, (list, np.ndarray)
+                ):
+                    mu_j = float(self.x_mean[j])
+                    sd_j = float(self.x_std[j])
+                else:
+                    # Fallback if a single scalar was provided
+                    mu_j = float(self.x_mean) if self.x_mean is not None else 0.0
+                    sd_j = float(self.x_std) if self.x_std not in (None, 0.0) else 1.0
+                if sd_j == 0.0 or np.isnan(sd_j):
+                    sd_j = 1.0
+                Xj[:, 0] = (Xj[:, 0] - mu_j) / sd_j
 
             # Roll windows for this series
             xw, yw = self._create_rolling_windows(
@@ -1058,28 +1071,34 @@ class GlobalInterleavedTimeSeriesDataloader:
             rolled_per_ts.append((xw.astype(np.float32), yw.astype(np.float32)))
 
             # Store deepAR weights for each window (series-specific)
-            if self.global_scale == "deepar":
+            if self.scale_method == "deepar":
                 scale_is_per_window.append(
                     np.full((len(yw),), scale_i_for_deepar, dtype=np.float32)
                 )
             else:
                 scale_is_per_window.append(None)
 
-        # ordering of windows (this is only effective if shuffle=False in create_data_loader)
+        # ordering of windows (effective if shuffle=False)
         if self.order_mode == "by_window":
-            X, Y, W = self._order_by_window_index(rolled_per_ts, scale_is_per_window)
+            X, Y, W, S, K = self._order_by_window_index(
+                rolled_per_ts, scale_is_per_window
+            )
         elif self.order_mode == "by_series":
-            X, Y, W = self._order_by_series(rolled_per_ts, scale_is_per_window)
+            X, Y, W, S, K = self._order_by_series(rolled_per_ts, scale_is_per_window)
         elif self.order_mode == "interleave":
-            X, Y, W = self._interleave_round_robin(rolled_per_ts, scale_is_per_window)
+            X, Y, W, S, K = self._interleave_round_robin(
+                rolled_per_ts, scale_is_per_window
+            )
         else:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
 
-        dataset: Dict[str, np.ndarray] = {"value": (X, Y)}
+        dataset: Dict[str, np.ndarray] = {
+            "value": (X, Y),
+            "series_id": S,
+            "window_id": K,
+        }
         if W is not None:
             dataset["weights"] = W
-
-        # TODO: store datetimes for visualization?
         dataset["date_time"] = None
         return dataset
 
@@ -1249,18 +1268,12 @@ class GlobalInterleavedTimeSeriesDataloader:
             out[j, :] = float(j)
         return out
 
-    # -------------------------------
     # Ordering helpers
-    # -------------------------------
-
     @staticmethod
     def _interleave_round_robin(
         rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
         per_ts_deepar_weights: List[Optional[np.ndarray]],
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-        """
-        Round-robin interleaving (original behavior).
-        """
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray]:
         n_ts = len(rolled_per_ts)
         counts = [len(yw) for (_, yw) in rolled_per_ts]
         if max(counts, default=0) == 0:
@@ -1268,6 +1281,8 @@ class GlobalInterleavedTimeSeriesDataloader:
                 np.empty((0, 0), dtype=np.float32),
                 np.empty((0, 0), dtype=np.float32),
                 None,
+                np.empty((0,), dtype=np.int32),  # series_id
+                np.empty((0,), dtype=np.int32),  # window_id
             )
 
         sample_x = next((x for (x, y) in rolled_per_ts if len(y) > 0), None)
@@ -1278,6 +1293,8 @@ class GlobalInterleavedTimeSeriesDataloader:
         total = sum(counts)
         X = np.zeros((total, feat_x), dtype=np.float32)
         Y = np.zeros((total, feat_y), dtype=np.float32)
+        S = np.zeros((total,), dtype=np.int32)  # series_id
+        K = np.zeros((total,), dtype=np.int32)  # window_id
         W = (
             np.zeros((total,), dtype=np.float32)
             if any(w is not None for w in per_ts_deepar_weights)
@@ -1292,24 +1309,22 @@ class GlobalInterleavedTimeSeriesDataloader:
                 if k < len(yj):
                     X[write] = xj[k]
                     Y[write] = yj[k]
+                    S[write] = j
+                    K[write] = k
                     if W is not None and per_ts_deepar_weights[j] is not None:
                         W[write] = per_ts_deepar_weights[j][k]
                     write += 1
 
+        S, K = S[:write], K[:write]
         if W is not None:
-            return X[:write], Y[:write], W[:write]
-        return X[:write], Y[:write], None
+            return X[:write], Y[:write], W[:write], S, K
+        return X[:write], Y[:write], None, S, K
 
     @staticmethod
     def _order_by_window_index(
         rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
         per_ts_deepar_weights: List[Optional[np.ndarray]],
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-        """
-        Group by window index across series (preserve CSV column order).
-        Sequence: (ts0,w0),(ts1,w0),...,(tsN-1,w0),(ts0,w1),(ts1,w1),...
-        Skips a (ts,w) if that series has fewer windows.
-        """
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray]:
         n_ts = len(rolled_per_ts)
         counts = [len(yw) for (_, yw) in rolled_per_ts]
         if max(counts, default=0) == 0:
@@ -1317,6 +1332,8 @@ class GlobalInterleavedTimeSeriesDataloader:
                 np.empty((0, 0), dtype=np.float32),
                 np.empty((0, 0), dtype=np.float32),
                 None,
+                np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=np.int32),
             )
 
         sample_x = next((x for (x, y) in rolled_per_ts if len(y) > 0), None)
@@ -1327,6 +1344,8 @@ class GlobalInterleavedTimeSeriesDataloader:
         total = sum(counts)
         X = np.zeros((total, feat_x), dtype=np.float32)
         Y = np.zeros((total, feat_y), dtype=np.float32)
+        S = np.zeros((total,), dtype=np.int32)
+        K = np.zeros((total,), dtype=np.int32)
         W = (
             np.zeros((total,), dtype=np.float32)
             if any(w is not None for w in per_ts_deepar_weights)
@@ -1335,34 +1354,38 @@ class GlobalInterleavedTimeSeriesDataloader:
 
         write = 0
         max_k = max(counts)
-        for k in range(max_k):  # window index
-            for j in range(n_ts):  # CSV series order
+        for k in range(max_k):
+            for j in range(n_ts):
                 xj, yj = rolled_per_ts[j]
                 if k < len(yj):
                     X[write] = xj[k]
                     Y[write] = yj[k]
+                    S[write] = j
+                    K[write] = k
                     if W is not None and per_ts_deepar_weights[j] is not None:
                         W[write] = per_ts_deepar_weights[j][k]
                     write += 1
 
+        S, K = S[:write], K[:write]
         if W is not None:
-            return X[:write], Y[:write], W[:write]
-        return X[:write], Y[:write], None
+            return X[:write], Y[:write], W[:write], S, K
+        return X[:write], Y[:write], None, S, K
 
     @staticmethod
     def _order_by_series(
         rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
         per_ts_deepar_weights: List[Optional[np.ndarray]],
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-        """
-        Concatenate all windows of ts0, then ts1, ..., tsN-1 (CSV order).
-        """
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray]:
         xs, ys, ws = [], [], []
+        S_parts, K_parts = [], []
         for j, (xj, yj) in enumerate(rolled_per_ts):
-            if len(yj) == 0:
+            n = len(yj)
+            if n == 0:
                 continue
             xs.append(xj)
             ys.append(yj)
+            S_parts.append(np.full((n,), j, dtype=np.int32))
+            K_parts.append(np.arange(n, dtype=np.int32))
             if per_ts_deepar_weights[j] is not None:
                 ws.append(per_ts_deepar_weights[j])
 
@@ -1371,9 +1394,13 @@ class GlobalInterleavedTimeSeriesDataloader:
                 np.empty((0, 0), dtype=np.float32),
                 np.empty((0, 0), dtype=np.float32),
                 None,
+                np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=np.int32),
             )
 
         X = np.concatenate(xs, axis=0).astype(np.float32)
         Y = np.concatenate(ys, axis=0).astype(np.float32)
+        S = np.concatenate(S_parts, axis=0)
+        K = np.concatenate(K_parts, axis=0)
         W = np.concatenate(ws, axis=0).astype(np.float32) if ws else None
-        return X, Y, W
+        return X, Y, W, S, K
