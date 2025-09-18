@@ -506,7 +506,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
         # observation noise schedule
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.3, decaying_factor=0.9, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
         )
         var_y = np.full((batch_size * len(output_col),), sigma_v**2, dtype=np.float32)
 
@@ -678,8 +678,15 @@ def global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
     # define the lookback buffer for recursive prediction (per series)
     look_back_buffer_test = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+    ts_i = -1  # current time series id
 
     for x, y, ts_id, _ in test_batch_iter:
+
+        current_ts = int(np.asarray(ts_id).squeeze())
+
+        # if ts_id changes, we reset the LSTM states
+        if current_ts != ts_i:
+            reset_lstm_states(net)
 
         ts_i = int(np.asarray(ts_id).squeeze())
 
@@ -760,7 +767,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     epoch_optim = 0
     net_optim = []
     patience = 10
-    embed_dim = 5
+    embed_dim = 10
 
     # --- Initialize Embeddings ---
     embeddings = TimeSeriesEmbeddings(
@@ -857,6 +864,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
         for x, y, ts_id, _ in batch_iter:
 
+            # reset LSTM states
+            reset_lstm_states(net)
+
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0)
             x = x.squeeze(0)
@@ -932,6 +942,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
         # One-step recursive prediction over the validation stream
         for x, y, ts_id, _ in val_batch_iter:
+
+            # reset LSTM states
+            reset_lstm_states(net)
 
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0).squeeze(0)
@@ -1039,20 +1052,29 @@ def embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
     # define the lookback buffer for recursive prediction (per series)
     look_back_buffer_test = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+    ts_i = -1  # current time series id
 
     for x, y, ts_id, _ in test_batch_iter:
+
+        current_ts = int(np.asarray(ts_id).squeeze())
+
+        # if ts_id changes, we reset the LSTM states
+        if current_ts != ts_i:
+            reset_lstm_states(net)
+
+        ts_i = int(np.asarray(ts_id).squeeze())
 
         # replace nans in x with zeros and squeeze batch dim
         x = np.nan_to_num(x, nan=0.0).squeeze(0)
 
-        if np.isnan(look_back_buffer_test[ts_id]).all():
-            look_back_buffer_test[ts_id] = x[:input_seq_len]
+        if np.isnan(look_back_buffer_test[ts_i]).all():
+            look_back_buffer_test[ts_i] = x[:input_seq_len]
         else:
-            x[:input_seq_len] = look_back_buffer_test[ts_id]
+            x[:input_seq_len] = look_back_buffer_test[ts_i]
             x = x.astype(np.float32)
 
         # Append embeddings
-        embed_mu, embed_var = embeddings.get_embedding(ts_id)
+        embed_mu, embed_var = embeddings.get_embedding(ts_i)
 
         x_var = np.concatenate(
             (np.zeros_like(x), embed_var.flatten()), dtype=np.float32
@@ -1063,13 +1085,13 @@ def embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
         m_pred, v_pred = net(x, x_var)
 
         # Store results
-        mu_map[ts_id].extend(m_pred)
-        var_map[ts_id].extend(v_pred + sigma_v**2)
-        y_map[ts_id].extend(y)
+        mu_map[ts_i].extend(m_pred)
+        var_map[ts_i].extend(v_pred + sigma_v**2)
+        y_map[ts_i].extend(y)
 
         # Update lookback buffer with most recent prediction
-        look_back_buffer_test[ts_id][:-1] = look_back_buffer_test[ts_id][1:]
-        look_back_buffer_test[ts_id][-1] = float(np.ravel(m_pred)[-1])
+        look_back_buffer_test[ts_i][:-1] = look_back_buffer_test[ts_i][1:]
+        look_back_buffer_test[ts_i][-1] = float(np.ravel(m_pred)[-1])
 
     # Write per-series outputs
     pbar = tqdm(ts_idx, desc="Testing Progress")
@@ -1424,7 +1446,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     np.savetxt(out_dir + "/ytestTr.csv", ytestTr, delimiter=",")
 
 
-def main(nb_ts=136, num_epochs=100, batch_size=1, sigma_v=5.0, seed=1):
+def main(nb_ts=136, num_epochs=100, batch_size=1, sigma_v=1.0, seed=1):
     """
     Main function to run all experiments on 186 time series
     """
@@ -1432,10 +1454,10 @@ def main(nb_ts=136, num_epochs=100, batch_size=1, sigma_v=5.0, seed=1):
     # local_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
 
     # Run2 --> global model
-    global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
+    # global_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
 
     # Run3 --> global model with embeddings
-    # embed_model_run(nb_ts, num_epochs, batch_size, sigma_v=sigma_v, seed=seed)
+    embed_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed)
 
     # Run4 --> global model with shared sub-embeddings
     # shared_model_run(nb_ts, num_epochs, batch_size, sigma_v=sigma_v, seed=seed)
