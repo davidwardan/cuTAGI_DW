@@ -241,7 +241,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
                 m_pred = flat_m[::2]  # even indices
                 v_pred = flat_v[::2]  # even indices
-                sigma_v = flat_m[1::2]  # odd indices var_v
+                var_obs = flat_m[1::2]  # odd indices var_v
 
                 # Update output layer
                 out_updater.update_heteros(
@@ -256,7 +256,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
                 if not np.isnan(y).any():
                     K_overfit = v_pred / (v_pred)  # Kalman gain
-                    K = v_pred / (v_pred + sigma_v)  # Kalman gain
+                    K = v_pred / (v_pred + var_obs)  # Kalman gain
                     m_pred = m_pred + K_overfit * (y - m_pred)  # posterior mean
                     v_pred = (1.0 - K) * v_pred  # posterior variance
                     m_pred = m_pred.astype(np.float32)
@@ -594,7 +594,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
             m_pred = flat_m[::2]  # even indices
             v_pred = flat_v[::2]  # even indices
-            sigma_v = flat_m[1::2]  # odd indices var_v
+            var_obs = flat_m[1::2]  # odd indices var_v
 
             # Update output layer
             out_updater.update_heteros(
@@ -609,7 +609,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
             if not np.isnan(y).any():
                 K_overfit = v_pred / (v_pred)  # Kalman gain
-                K = v_pred / (v_pred + sigma_v**2)  # Kalman gain
+                K = v_pred / (v_pred + var_obs)  # Kalman gain
                 m_pred = m_pred + K_overfit * (y - m_pred)  # posterior mean
                 v_pred = (1.0 - K) * v_pred  # posterior variance
                 m_pred = m_pred.astype(np.float32)
@@ -973,7 +973,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     # -----------------------
     # Network
     net = Sequential(
-        LSTM(input_seq_len + num_features - 1, 40, 1),
+        LSTM(input_seq_len + num_features - 1 + embed_dim, 40, 1),
         LSTM(40, 40, 1),
         Linear(40, 2),
         EvenExp(),
@@ -1038,7 +1038,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
             m_pred = flat_m[::2]  # even indices
             v_pred = flat_v[::2]  # even indices
-            sigma_v = flat_m[1::2]  # odd indices var_v
+            var_obs = flat_m[1::2]  # odd indices var_v
 
             # Update output layer
             out_updater.update_heteros(
@@ -1053,7 +1053,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
             if not np.isnan(y).any():
                 K_overfit = v_pred / (v_pred)  # Kalman gain
-                K = v_pred / (v_pred + sigma_v**2)  # Kalman gain
+                K = v_pred / (v_pred + var_obs)  # Kalman gain
                 m_pred = m_pred + K_overfit * (y - m_pred)  # posterior mean
                 v_pred = (1.0 - K) * v_pred  # posterior variance
                 m_pred = m_pred.astype(np.float32)
@@ -1678,17 +1678,17 @@ def main(
     """
     Main function to run all experiments on time series
     """
-    # Run1 --> local model
-    try:
-        local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
-    except Exception as e:
-        print(f"Local model run failed: {e}")
+    # # Run1 --> local model
+    # try:
+    #     local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
+    # except Exception as e:
+    #     print(f"Local model run failed: {e}")
 
-    # Run2 --> global model
-    try:
-        global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
-    except Exception as e:
-        print(f"Global model run failed: {e}")
+    # # Run2 --> global model
+    # try:
+    #     global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
+    # except Exception as e:
+    #     print(f"Global model run failed: {e}")
 
     # Run3 --> global model with embeddings
     try:
@@ -1701,6 +1701,7 @@ def main(
     #     shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
     # except Exception as e:
     #     print(f"Shared model run failed: {e}")
+
 
 if __name__ == "__main__":
     main()
