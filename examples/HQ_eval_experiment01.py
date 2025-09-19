@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 
 
 # Plotting defaults
@@ -136,7 +137,9 @@ def calc_metrics(y_true, y_pred, s_pred, std_factor):
 # -------------------------- Plotting -------------------------- #
 
 
-def plot_series(ts_idx, y_true_col, y_pred_col, s_pred_col, out_dir, std_factor=1):
+def plot_series(
+    ts_idx, y_true_col, y_pred_col, s_pred_col, out_dir, val_test_indices, std_factor=1
+):
     """Plot truth, prediction, and std_factor band for a single series."""
     # Align valid rows
     mask = np.isfinite(y_true_col)
@@ -165,7 +168,15 @@ def plot_series(ts_idx, y_true_col, y_pred_col, s_pred_col, out_dir, std_factor=
             alpha=0.3,
             label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(std_factor),
         )
-
+    plt.axvline(
+        x=val_test_indices[ts_idx, 0], color="green", linestyle="--", label="Val Start"
+    )
+    plt.axvline(
+        x=val_test_indices[ts_idx, 1],
+        color="orange",
+        linestyle="--",
+        label="Test Start",
+    )
     plt.title(f"Series {ts_idx}")
     plt.xlabel("Time Index")
     plt.ylabel("Value")
@@ -216,9 +227,10 @@ def main():
         df = pd.read_csv(path, header=None)
         return df
 
-    y_true_df = _read_csv("ytestTr.csv")
-    y_pred_df = _read_csv("ytestPd.csv")
-    s_pred_df = _read_csv("SytestPd.csv")
+    y_true_df = _read_csv("yTr.csv")
+    y_pred_df = _read_csv("yPd.csv")
+    s_pred_df = _read_csv("SPd.csv")
+    val_test_indices = _read_csv("split_indices.csv").to_numpy(dtype=int)
 
     # Basic shape checks (allow extra/truncated rows; we’ll align per-column)
     if y_true_df.shape[1] != y_pred_df.shape[1]:
@@ -257,7 +269,15 @@ def main():
         per_series_records.append(rec)
 
         if args.plots:
-            plot_series(j, yt_col, yp_col, sp_col, plot_dir, std_factor=args.std_factor)
+            plot_series(
+                j,
+                yt_col,
+                yp_col,
+                sp_col,
+                plot_dir,
+                val_test_indices,
+                std_factor=args.std_factor,
+            )
 
     per_series_df = pd.DataFrame(per_series_records).set_index("series").sort_index()
     per_series_df.to_csv(in_dir / "metrics_per_series.csv", float_format="%.6g")
@@ -311,7 +331,7 @@ def main():
     overall_df.to_csv(in_dir / "metrics_overall.csv", index=False, float_format="%.6g")
 
     # check if embeddings file exists
-    if True:
+    if os.path.exists(in_dir / "param/embeddings_start.npz"):
 
         data = np.load(in_dir / "param/embeddings_start.npz")
         mu_embedding = data["mu_embedding"]
@@ -336,9 +356,9 @@ def main():
         plt.savefig(emb_plot_path, dpi=160)
         plt.close()
 
-    if True:
+    if os.path.exists(in_dir / "param/embeddings_final.npz"):
 
-        data = np.load(in_dir / "param/embeddings_end.npz")
+        data = np.load(in_dir / "param/embeddings_final.npz")
         mu_embedding = data["mu_embedding"]
         var_embedding = data["var_embedding"]
 

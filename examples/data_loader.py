@@ -359,9 +359,14 @@ class TimeSeriesDataloader:
 
         # Load data
         x = self.load_data_from_csv(self.x_file)
-        if self.ts_idx is not None:
-            x = x[:, self.ts_idx : self.ts_idx + 1]  # choose time series column
         date_time = self.load_data_from_csv(self.date_time_file)
+
+        if self.ts_idx is not None:
+            x = x[:, self.ts_idx : self.ts_idx + 1]
+            date_time = date_time[:, self.ts_idx : self.ts_idx + 1]
+
+            # remove trailing NaNs
+            x, date_time = self._trim_trailing_nans(x, date_time)
 
         # Add time covariates
         if self.time_covariates is not None:
@@ -431,6 +436,25 @@ class TimeSeriesDataloader:
 
     def create_data_loader(self, batch_size: int, shuffle: bool = True):
         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
+
+    # Helpers
+    @staticmethod
+    def _trim_trailing_nans(
+        x: np.ndarray, dt: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Trim padded trailing NaNs in the *target* series, keep the same cut for datetime."""
+        if len(x) == 0:
+            return x, dt
+        valid = ~np.isnan(x)
+        if not np.any(valid):
+            return np.array([], dtype=np.float32), np.array([], dtype="datetime64[ns]")
+        last = np.where(valid)[0][-1]
+        x = x[: last + 1]
+        dt = dt[: last + 1]
+        # ensure datetime dtype
+        if not np.issubdtype(dt.dtype, np.datetime64):
+            dt = np.array(dt, dtype="datetime64[ns]")
+        return x.astype(np.float32), dt
 
 
 # class TimeSeriesDataloader:
@@ -524,6 +548,7 @@ class TimeSeriesDataloader:
 
 #     def create_data_loader(self, batch_size: int, shuffle: bool = True):
 #         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
+
 
 # TODO: remove this version
 class GlobalTimeSeriesDataloader:
