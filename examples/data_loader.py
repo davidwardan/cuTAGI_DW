@@ -929,6 +929,7 @@ class GlobalTimeSeriesDataloaderV2:
         weights: Optional[np.ndarray] = None,
         num_samples: Optional[int] = None,
         include_ids: bool = False,
+        shuffle_series_blocks: bool = False,
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         x_rolled, y_rolled = self.dataset["value"]
         series_id = self.dataset.get("series_id", None)
@@ -950,6 +951,25 @@ class GlobalTimeSeriesDataloaderV2:
                 chosen = np.random.choice(indices, size=num_samples, replace=False)
         else:
             chosen = indices
+
+        if (
+            batch_size == 1
+            and self.order_mode == "by_series"
+            and not shuffle
+            and not weighted_sampling
+            and num_samples is None
+            and series_id is not None
+            and len(series_id) == len(indices)
+            and len(indices) > 0
+            and shuffle_series_blocks
+        ):
+            sid = series_id
+            boundaries = np.flatnonzero(np.diff(sid)) + 1
+            if boundaries.size:
+                segments = np.split(indices, boundaries)
+                perm = np.random.permutation(len(segments))
+                indices = np.concatenate([segments[i] for i in perm])
+                chosen = indices
 
         total_batches = int(np.ceil(len(chosen) / batch_size))
 
@@ -1428,4 +1448,5 @@ class GlobalTimeSeriesDataloaderV2:
         S = np.concatenate(S_parts, axis=0)
         K = np.concatenate(K_parts, axis=0)
         W = np.concatenate(ws, axis=0).astype(np.float32) if ws else None
+
         return X, Y, W, S, K

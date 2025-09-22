@@ -84,8 +84,26 @@ def mean_sharpness(sigma):
     return np.mean(sigma)
 
 
-def calc_metrics(y_true, y_pred, s_pred, std_factor):
-    """Return a dict of per-series metrics."""
+def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
+    """Return a dict of per-series metrics evaluated on the test slice."""
+
+    if test_start_idx is not None:
+        start = int(test_start_idx)
+        if start < 0:
+            start = 0
+        if start >= y_true.shape[0]:
+            y_true = y_true[0:0]
+            if y_pred is not None:
+                y_pred = y_pred[0:0]
+            if s_pred is not None:
+                s_pred = s_pred[0:0]
+        else:
+            y_true = y_true[start:]
+            if y_pred is not None:
+                y_pred = y_pred[start:]
+            if s_pred is not None:
+                s_pred = s_pred[start:]
+
     # Clean rows where y_true is NaN; align arrays
     mask = np.isfinite(y_true)
     if y_pred is not None:
@@ -142,15 +160,18 @@ def plot_series(
 ):
     """Plot truth, prediction, and std_factor band for a single series."""
     # Align valid rows
-    mask = np.isfinite(y_true_col)
-    if y_pred_col is not None:
-        mask &= np.isfinite(y_pred_col)
-    if s_pred_col is not None:
-        mask &= np.isfinite(s_pred_col)
+    # mask = np.isfinite(y_true_col)
+    # if y_pred_col is not None:
+    #     mask &= np.isfinite(y_pred_col)
+    # if s_pred_col is not None:
+    #     mask &= np.isfinite(s_pred_col)
 
-    yt = y_true_col[mask]
-    yp = y_pred_col[mask] if y_pred_col is not None else None
-    sp = s_pred_col[mask] if s_pred_col is not None else None
+    # yt = y_true_col[mask]
+    # yp = y_pred_col[mask] if y_pred_col is not None else None
+    # sp = s_pred_col[mask] if s_pred_col is not None else None
+    yt = y_true_col
+    yp = y_pred_col if y_pred_col is not None else None
+    sp = s_pred_col if s_pred_col is not None else None
     x = np.arange(len(yt))
 
     plt.figure(figsize=(10, 4.2))
@@ -264,7 +285,17 @@ def main():
         yp_col = y_pred[:col_len, j]
         sp_col = s_pred[:col_len, j]
 
-        rec = calc_metrics(yt_col, yp_col, sp_col, std_factor=args.std_factor)
+        test_start_idx = None
+        if val_test_indices.ndim >= 2 and val_test_indices.shape[0] > j:
+            if val_test_indices.shape[1] >= 2:
+                test_start_idx = int(val_test_indices[j, 1])
+        rec = calc_metrics(
+            yt_col,
+            yp_col,
+            sp_col,
+            std_factor=args.std_factor,
+            test_start_idx=test_start_idx,
+        )
         rec["series"] = j
         per_series_records.append(rec)
 
@@ -294,6 +325,20 @@ def main():
         yt_col = y_true[:col_len, j]
         yp_col = y_pred[:col_len, j]
         sp_col = s_pred[:col_len, j]
+
+        test_start_idx = 0
+        if val_test_indices.ndim >= 2 and val_test_indices.shape[0] > j:
+            if val_test_indices.shape[1] >= 2:
+                test_start_idx = int(val_test_indices[j, 1])
+        if test_start_idx < 0:
+            test_start_idx = 0
+        if test_start_idx > col_len:
+            test_start_idx = col_len
+
+        yt_col = yt_col[test_start_idx:]
+        yp_col = yp_col[test_start_idx:]
+        sp_col = sp_col[test_start_idx:]
+
         # mask finite jointly
         mask = np.isfinite(yt_col) & np.isfinite(yp_col) & np.isfinite(sp_col)
         if mask.any():

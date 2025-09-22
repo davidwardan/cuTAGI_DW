@@ -254,6 +254,12 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 net.backward()
                 net.step()
 
+                mu_preds.extend(m_pred)  # stores prior value
+                std_preds.extend(
+                    (v_pred) ** 0.5 + (var_obs) ** 0.5
+                )  # stores full uncertainty
+                train_obs.extend(y)
+
                 if not np.isnan(y).any():
                     K_overfit = v_pred / (v_pred)  # Kalman gain
                     K = v_pred / (v_pred + var_obs)  # Kalman gain
@@ -261,10 +267,6 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                     v_pred = (1.0 - K) * v_pred  # posterior variance
                     m_pred = m_pred.astype(np.float32)
                     v_pred = v_pred.astype(np.float32)
-
-                mu_preds.extend(m_pred)
-                std_preds.extend((v_pred) ** 0.5)
-                train_obs.extend(y)
 
             mu_preds = np.array(mu_preds)
             std_preds = np.array(std_preds)
@@ -310,9 +312,10 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 # get even positions corresponding to Z_out
                 m_pred = np.ravel(m_pred)[::2]
                 v_pred = np.ravel(v_pred)[::2]
+                var_obs = flat_m[1::2]  # odd indices var_v
 
                 mu_preds_val.extend(m_pred)
-                std_preds_val.extend(v_pred**0.5)
+                std_preds_val.extend((v_pred) ** 0.5 + (var_obs) ** 0.5)
                 val_obs.extend(y)
 
             mu_preds_val = np.array(mu_preds_val)
@@ -408,9 +411,10 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             # get even positions corresponding to Z_out
             m_pred = np.ravel(m_pred)[::2]
             v_pred = np.ravel(v_pred)[::2]
+            var_obs = flat_m[1::2]  # odd indices var_v
 
             mu_preds_test.extend(m_pred)
-            var_preds_test.extend(v_pred**0.5)
+            var_preds_test.extend((v_pred) ** 0.5 + (var_obs) ** 0.5)
             test_obs.extend(y)
 
         mu_preds_test = np.array(mu_preds_test)
@@ -560,6 +564,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             batch_size=batch_size,
             shuffle=False,
             include_ids=True,
+            shuffle_series_blocks=True,
         )
 
         # define the lookback buffer for recursive prediction
@@ -571,7 +576,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             current_ts = int(np.asarray(ts_id).squeeze())
 
             # reset LSTM states
-            if current_ts != ts_i:
+            if current_ts != ts_i or train_dtl.order_mode == "by_window":
                 reset_lstm_states(net)
 
             ts_i = int(np.asarray(ts_id).squeeze())
@@ -607,21 +612,22 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             net.backward()
             net.step()
 
+            m_prior = m_pred.copy()
+            std_prior = v_pred**0.5 + var_obs**0.5
+
             if not np.isnan(y).any():
-                K_overfit = v_pred / (v_pred)  # Kalman gain
+                # K_overfit = v_pred / (v_pred + var_obs)  # Kalman gain
                 K = v_pred / (v_pred + var_obs)  # Kalman gain
-                m_pred = m_pred + K_overfit * (y - m_pred)  # posterior mean
+                m_pred = m_pred + K * (y - m_pred)  # posterior mean
                 v_pred = (1.0 - K) * v_pred  # posterior variance
                 m_pred = m_pred.astype(np.float32)
                 v_pred = v_pred.astype(np.float32)
 
             # Unstadardize
             scaled_m_pred = normalizer.unstandardize(
-                m_pred, global_mean[ts_i], global_std[ts_i]
+                m_prior, global_mean[ts_i], global_std[ts_i]
             )
-            scaled_std_pred = normalizer.unstandardize_std(
-                v_pred**0.5, global_std[ts_i]
-            )
+            scaled_std_pred = normalizer.unstandardize_std(std_prior, global_std[ts_i])
             scaled_y = normalizer.unstandardize(y, global_mean[ts_i], global_std[ts_i])
 
             mu_preds[ts_i].extend(np.asarray(scaled_m_pred).ravel().tolist())
@@ -657,7 +663,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             current_ts = int(np.asarray(ts_id).squeeze())
 
             # reset LSTM states
-            if current_ts != ts_i:
+            if current_ts != ts_i or val_dtl.order_mode == "by_window":
                 reset_lstm_states(net)
 
             ts_i = int(np.asarray(ts_id).squeeze())
@@ -679,13 +685,14 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
             m_pred = flat_m[::2]  # even indices
             v_pred = flat_v[::2]  # even indices
+            var_obs = flat_m[1::2]  # odd indices var_v
 
             # Unstadardize
             scaled_m_pred = normalizer.unstandardize(
                 m_pred, global_mean[ts_i], global_std[ts_i]
             )
             scaled_std_pred = normalizer.unstandardize_std(
-                v_pred**0.5, global_std[ts_i]
+                (v_pred**0.5 + var_obs**0.5), global_std[ts_i]
             )
             scaled_y = normalizer.unstandardize(y, global_mean[ts_i], global_std[ts_i])
 
@@ -822,12 +829,15 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
         m_pred = flat_m[::2]  # even indices
         v_pred = flat_v[::2]  # even indices
+        var_obs = flat_m[1::2]  # odd indices var_v
 
         # Unstadardize
         scaled_m_pred = normalizer.unstandardize(
             m_pred, global_mean[ts_i], global_std[ts_i]
         )
-        scaled_std_pred = normalizer.unstandardize_std(v_pred**0.5, global_std[ts_i])
+        scaled_std_pred = normalizer.unstandardize_std(
+            (v_pred**0.5 + var_obs**0.5), global_std[ts_i]
+        )
         scaled_y = normalizer.unstandardize(y, global_mean[ts_i], global_std[ts_i])
 
         test_mu_preds[ts_i].extend(np.asarray(scaled_m_pred).ravel().tolist())
@@ -996,6 +1006,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             batch_size=batch_size,
             shuffle=False,
             include_ids=True,
+            shuffle_series_blocks=True,
         )
 
         # define the lookback buffer for recursive prediction
@@ -1007,7 +1018,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             current_ts = int(np.asarray(ts_id).squeeze())
 
             # reset LSTM states
-            if current_ts != ts_i:
+            if current_ts != ts_i or train_dtl.order_mode == "by_window":
                 reset_lstm_states(net)
 
             ts_i = int(np.asarray(ts_id).squeeze())
@@ -1051,6 +1062,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             net.backward()
             net.step()
 
+            m_prior = m_pred.copy()
+            std_prior = v_pred**0.5 + var_obs**0.5
+
             if not np.isnan(y).any():
                 K_overfit = v_pred / (v_pred)  # Kalman gain
                 K = v_pred / (v_pred + var_obs)  # Kalman gain
@@ -1061,11 +1075,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
             # Unstadardize
             scaled_m_pred = normalizer.unstandardize(
-                m_pred, global_mean[ts_i], global_std[ts_i]
+                m_prior, global_mean[ts_i], global_std[ts_i]
             )
-            scaled_std_pred = normalizer.unstandardize_std(
-                v_pred**0.5, global_std[ts_i]
-            )
+            scaled_std_pred = normalizer.unstandardize_std(std_prior, global_std[ts_i])
             scaled_y = normalizer.unstandardize(y, global_mean[ts_i], global_std[ts_i])
 
             mu_preds[ts_i].extend(np.asarray(scaled_m_pred).ravel().tolist())
@@ -1107,7 +1119,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             current_ts = int(np.asarray(ts_id).squeeze())
 
             # reset LSTM states
-            if current_ts != ts_i:
+            if current_ts != ts_i or val_dtl.order_mode == "by_window":
                 reset_lstm_states(net)
 
             ts_i = int(np.asarray(ts_id).squeeze())
@@ -1137,13 +1149,14 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
             m_pred = flat_m[::2]  # even indices
             v_pred = flat_v[::2]  # even indices
+            var_obs = flat_m[1::2]  # odd indices var_v
 
             # Unstadardize
             scaled_m_pred = normalizer.unstandardize(
                 m_pred, global_mean[ts_i], global_std[ts_i]
             )
             scaled_std_pred = normalizer.unstandardize_std(
-                v_pred**0.5, global_std[ts_i]
+                (v_pred**0.5 + var_obs**0.5), global_std[ts_i]
             )
             scaled_y = normalizer.unstandardize(y, global_mean[ts_i], global_std[ts_i])
 
@@ -1296,12 +1309,15 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
         m_pred = flat_m[::2]  # even indices
         v_pred = flat_v[::2]  # even indices
+        var_obs = flat_m[1::2]  # odd indices var_v
 
         # Unstadardize
         scaled_m_pred = normalizer.unstandardize(
             m_pred, global_mean[ts_i], global_std[ts_i]
         )
-        scaled_std_pred = normalizer.unstandardize_std(v_pred**0.5, global_std[ts_i])
+        scaled_std_pred = normalizer.unstandardize_std(
+            (v_pred**0.5 + var_obs**0.5), global_std[ts_i]
+        )
         scaled_y = normalizer.unstandardize(y, global_mean[ts_i], global_std[ts_i])
 
         test_mu_preds[ts_i].extend(np.asarray(scaled_m_pred).ravel().tolist())
@@ -1679,16 +1695,16 @@ def main(
     Main function to run all experiments on time series
     """
     # # Run1 --> local model
-    # try:
-    #     local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
-    # except Exception as e:
-    #     print(f"Local model run failed: {e}")
+    try:
+        local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
+    except Exception as e:
+        print(f"Local model run failed: {e}")
 
     # # Run2 --> global model
-    # try:
-    #     global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
-    # except Exception as e:
-    #     print(f"Global model run failed: {e}")
+    try:
+        global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria)
+    except Exception as e:
+        print(f"Global model run failed: {e}")
 
     # Run3 --> global model with embeddings
     try:

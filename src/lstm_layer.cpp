@@ -1279,6 +1279,7 @@ void LSTM::forward(BaseHiddenStates &input_states,
 
     // TODO: This is not efficient for memory and performance. Update the
     // previous states
+    // TODO: check what happents if you remove the batch_size condition
     if (this->seq_len == 1 && batch_size == 1) {
         lstm_to_prev_states(this->lstm_states.mu_h_prior,
                             this->lstm_states.mu_h_prior.size(),
