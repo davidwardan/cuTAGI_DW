@@ -159,16 +159,6 @@ def plot_series(
     ts_idx, y_true_col, y_pred_col, s_pred_col, out_dir, val_test_indices, std_factor=1
 ):
     """Plot truth, prediction, and std_factor band for a single series."""
-    # Align valid rows
-    # mask = np.isfinite(y_true_col)
-    # if y_pred_col is not None:
-    #     mask &= np.isfinite(y_pred_col)
-    # if s_pred_col is not None:
-    #     mask &= np.isfinite(s_pred_col)
-
-    # yt = y_true_col[mask]
-    # yp = y_pred_col[mask] if y_pred_col is not None else None
-    # sp = s_pred_col[mask] if s_pred_col is not None else None
     yt = y_true_col
     yp = y_pred_col if y_pred_col is not None else None
     sp = s_pred_col if s_pred_col is not None else None
