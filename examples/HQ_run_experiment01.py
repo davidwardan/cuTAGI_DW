@@ -33,64 +33,7 @@ mpl.rcParams.update(
 )
 
 
-# --- Helper functions for embedding batched input ---
-def prepare_batch_embeddings(x, input_seq_len, num_features, embed_dim, embeddings):
-    """Fill the embedding tail for each sample block in a *flat* batched x.
-    Returns (x_filled, x_var, ts_ids, embed_slices).
-    Layout per sample block: [input_seq, ts_idx repeated embed_dim times].
-    """
-    x = np.asarray(x, dtype=np.float32)
-    block_len = input_seq_len * num_features + embed_dim
-    assert (
-        x.size % block_len == 0
-    ), f"Unexpected x.size={x.size}, not multiple of block_len={block_len}"
-    bs_eff = x.size // block_len
-
-    x_var = np.zeros_like(x, dtype=np.float32)
-    ts_ids = []
-    embed_slices = []
-
-    for b in range(bs_eff):
-        start = b * block_len
-        e_start = start + (block_len - embed_dim)
-        e_end = start + block_len
-
-        # recover ts id stored as repeated ints in the tail (robust to float dtype)
-        ts_b = int(round(float(np.mean(x[e_start:e_end]))))
-        ts_ids.append(ts_b)
-        embed_slices.append(slice(e_start, e_end))
-
-        # fetch embedding for this ts and write into x/x_var
-        embed_mu, embed_var = embeddings.get_embedding(ts_b)
-        x[e_start:e_end] = embed_mu
-        x_var[e_start:e_end] = embed_var
-
-    return x.astype(np.float32), x_var, ts_ids, embed_slices
-
-
-def apply_embedding_updates(
-    mu_delta, var_delta, x_var, ts_ids, embed_slices, embeddings
-):
-    """Aggregate input-state updates over the embedding tails and write back to the store."""
-    # elementwise updates
-    x_update = mu_delta * x_var
-    var_update = x_var * var_delta * x_var
-
-    # accumulate per time series (in case a ts appears multiple times in a batch)
-    acc_mu = {}
-    acc_var = {}
-    for ts_b, sl in zip(ts_ids, embed_slices):
-        mu_u = x_update[sl]
-        var_u = var_update[sl]
-        if ts_b in acc_mu:
-            acc_mu[ts_b] += mu_u
-            acc_var[ts_b] += var_u
-        else:
-            acc_mu[ts_b] = mu_u.copy()
-            acc_var[ts_b] = var_u.copy()
-
-    for ts_b in acc_mu:
-        embeddings.update(ts_b, acc_mu[ts_b], acc_var[ts_b])
+# --- Helper functions --- #
 
 
 def update_look_back_buffer(
@@ -189,17 +132,6 @@ def reset_lstm_states(net):
         new_tuple = tuple(np.zeros_like(np.array(v)).tolist() for v in old_tuple)
         lstm_states[key] = new_tuple
     net.set_lstm_states(lstm_states)
-
-
-# helper to flatten lists of per-series buffers safely
-def _flatten(series_list):
-    flat = []
-    for seq in series_list:
-        if len(seq):
-            flat.extend(np.asarray(seq).ravel().tolist())
-    if not flat:
-        return np.empty(0, dtype=np.float32)
-    return np.asarray(flat, dtype=np.float32)
 
 
 def calculate_gaussian_posterior(m_pred, v_pred, y, var_obs):
@@ -358,9 +290,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 net.step()
 
                 mu_preds.extend(m_pred)  # stores prior value
-                std_preds.extend(
-                    (v_pred) ** 0.5 + (var_obs) ** 0.5
-                )  # stores full uncertainty
+                std_preds.extend(np.sqrt(v_pred + var_obs))  # stores full uncertainty
                 train_obs.extend(y)
 
                 m_pred, std_pred = calculate_gaussian_posterior(
@@ -414,7 +344,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 var_obs = flat_m[1::2]  # odd indices var_v
 
                 mu_preds_val.extend(m_pred)
-                std_preds_val.extend((v_pred) ** 0.5 + (var_obs) ** 0.5)
+                std_preds_val.extend(np.sqrt(v_pred + var_obs))
                 val_obs.extend(y)
 
                 m_pred, std_pred = calculate_gaussian_posterior(
@@ -524,7 +454,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             var_obs = flat_m[1::2]  # odd indices var_v
 
             mu_preds_test.extend(m_pred)
-            var_preds_test.extend((v_pred) ** 0.5 + (var_obs) ** 0.5)
+            var_preds_test.extend(np.sqrt(v_pred + var_obs))
             test_obs.extend(y)
 
         mu_preds_test = np.array(mu_preds_test)
@@ -1003,7 +933,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             m_pred, global_mean[ts_idx], global_std[ts_idx]
         )
         scaled_std_pred = normalizer.unstandardize_std(
-            (v_pred**0.5 + var_obs**0.5), global_std[ts_idx]
+            (np.sqrt(v_pred + var_obs)), global_std[ts_idx]
         )
         scaled_y = normalizer.unstandardize(y, global_mean[ts_idx], global_std[ts_idx])
 
@@ -1545,7 +1475,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             m_pred, global_mean[ts_idx], global_std[ts_idx]
         )
         scaled_std_pred = normalizer.unstandardize_std(
-            (v_pred**0.5 + var_obs**0.5), global_std[ts_idx]
+            (np.sqrt(v_pred + var_obs)), global_std[ts_idx]
         )
         scaled_y = normalizer.unstandardize(y, global_mean[ts_idx], global_std[ts_idx])
 
@@ -1601,7 +1531,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     )
     np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
-
+# TODO: update and add embeddings mapping
 def shared_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     """
     Run on global model on all time series with shared sub-embeddings
