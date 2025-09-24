@@ -1918,7 +1918,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
 
 
 def main(
-    nb_ts=127, num_epochs=100, batch_size=127, seed=1, early_stopping_criteria="log_lik"
+    nb_ts=127, num_epochs=100, batch_size=1, seed=1, early_stopping_criteria="log_lik"
 ):
     """
     Main function to run all experiments on time series
