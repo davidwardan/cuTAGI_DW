@@ -40,6 +40,10 @@ class TimeSeriesEmbeddings:
             self.mu_embedding = np.full(embedding_dim, 1.0)
             self.var_embedding = np.ones(embedding_dim)
 
+    # make the class callable
+    def __call__(self, idx: int) -> tuple:
+        return self.mu_embedding[idx], self.var_embedding[idx]
+
     def update(self, idx: int, mu_delta: np.ndarray, var_delta: np.ndarray):
         self.mu_embedding[idx] = self.mu_embedding[idx] + mu_delta
         self.var_embedding[idx] = self.var_embedding[idx] + var_delta
@@ -71,11 +75,13 @@ def build_vector(x_len: int, num_features_len: int, embedding_dim: int) -> np.nd
     # Positions >= num_features_len are embedding slots
     return (idx >= num_features_len).astype(float)
 
+
 # TODO: remove this
 def reduce_vector(x: np.ndarray, vector: np.ndarray, embedding_dim: int) -> np.ndarray:
     x = (x + 1) * vector
     x = x[x != 0] - 1  # remove zeros and reset index
     return x.reshape(-1, embedding_dim)
+
 
 # TODO: remove this
 def input_embeddings(x, embeddings, num_features, embedding_dim):

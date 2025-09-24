@@ -84,6 +84,18 @@ def mean_sharpness(sigma):
     return np.mean(sigma)
 
 
+def computeND(y, ypred):
+    return np.sum(np.abs(ypred - y)) / np.sum(np.abs(y))
+
+
+def compute90QL(y, ypred, Vpred):
+    ypred_90q = ypred + 1.282 * np.sqrt(Vpred)
+    Iq = y > ypred_90q
+    Iq_ = y <= ypred_90q
+    e = y - ypred_90q
+    return np.sum(2 * e * (0.9 * Iq - (1 - 0.9) * Iq_)) / np.sum(np.abs(y))
+
+
 def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
     """Return a dict of per-series metrics evaluated on the test slice."""
 
@@ -132,6 +144,8 @@ def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
             "Bias": np.nan,
             "Coverage": np.nan,
             "Avg_Std": np.nan,
+            "ND": np.nan,
+            "90QL": np.nan,
         }
 
     out["count"] = yt.size
@@ -149,6 +163,8 @@ def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
     z = std_factor  # e.g., 1.96 for 95% if normal
     out["Coverage"] = coverage_prob(yt, yp, sp, z=z) if sp is not None else np.nan
     out["Avg_Std"] = mean_sharpness(sp) if sp is not None else np.nan
+    out["ND"] = computeND(yt, yp) if yp is not None else np.nan
+    out["90QL"] = compute90QL(yt, yp, sp**2) if sp is not None else np.nan
     return out
 
 
@@ -353,6 +369,8 @@ def main():
                 "Bias",
                 "Coverage",
                 "Avg_Std",
+                "ND",
+                "90QL",
             ]
         }
         overall["count"] = 0
@@ -366,9 +384,9 @@ def main():
     overall_df.to_csv(in_dir / "metrics_overall.csv", index=False, float_format="%.6g")
 
     # check if embeddings file exists
-    if os.path.exists(in_dir / "param/embeddings_start.npz"):
+    if os.path.exists(in_dir / "embeddings/embeddings_start.npz"):
 
-        data = np.load(in_dir / "param/embeddings_start.npz")
+        data = np.load(in_dir / "embeddings/embeddings_start.npz")
         mu_embedding = data["mu_embedding"]
         var_embedding = data["var_embedding"]
 
@@ -391,9 +409,9 @@ def main():
         plt.savefig(emb_plot_path, dpi=160)
         plt.close()
 
-    if os.path.exists(in_dir / "param/embeddings_final.npz"):
+    if os.path.exists(in_dir / "embeddings/embeddings_final.npz"):
 
-        data = np.load(in_dir / "param/embeddings_final.npz")
+        data = np.load(in_dir / "embeddings/embeddings_final.npz")
         mu_embedding = data["mu_embedding"]
         var_embedding = data["var_embedding"]
 
