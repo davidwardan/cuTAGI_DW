@@ -137,7 +137,7 @@ def reset_lstm_states(net):
 def calculate_gaussian_posterior(m_pred, v_pred, y, var_obs):
     if not np.isnan(y).any():
         K = v_pred / (v_pred + var_obs)  # Kalman gain
-        m_pred = m_pred + (y - m_pred)  # posterior mean
+        m_pred = m_pred + K * (y - m_pred)  # posterior mean
         v_pred = (1.0 - K) * v_pred  # posterior variance
         return m_pred.astype(np.float32), v_pred.astype(np.float32)
     else:
@@ -694,15 +694,6 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
                 m_pred=m_pred,
             )
 
-            # # TODO: update to handle batch of series where ts_idx is an array
-            # if look_back_buffer is not None:
-            #     look_back_buffer[ts_idx][:, :-1] = look_back_buffer[ts_idx][
-            #         :, 1:
-            #     ]  # shift left
-            #     look_back_buffer[ts_idx][:, -1] = m_pred.reshape(B, -1)[
-            #         :, -1
-            #     ]  # TODO: I need to reshape m_pred here since it is 1D
-
         train_mse = np.nanmean(train_mses)
 
         # Validating
@@ -791,13 +782,6 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
                 ts_idx=ts_id,
                 m_pred=m_pred,
             )
-
-            # update lookback buffer
-            # if look_back_buffer is not None:
-            #     look_back_buffer[ts_idx][:, :-1] = look_back_buffer[ts_idx][
-            #         :, 1:
-            #     ]  # shift left
-            #     look_back_buffer[ts_idx][:, -1] = m_pred.reshape(B, -1)[:, -1]
 
         # Compute log-likelihood for validation set
         mse_val = np.nanmean(val_mses)
@@ -1531,6 +1515,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     )
     np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
+
 # TODO: update and add embeddings mapping
 def shared_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
     """
@@ -1854,16 +1839,16 @@ def main(
     Main function to run all experiments on time series
     """
     # # Run1 --> local model
-    # try:
-    #     local_model_run(
-    #         nb_ts,
-    #         num_epochs,
-    #         seed=seed,
-    #         early_stopping_criteria=early_stopping_criteria,
-    #         batch_size=1,  # local model does not need batching
-    #     )
-    # except Exception as e:
-    #     print(f"Local model run failed: {e}")
+    try:
+        local_model_run(
+            nb_ts,
+            num_epochs,
+            seed=seed,
+            early_stopping_criteria=early_stopping_criteria,
+            batch_size=1,  # local model does not need batching
+        )
+    except Exception as e:
+        print(f"Local model run failed: {e}")
 
     # # Run2 --> global model
     # try:
@@ -1878,16 +1863,16 @@ def main(
     #     print(f"Global model run failed: {e}")
 
     # # Run3 --> global model with embeddings
-    try:
-        embed_model_run(
-            nb_ts,
-            num_epochs,
-            batch_size,
-            seed,
-            early_stopping_criteria,
-        )
-    except Exception as e:
-        print(f"Embed model run failed: {e}")
+    # try:
+    #     embed_model_run(
+    #         nb_ts,
+    #         num_epochs,
+    #         batch_size,
+    #         seed,
+    #         early_stopping_criteria,
+    #     )
+    # except Exception as e:
+    #     print(f"Embed model run failed: {e}")
 
     # # Run4 --> global model with shared sub-embeddings
     # try:
