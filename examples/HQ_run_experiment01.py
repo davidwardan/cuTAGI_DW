@@ -216,8 +216,9 @@ def reset_lstm_states(net):
 
 def calculate_gaussian_posterior(m_pred, v_pred, y, var_obs):
     if not np.isnan(y).any():
+        K_overfit = v_pred / (v_pred + 1e-3)  # Kalman gain with small obs noise
         K = v_pred / (v_pred + var_obs)  # Kalman gain
-        m_pred = m_pred + K * (y - m_pred)  # posterior mean
+        m_pred = m_pred + K_overfit * (y - m_pred)  # posterior mean
         v_pred = (1.0 - K) * v_pred  # posterior variance
         return m_pred.astype(np.float32), v_pred.astype(np.float32)
     else:
