@@ -1,5 +1,7 @@
+import argparse
 import os
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from typing import Optional
 import copy
@@ -34,6 +36,84 @@ mpl.rcParams.update(
 
 
 # --- Helper functions --- #
+def get_combined_embeddings(
+    ts_idx,
+    embedding_id_map,
+    dam_embeddings,
+    dam_type_embeddings,
+    sensor_type_embeddings,
+    direction_embeddings,
+    sensor_embeddings,
+):
+    dam_idx = np.array([embedding_id_map[i][0] for i in ts_idx], dtype=int)
+    dam_type_idx = np.array([embedding_id_map[i][1] for i in ts_idx], dtype=int)
+    sensor_type_idx = np.array([embedding_id_map[i][2] for i in ts_idx], dtype=int)
+    direction_idx = np.array([embedding_id_map[i][3] for i in ts_idx], dtype=int)
+    sensor_idx = np.array([embedding_id_map[i][4] for i in ts_idx], dtype=int)
+
+    dam_mu, dam_var = dam_embeddings(dam_idx)
+    dam_type_mu, dam_type_var = dam_type_embeddings(dam_type_idx)
+    sensor_type_mu, sensor_type_var = sensor_type_embeddings(sensor_type_idx)
+    direction_mu, direction_var = direction_embeddings(direction_idx)
+    sensor_mu, sensor_var = sensor_embeddings(sensor_idx)
+
+    combined_mu = np.concatenate(
+        (dam_mu, dam_type_mu, sensor_type_mu, direction_mu, sensor_mu), axis=1
+    )  # shape: (B, embedding_dim)
+    combined_var = np.concatenate(
+        (dam_var, dam_type_var, sensor_type_var, direction_var, sensor_var), axis=1
+    )  # shape: (B, embedding_dim)
+
+    return combined_mu, combined_var
+
+
+def update_combined_embeddings(
+    ts_idx,
+    mu_delta,
+    var_delta,
+    embedding_id_map,
+    dam_embeddings,
+    dam_type_embeddings,
+    sensor_type_embeddings,
+    direction_embeddings,
+    sensor_embeddings,
+):
+    ts_idx = np.asarray(ts_idx, dtype=int).ravel()
+    if ts_idx.size == 0:
+        return
+
+    mu_delta = np.asarray(mu_delta)
+    var_delta = np.asarray(var_delta)
+
+    if mu_delta.ndim == 1:
+        mu_delta = mu_delta.reshape(ts_idx.size, -1)
+    if var_delta.ndim == 1:
+        var_delta = var_delta.reshape(ts_idx.size, -1)
+
+    dam_dim = dam_embeddings.mu_embedding.shape[1]
+    dam_type_dim = dam_type_embeddings.mu_embedding.shape[1]
+    sensor_type_dim = sensor_type_embeddings.mu_embedding.shape[1]
+    direction_dim = direction_embeddings.mu_embedding.shape[1]
+    sensor_dim = sensor_embeddings.mu_embedding.shape[1]
+
+    total_dim = dam_dim + dam_type_dim + sensor_type_dim + direction_dim + sensor_dim
+    if mu_delta.shape[1] != total_dim or var_delta.shape[1] != total_dim:
+        raise ValueError("Mismatched embedding update dimensions.")
+
+    split_points = np.cumsum(
+        [dam_dim, dam_type_dim, sensor_type_dim, direction_dim], dtype=int
+    )
+    mu_splits = np.split(mu_delta, split_points, axis=1)
+    var_splits = np.split(var_delta, split_points, axis=1)
+
+    idx_map = np.array([embedding_id_map[int(i)] for i in ts_idx], dtype=int)
+    dam_idx, dam_type_idx, sensor_type_idx, direction_idx, sensor_idx = idx_map.T
+
+    dam_embeddings.update(dam_idx, mu_splits[0], var_splits[0])
+    dam_type_embeddings.update(dam_type_idx, mu_splits[1], var_splits[1])
+    sensor_type_embeddings.update(sensor_type_idx, mu_splits[2], var_splits[2])
+    direction_embeddings.update(direction_idx, mu_splits[3], var_splits[3])
+    sensor_embeddings.update(sensor_idx, mu_splits[4], var_splits[4])
 
 
 def update_look_back_buffer(
@@ -181,6 +261,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         epoch_optim = 0
         net_optim = []
         patience = 10
+        min_epochs = 15
 
         # set random seed for reproducibility
         manual_seed(seed)
@@ -407,7 +488,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                     )
                     look_back_buffer_val_optim = copy.copy(look_back_buffer_val)
                     lstm_optim_states = net.get_lstm_states()
-            if int(epoch) - int(epoch_optim) > patience:
+            if (epoch + 1) >= min_epochs and int(epoch) - int(epoch_optim) > patience:
                 break
 
         # -- Testing --
@@ -511,6 +592,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     Testing: per-series loop preserved (using ts_indices filter) to keep your 1-step recursive logic.
     """
 
+    print("Running global model...")
+
     # Config
     output_col = [0]
     num_features = 2
@@ -552,7 +635,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         keep_last_time_cov=True,
         scale_method="standard",
         scale_covariates=True,
-        order_mode="by_window",
+        order_mode="by_series",
     )
 
     # Use the same scaling for validation/test
@@ -577,7 +660,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         scale_covariates=True,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
-        order_mode="by_window",
+        order_mode="by_series",
     )
 
     # -----------------------
@@ -622,8 +705,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         for x, y, ts_id, _ in batch_iter:
 
             # reset LSTM states
-            if train_dtl.order_mode == "by_window" or ts_i != ts_id:
-                reset_lstm_states(net)
+            # if train_dtl.order_mode == "by_window" or ts_i != ts_id:
+            #     reset_lstm_states(net)
 
             ts_i = copy.copy(ts_id)
 
@@ -654,7 +737,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             var_obs = flat_m[1::2]  # odd indices var_v
 
             # store lstm states
-            # lstm_states[int(ts_id[0])] = net.get_lstm_states()
+            lstm_states[int(ts_id[0])] = net.get_lstm_states()
 
             train_mses.append(metric.mse(m_pred, y))
 
@@ -716,10 +799,10 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         for x, y, ts_id, _ in val_batch_iter:
 
             # set LSTM states
-            # net.set_lstm_states(lstm_states[int(ts_id[0])])
+            net.set_lstm_states(lstm_states[int(ts_id[0])])
 
-            if val_dtl.order_mode == "by_window" or ts_i != ts_id:
-                reset_lstm_states(net)
+            # if val_dtl.order_mode == "by_window" or ts_i != ts_id:
+            #     reset_lstm_states(net)
 
             ts_i = copy.copy(ts_id)
 
@@ -754,7 +837,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             m_prior = m_pred.copy()
             std_prior = np.sqrt(v_pred + var_obs)
 
-            # lstm_states[int(ts_id[0])] = net.get_lstm_states()
+            lstm_states[int(ts_id[0])] = net.get_lstm_states()
 
             val_mses.append(metric.mse(m_pred, y))
             val_log_liks.append(
@@ -881,15 +964,15 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
     for x, y, ts_id, _ in test_batch_iter:
 
-        if test_dtl.order_mode == "by_window" or ts_i != ts_id:
-            reset_lstm_states(net)
+        # if test_dtl.order_mode == "by_window" or ts_i != ts_id:
+        #     reset_lstm_states(net)
 
         ts_i = copy.copy(ts_id)
 
-        ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))
-        ts_idx = int(ts_idx[0])  # shape: (B,)
+        ts_idx_arr = np.atleast_1d(np.asarray(ts_id, dtype=int))
+        ts_idx = int(ts_idx_arr[0])
 
-        # net.set_lstm_states(lstm_optim_states[ts_idx])
+        net.set_lstm_states(lstm_optim_states[ts_idx])
 
         # replace nans in x with zeros
         x = np.nan_to_num(x, nan=0.0).squeeze(0)
@@ -910,7 +993,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         v_pred = flat_v[::2]  # even indices
         var_obs = flat_m[1::2]  # odd indices var_v
 
-        # lstm_optim_states[ts_idx] = net.get_lstm_states()
+        lstm_optim_states[ts_idx] = net.get_lstm_states()
 
         # Unstadardize
         scaled_m_pred = normalizer.unstandardize(
@@ -986,6 +1069,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     Training/validation: all series at once (round-robin windows).
     Testing: per-series loop preserved (using ts_indices filter) to keep your 1-step recursive logic.
     """
+
+    print("Running embedding model...")
 
     # Config
     output_col = [0]
@@ -1112,8 +1197,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         for x, y, ts_id, _ in batch_iter:
 
             # reset LSTM states
-            if train_dtl.order_mode == "by_window" or ts_i != ts_id:
-                reset_lstm_states(net)
+            # if train_dtl.order_mode == "by_window" or ts_i != ts_id:
+            #     reset_lstm_states(net)
 
             ts_i = copy.copy(ts_id)
 
@@ -1516,207 +1601,434 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
 
-# TODO: update and add embeddings mapping
-def shared_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
+def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria):
     """
-    Run on global model on all time series with shared sub-embeddings
+    Run a single global model across ALL time series using the interleaved dataloader.
+    Training/validation: all series at once (round-robin windows).
+    Testing: per-series loop preserved (using ts_indices filter) to keep your 1-step recursive logic.
     """
 
-    # Dataset
-    ts_idx = np.arange(0, nb_ts)
+    # Config
     output_col = [0]
-    num_features = 1
+    num_features = 2
     input_seq_len = 52
     output_seq_len = 1
     seq_stride = 1
-    rolling_window = 52  # for rolling window predictions in the test set
-    embed_dim = 5 * 4  # embedding dimension
-
-    # map each ts to the sub embeddings
-
-    # set random seed for reproducibility
-    manual_seed(seed)
-
-    # --- Initialize Embeddings ---
-    embeddings = TimeSeriesEmbeddings(
-        (nb_ts, embed_dim),
-        encoding_type="normal",
-        # encoding_type="sphere",
-        seed=seed,
-    )
-
-    # --- Output Directory ---
-    out_dir = "out/experiment01_embed"
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-
-    ytestPd = np.full((272, nb_ts), np.nan)
-    SytestPd = np.full((272, nb_ts), np.nan)
-    ytestTr = np.full((272, nb_ts), np.nan)
-
-    pbar = tqdm(ts_idx, desc="Loading Data Progress")
-
-    mean_train = [0.0] * nb_ts
-    std_train = [1.0] * nb_ts
-
-    for ts in pbar:
-        train_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/hq/split_train_values.csv",
-            date_time_file="data/hq/split_train_datetimes.csv",
-            output_col=output_col,
-            input_seq_len=input_seq_len,
-            output_seq_len=output_seq_len,
-            num_features=num_features,
-            stride=seq_stride,
-            ts_idx=ts,
-            global_scale="standard",
-            embedding_dim=embed_dim,
-            embed_at_end=True,
-        )
-
-        # Store scaling factors
-        mean_train[ts] = train_dtl_.x_mean
-        std_train[ts] = train_dtl_.x_std
-
-        val_dtl_ = GlobalTimeSeriesDataloader(
-            x_file="data/hq/split_val_values.csv",
-            date_time_file="data/hq/split_val_datetimes.csv",
-            output_col=output_col,
-            input_seq_len=input_seq_len,
-            output_seq_len=output_seq_len,
-            num_features=num_features,
-            stride=seq_stride,
-            ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
-            global_scale="standard",
-            embedding_dim=embed_dim,
-            embed_at_end=True,
-        )
-
-        if ts == 0:
-            train_dtl = train_dtl_
-            val_dtl = val_dtl_
-        else:
-            train_dtl = concat_ts_sample(train_dtl, train_dtl_)
-            val_dtl = concat_ts_sample(val_dtl, val_dtl_)
-
-    # Network
-    net = Sequential(
-        LSTM(num_features + input_seq_len + embed_dim - 1, 40, 1),
-        LSTM(40, 40, 1),
-        Linear(40, 1),
-    )
-    net.set_threads(8)
-    out_updater = OutputUpdater(net.device)
-
-    # input state update
-    net.input_state_update = True
-
-    # --- Training ---
-    mses = []
-    mses_val = []  # to save mse_val for plotting
-    ll_val = []  # to save log likelihood for plotting
-
-    # options for early stopping
     log_lik_optim = -1e100
     mse_optim = 1e100
     epoch_optim = 0
-    early_stopping_criteria = "mse"
-    patience = 10
     net_optim = []
+    patience = 10
 
+    # Seed
+    manual_seed(seed)
+
+    # Initialize embeddings
+    sub_embedding_dim = 3
+    # Dam_embedding
+    nb_dams = 6
+    dam_embeddings = TimeSeriesEmbeddings(
+        (nb_dams, sub_embedding_dim),
+        encoding_type="normal",
+        seed=seed,
+    )
+    # Dam_type_embedding
+    nb_dam_types = 2
+    dam_type_embeddings = TimeSeriesEmbeddings(
+        (nb_dam_types, sub_embedding_dim),
+        encoding_type="normal",
+        seed=seed,
+    )
+    # Sensor_type_embedding
+    nb_sensor_types = 3
+    sensor_type_embeddings = TimeSeriesEmbeddings(
+        (nb_sensor_types, sub_embedding_dim),
+        encoding_type="normal",
+        seed=seed,
+    )
+    # Direction_embedding
+    nb_directions = 4
+    direction_embeddings = TimeSeriesEmbeddings(
+        (nb_directions, sub_embedding_dim),
+        encoding_type="normal",
+        seed=seed,
+    )
+    # Sensor_embedding
+    nb_sensors = nb_ts
+    sensor_embeddings = TimeSeriesEmbeddings(
+        (nb_sensors, sub_embedding_dim),
+        encoding_type="normal",
+        seed=seed,
+    )
+
+    embedding_dim = (
+        sub_embedding_dim * 5
+    )  # total embedding dimension after concatenation
+
+    # read embeddings mappings
+    embedding_map = pd.read_csv("data/hq/ts_embedding_map.csv")
+    ts_ids = embedding_map["ts_id"].values
+    dam_ids = embedding_map["dam_id"].values
+    dam_type_ids = embedding_map["dam_type_id"].values
+    sensor_type_ids = embedding_map["sensor_type_id"].values
+    direction_ids = embedding_map["direction_id"].values
+    sensor_ids = embedding_map["sensor_id"].values
+
+    # Build a single mapping dict where each ts_id maps to all embedding ids
+    embedding_id_map = dict(
+        zip(
+            ts_ids,
+            zip(
+                dam_ids,
+                dam_type_ids,
+                sensor_type_ids,
+                direction_ids,
+                sensor_ids,
+            ),
+        )
+    )
+
+    # --- Output Directory ---
+    out_dir = "out/experiment01_shared"
+    os.makedirs(out_dir, exist_ok=True)
+
+    # save embeddings at beginning
+    if not os.path.exists(out_dir + "/embeddings"):
+        os.makedirs(out_dir + "/embeddings", exist_ok=True)
+    dam_embeddings.save(os.path.join(out_dir, "embeddings/dam_embeddings_start.npz"))
+    dam_type_embeddings.save(
+        os.path.join(out_dir, "embeddings/dam_type_embeddings_start.npz")
+    )
+    sensor_type_embeddings.save(
+        os.path.join(out_dir, "embeddings/sensor_type_embeddings_start.npz")
+    )
+    direction_embeddings.save(
+        os.path.join(out_dir, "embeddings/direction_embeddings_start.npz")
+    )
+    sensor_embeddings.save(
+        os.path.join(out_dir, "embeddings/sensor_embeddings_start.npz")
+    )
+
+    # Pre-allocate final CSVs
+    horizon_cap = 2000
+    # create placeholders
+    ytestPd = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
+    SytestPd = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
+    ytestTr = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
+    val_start_indices = np.full(nb_ts, -1, dtype=np.int32)
+    test_start_indices = np.full(nb_ts, -1, dtype=np.int32)
+
+    # Build TRAIN loader over ALL series
+    train_dtl = GlobalTimeSeriesDataloaderV2(
+        x_file="data/hq/split_train_values.csv",
+        date_time_file="data/hq/split_train_datetimes.csv",
+        output_col=output_col,
+        input_seq_len=input_seq_len,
+        output_seq_len=output_seq_len,
+        num_features=num_features,
+        stride=seq_stride,
+        time_covariates=["week_of_year"],
+        keep_last_time_cov=True,
+        scale_method="standard",
+        scale_covariates=True,
+        order_mode="by_series",
+    )
+
+    # Use the same scaling for validation/test
+    global_mean = train_dtl.x_mean
+    global_std = train_dtl.x_std
+    covariate_means = train_dtl.covariate_means
+    covariate_stds = train_dtl.covariate_stds
+
+    val_dtl = GlobalTimeSeriesDataloaderV2(
+        x_file="data/hq/split_val_values.csv",
+        date_time_file="data/hq/split_val_datetimes.csv",
+        output_col=output_col,
+        input_seq_len=input_seq_len,
+        output_seq_len=output_seq_len,
+        num_features=num_features,
+        stride=seq_stride,
+        time_covariates=["week_of_year"],
+        keep_last_time_cov=True,
+        scale_method="standard",
+        x_mean=global_mean,
+        x_std=global_std,
+        scale_covariates=True,
+        covariate_means=covariate_means,
+        covariate_stds=covariate_stds,
+        order_mode="by_series",
+    )
+
+    # -----------------------
+    # Network
+    net = Sequential(
+        LSTM(input_seq_len + embedding_dim + num_features - 1, 40, 1),
+        LSTM(40, 40, 1),
+        Linear(40, 2),
+        EvenExp(),
+    )
+    if batch_size > 1:
+        net.set_threads(8)
+    else:
+        net.set_threads(1)
+    out_updater = OutputUpdater(net.device)
+    net.input_state_update = True
+
+    # Training
     pbar = tqdm(range(num_epochs), desc="Training Progress")
+    states_optim = None
+    look_back_buffer_optim = None
+    train_mses = []
+
     for epoch in pbar:
+        mu_preds = [[] for _ in range(nb_ts)]
+        std_preds = [[] for _ in range(nb_ts)]
+        train_obs = [[] for _ in range(nb_ts)]
 
         batch_iter = train_dtl.create_data_loader(
-            batch_size,
-            shuffle=True,
+            batch_size=batch_size,
+            shuffle=False,
+            include_ids=True,
+            shuffle_series_blocks=(
+                True if train_dtl.order_mode == "by_series" else False
+            ),
         )
 
-        # Decaying observation's variance
-        sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.1, decaying_factor=0.99, curr_iter=epoch
-        )
+        # define the lookback buffer for recursive prediction
+        look_back_buffer = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+        lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
+        ts_i = -1  # current time series id
 
-        for x, y in batch_iter:
-            # Fill embeddings per sample block and build x_var
-            x, x_var, ts_ids, embed_slices = prepare_batch_embeddings(
-                x, input_seq_len, num_features, embed_dim, embeddings
-            )
+        for x, y, ts_id, _ in batch_iter:
+
+            # reset LSTM states
+            # if train_dtl.order_mode == "by_window" or ts_i != ts_id:
+            #     reset_lstm_states(net)
+
+            ts_i = copy.copy(ts_id)
+
+            y = np.concatenate(y, axis=0).astype(np.float32)
+
+            ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))
+            B = int(len(ts_idx))  # current batch size
+
+            # replace nans in x with zeros
+            x = np.nan_to_num(x, nan=0.0)
+
+            if np.isnan(look_back_buffer[ts_idx]).all():
+                look_back_buffer[ts_idx] = x[:, :input_seq_len]
+            else:
+                x[:, :input_seq_len] = look_back_buffer[ts_idx]  # update input sequence
+                x = x.astype(np.float32)
+
+            # build embedding
+            embed_mu, embed_var = get_combined_embeddings(
+                ts_idx,
+                embedding_id_map,
+                dam_embeddings,
+                dam_type_embeddings,
+                sensor_type_embeddings,
+                direction_embeddings,
+                sensor_embeddings,
+            )  # shape: (B, embedding_dim)
+            x_var = np.zeros_like(x)
+            x = np.concatenate(
+                (x, embed_mu), axis=1
+            )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
+            x_var = np.concatenate(
+                (x_var, embed_var), axis=1
+            )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
+
+            flat_x = np.concatenate(x, axis=0, dtype=np.float32)
+            flat_x_var = np.concatenate(x_var, axis=0, dtype=np.float32)
 
             # Forward
-            m_pred, _ = net(np.float32(x), np.float32(x_var))
+            m_pred, v_pred = net(flat_x, flat_x_var)
 
-            # Observation variance sized to actual batch
-            var_y = np.full((np.size(y),), sigma_v**2, dtype=np.float32)
+            flat_m = np.ravel(m_pred)
+            flat_v = np.ravel(v_pred)
 
-            # Output update
-            out_updater.update(
+            m_pred = flat_m[::2]  # even indices
+            v_pred = flat_v[::2]  # even indices
+            var_obs = flat_m[1::2]  # odd indices var_v
+
+            # store lstm states
+            lstm_states[int(ts_id[0])] = net.get_lstm_states()
+
+            train_mses.append(metric.mse(m_pred, y))
+
+            # Update output layer
+            out_updater.update_heteros(
                 output_states=net.output_z_buffer,
-                mu_obs=y,
-                var_obs=var_y,
+                mu_obs=y.flatten(),
                 delta_states=net.input_delta_z_buffer,
             )
 
-            # Backprop + step
+            # Backward + step
             net.backward()
             net.step()
 
-            # Read back input-state deltas and update embeddings (batched)
+            m_prior = m_pred.copy()
+            std_prior = np.sqrt(v_pred + var_obs)
+
+            m_pred, std_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
+
+            # Unstadardize
+            mu_s = np.asarray(global_mean)[ts_idx].reshape(B, 1)
+            sd_s = np.asarray(global_std)[ts_idx].reshape(B, 1)
+            scaled_m = normalizer.unstandardize(m_prior.reshape(B, -1), mu_s, sd_s)
+            scaled_std = normalizer.unstandardize_std(std_prior.reshape(B, -1), sd_s)
+            scaled_y = normalizer.unstandardize(y.reshape(B, -1), mu_s, sd_s)
+
+            # extend the correct series
+            for b in range(B):
+                s = ts_idx[b]
+                mu_preds[s].extend(np.asarray(scaled_m[b]).ravel().tolist())
+                std_preds[s].extend(np.asarray(scaled_std[b]).ravel().tolist())
+                train_obs[s].extend(np.asarray(scaled_y[b]).ravel().tolist())
+
+            look_back_buffer = update_look_back_buffer(
+                look_back_buffer,
+                ts_idx=ts_id,
+                m_pred=m_pred,
+            )
+
+            # get updates for embeddings
             mu_delta, var_delta = net.get_input_states()
-            apply_embedding_updates(
-                mu_delta, var_delta, x_var, ts_ids, embed_slices, embeddings
+            mu_delta = mu_delta.reshape(B, -1)
+            var_delta = var_delta.reshape(B, -1)
+
+            x_update = mu_delta * x_var
+            var_update = x_var * var_delta * x_var
+
+            update_combined_embeddings(
+                ts_idx,
+                x_update[:, -embedding_dim:],
+                var_update[:, -embedding_dim:],
+                embedding_id_map,
+                dam_embeddings,
+                dam_type_embeddings,
+                sensor_type_embeddings,
+                direction_embeddings,
+                sensor_embeddings,
             )
 
-            # Metric
-            mse = metric.mse(m_pred, y)
-            mses.append(mse)
+        train_mse = np.nanmean(train_mses)
 
-        # Validation
-        val_batch_iter = val_dtl.create_data_loader(batch_size, shuffle=True)
+        # Validating
+        print("Validating...")
+        val_batch_iter = val_dtl.create_data_loader(
+            batch_size, shuffle=False, include_ids=True
+        )
 
-        mu_preds = []
-        var_preds = []
-        y_val = []
-        x_val = []
+        val_mu_preds = [[] for _ in range(nb_ts)]
+        val_std_preds = [[] for _ in range(nb_ts)]
+        val_obs = [[] for _ in range(nb_ts)]
 
-        for x, y in val_batch_iter:
-            x, x_var, _, _ = prepare_batch_embeddings(
-                x, input_seq_len, num_features, embed_dim, embeddings
+        # define the lookback buffer for recursive prediction
+        look_back_buffer_val = copy.copy(look_back_buffer)
+        ts_i = -1  # current time series id
+        val_mses = []
+        val_log_liks = []
+
+        # One-step recursive prediction over the validation stream
+        for x, y, ts_id, _ in val_batch_iter:
+
+            # set LSTM states
+            net.set_lstm_states(lstm_states[int(ts_id[0])])
+
+            # if val_dtl.order_mode == "by_window" or ts_i != ts_id:
+            #     reset_lstm_states(net)
+
+            ts_i = copy.copy(ts_id)
+
+            y = np.concatenate(y, axis=0).astype(np.float32)
+
+            ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))  # shape: (B,)
+            B = int(len(ts_idx))
+
+            # replace nans in x with zeros
+            x = np.nan_to_num(x, nan=0.0)
+
+            if np.isnan(look_back_buffer_val[ts_idx]).all():
+                look_back_buffer_val[ts_idx] = x[:, :input_seq_len]
+            else:
+                x[:, :input_seq_len] = look_back_buffer_val[
+                    ts_idx
+                ]  # update input sequence
+                x = x.astype(np.float32)
+
+            embed_mu, embed_var = get_combined_embeddings(
+                ts_idx,
+                embedding_id_map,
+                dam_embeddings,
+                dam_type_embeddings,
+                sensor_type_embeddings,
+                direction_embeddings,
+                sensor_embeddings,
+            )  # shape: (B, embedding_dim)
+            x_var = np.zeros_like(x)
+            x = np.concatenate(
+                (x, embed_mu), axis=1
+            )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
+            x_var = np.concatenate(
+                (x_var, embed_var), axis=1
+            )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
+
+            flat_x = np.concatenate(x, axis=0, dtype=np.float32)
+            flat_x_var = np.concatenate(x_var, axis=0, dtype=np.float32)
+
+            # Predicion
+            m_pred, v_pred = net(flat_x, flat_x_var)
+
+            flat_m = np.ravel(m_pred)
+            flat_v = np.ravel(v_pred)
+
+            m_pred = flat_m[::2]  # even indices
+            v_pred = flat_v[::2]  # even indices
+            var_obs = flat_m[1::2]  # odd indices var_v
+
+            m_prior = m_pred.copy()
+            std_prior = np.sqrt(v_pred + var_obs)
+
+            lstm_states[int(ts_id[0])] = net.get_lstm_states()
+
+            val_mses.append(metric.mse(m_pred, y))
+            val_log_liks.append(
+                metric.log_likelihood(prediction=m_prior, observation=y, std=std_prior)
             )
 
-            # Prediction
-            m_pred, v_pred = net(np.float32(x), np.float32(x_var))
+            m_pred, std_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
 
-            mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v**2)
+            # Unstadardize
+            mu_s = np.asarray(global_mean)[ts_idx].reshape(B, 1)
+            sd_s = np.asarray(global_std)[ts_idx].reshape(B, 1)
+            scaled_m = normalizer.unstandardize(m_prior.reshape(B, -1), mu_s, sd_s)
+            scaled_std = normalizer.unstandardize_std(std_prior.reshape(B, -1), sd_s)
+            scaled_y = normalizer.unstandardize(y.reshape(B, -1), mu_s, sd_s)
 
-            x_val.extend(x)
-            y_val.extend(y)
+            # extend the correct series
+            for b in range(B):
+                s = ts_idx[b]
+                val_mu_preds[s].extend(np.asarray(scaled_m[b]).ravel().tolist())
+                val_std_preds[s].extend(np.asarray(scaled_std[b]).ravel().tolist())
+                val_obs[s].extend(np.asarray(scaled_y[b]).ravel().tolist())
 
-        mu_preds = np.array(mu_preds)
-        std_preds = np.array(var_preds) ** 0.5
-        y_val = np.array(y_val)
-        x_val = np.array(x_val)
+            look_back_buffer_val = update_look_back_buffer(
+                look_back_buffer_val,
+                ts_idx=ts_id,
+                m_pred=m_pred,
+            )
 
         # Compute log-likelihood for validation set
-        mse_val = metric.mse(mu_preds, y_val)
-        log_lik_val = metric.log_likelihood(
-            prediction=mu_preds, observation=y_val, std=std_preds
-        )
-
-        # Save mse_val and log likelihood for plotting
-        mses_val.append(mse_val)
-        ll_val.append(log_lik_val)
+        mse_val = np.nanmean(val_mses)
+        log_lik_val = np.nanmean(val_log_liks)
 
         # Progress bar
-        pbar.set_postfix(
-            mse=f"{np.mean(mses):.4f}",
-            mse_val=f"{mse_val:.4f}",
-            log_lik_val=f"{log_lik_val:.4f}",
+        pbar.set_description(
+            f"Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| mse_val: {mse_val:>7.4f} | log_lik_val: {log_lik_val:>7.4f}",
+            refresh=True,
         )
-        # pbar.set_postfix(mse=f"{np.mean(mses):.4f}", sigma_v=f"{sigma_v:.4f}")
 
         # early-stopping
         if early_stopping_criteria == "mse":
@@ -1725,166 +2037,342 @@ def shared_model_run(nb_ts, num_epochs, batch_size, sigma_v, seed):
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
                 net_optim = net.state_dict()
+                states_optim = (
+                    copy.deepcopy(mu_preds),
+                    copy.deepcopy(std_preds),
+                    copy.deepcopy(val_mu_preds),
+                    copy.deepcopy(val_std_preds),
+                )
+                look_back_buffer_optim = copy.deepcopy(look_back_buffer_val)
+                lstm_optim_states = copy.deepcopy(lstm_states)
+                # save a copy of embeddings
+                embeddings_optim = copy.deepcopy(
+                    (
+                        dam_embeddings,
+                        dam_type_embeddings,
+                        sensor_type_embeddings,
+                        direction_embeddings,
+                        sensor_embeddings,
+                    )
+                )
         elif early_stopping_criteria == "log_lik":
             if float(log_lik_val) > float(log_lik_optim):
                 mse_optim = mse_val
                 log_lik_optim = log_lik_val
                 epoch_optim = epoch
                 net_optim = net.state_dict()
+                states_optim = (
+                    copy.deepcopy(mu_preds),
+                    copy.deepcopy(std_preds),
+                    copy.deepcopy(val_mu_preds),
+                    copy.deepcopy(val_std_preds),
+                )
+                look_back_buffer_optim = copy.deepcopy(look_back_buffer_val)
+                lstm_optim_states = copy.deepcopy(lstm_states)
+                embeddings_optim = copy.deepcopy(
+                    (
+                        dam_embeddings,
+                        dam_type_embeddings,
+                        sensor_type_embeddings,
+                        direction_embeddings,
+                        sensor_embeddings,
+                    )
+                )
         if int(epoch) - int(epoch_optim) > patience:
             break
 
-    # load optimal model
+    if states_optim is None:
+        states_optim = (
+            copy.deepcopy(mu_preds),
+            copy.deepcopy(std_preds),
+            copy.deepcopy(val_mu_preds),
+            copy.deepcopy(val_std_preds),
+        )
+    else:
+        mu_preds, std_preds, val_mu_preds, val_std_preds = states_optim
+
+    # Load optimal model
     if net_optim:
         net.load_state_dict(net_optim)
 
-    # save the model
-    net.save(out_dir + "/param/model.pth")
+    # load optimal embeddings
+    if embeddings_optim:
+        (
+            dam_embeddings,
+            dam_type_embeddings,
+            sensor_type_embeddings,
+            direction_embeddings,
+            sensor_embeddings,
+        ) = embeddings_optim
+    dam_embeddings.save(os.path.join(out_dir, "embeddings/dam_embeddings_final.npz"))
+    dam_type_embeddings.save(
+        os.path.join(out_dir, "embeddings/dam_type_embeddings_final.npz")
+    )
+    sensor_type_embeddings.save(
+        os.path.join(out_dir, "embeddings/sensor_type_embeddings_final.npz")
+    )
+    direction_embeddings.save(
+        os.path.join(out_dir, "embeddings/direction_embeddings_final.npz")
+    )
+    sensor_embeddings.save(
+        os.path.join(out_dir, "embeddings/sensor_embeddings_final.npz")
+    )
 
-    # save learned embeddings
-    embeddings.save(out_dir)
+    # Save model
+    net.save(os.path.join(out_dir, "param/model.pth"))
 
     # Testing
-    pbar = tqdm(ts_idx, desc="Testing Progress")
+    print("Testing...")
+    test_dtl = GlobalTimeSeriesDataloaderV2(
+        x_file="data/hq/split_test_values.csv",
+        date_time_file="data/hq/split_test_datetimes.csv",
+        output_col=output_col,
+        input_seq_len=input_seq_len,
+        output_seq_len=output_seq_len,
+        num_features=num_features,
+        stride=seq_stride,
+        time_covariates=["week_of_year"],
+        keep_last_time_cov=True,
+        scale_method="standard",
+        x_mean=global_mean,
+        x_std=global_std,
+        scale_covariates=True,
+        covariate_means=covariate_means,
+        covariate_stds=covariate_stds,
+        order_mode="by_series",
+    )
 
-    for ts in pbar:
+    test_batch_iter = test_dtl.create_data_loader(
+        batch_size=1, shuffle=False, include_ids=True
+    )
 
-        test_dtl = GlobalTimeSeriesDataloader(
-            x_file="data/hq/split_test_values.csv",
-            date_time_file="data/hq/split_test_datetimes.csv",
-            output_col=output_col,
-            input_seq_len=input_seq_len,
-            output_seq_len=output_seq_len,
-            num_features=num_features,
-            stride=seq_stride,
-            ts_idx=ts,
-            x_mean=mean_train[ts],
-            x_std=std_train[ts],
-            global_scale="standard",
-            scale_covariates=True,
-            embedding_dim=embed_dim,
-            embed_at_end=True,
+    # Collect predictions per series
+    test_mu_preds = [[] for _ in range(nb_ts)]
+    test_std_preds = [[] for _ in range(nb_ts)]
+    test_obs = [[] for _ in range(nb_ts)]
+
+    # define the lookback buffer for recursive prediction (per series)
+    if look_back_buffer_optim is not None:
+        look_back_buffer_test = copy.copy(look_back_buffer_optim)
+    else:
+        look_back_buffer_test = copy.copy(look_back_buffer_val)
+    ts_i = -1  # current time series id
+
+    for x, y, ts_id, _ in test_batch_iter:
+
+        # if test_dtl.order_mode == "by_window" or ts_i != ts_id:
+        #     reset_lstm_states(net)
+
+        ts_i = copy.copy(ts_id)
+
+        ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))
+        ts_idx = int(ts_idx[0])  # shape: (B,)
+
+        net.set_lstm_states(lstm_optim_states[ts_idx])
+
+        # replace nans in x with zeros
+        x = np.nan_to_num(x, nan=0.0).squeeze(0)
+
+        if np.isnan(look_back_buffer_test[ts_idx]).all():
+            look_back_buffer_test[ts_idx] = x[:input_seq_len]
+        else:
+            x[:input_seq_len] = look_back_buffer_test[ts_idx]
+            x = x.astype(np.float32)
+
+        # append embeddings to input
+        embed_mu, embed_var = get_combined_embeddings(
+            [ts_idx],
+            embedding_id_map,
+            dam_embeddings,
+            dam_type_embeddings,
+            sensor_type_embeddings,
+            direction_embeddings,
+            sensor_embeddings,
+        )  # shape: (1, embedding_dim)
+        embed_mu = embed_mu[0]
+        embed_var = embed_var[0]
+        x_var = np.zeros_like(x)
+        x = np.concatenate(
+            (x, embed_mu), axis=0
+        )  # shape: (input_seq_len + embedding_dim + num_features - 1,)
+        x_var = np.concatenate(
+            (x_var, embed_var), axis=0
+        )  # shape: (input_seq_len + embedding_dim + num_features - 1,)
+        x = x.astype(np.float32)
+        x_var = x_var.astype(np.float32)
+
+        # Prediction
+        m_pred, v_pred = net(x, x_var)
+
+        flat_m = np.ravel(m_pred)
+        flat_v = np.ravel(v_pred)
+
+        m_pred = flat_m[::2]  # even indices
+        v_pred = flat_v[::2]  # even indices
+        var_obs = flat_m[1::2]  # odd indices var_v
+
+        lstm_optim_states[ts_idx] = net.get_lstm_states()
+
+        # Unstadardize
+        scaled_m_pred = normalizer.unstandardize(
+            m_pred, global_mean[ts_idx], global_std[ts_idx]
         )
+        scaled_std_pred = normalizer.unstandardize_std(
+            (np.sqrt(v_pred + var_obs)), global_std[ts_idx]
+        )
+        scaled_y = normalizer.unstandardize(y, global_mean[ts_idx], global_std[ts_idx])
 
-        test_batch_iter = test_dtl.create_data_loader(1, shuffle=False)
+        test_mu_preds[ts_idx].extend(np.asarray(scaled_m_pred).ravel().tolist())
+        test_std_preds[ts_idx].extend(np.asarray(scaled_std_pred).ravel().tolist())
+        test_obs[ts_idx].extend(np.asarray(scaled_y).ravel().tolist())
 
-        mu_preds = []
-        var_preds = []
-        y_test = []
-        x_test = []
+        # Update lookback buffer with most recent prediction
+        look_back_buffer_test[ts_idx][:-1] = look_back_buffer_test[ts_idx][1:]
+        look_back_buffer_test[ts_idx][-1] = float(np.ravel(m_pred)[-1])
 
-        # Rolling window predictions
-        for RW_idx_, (x, y) in enumerate(test_batch_iter):
-            # Rolling window predictions
-            RW_idx = RW_idx_ % rolling_window
-            if RW_idx > 0:
-                # Length of the input sequence portion (excluding embedding tail)
-                seq_len = input_seq_len * num_features
-                # Overwrite the last RW_idx time steps of the target feature with prior predictions
-                x[seq_len - RW_idx * num_features : seq_len : num_features] = mu_preds[
-                    -RW_idx:
-                ]
+    # concatenate all predictions over train/val/test for each series
+    for ts in range(nb_ts):
+        mu_preds_ts = np.concatenate(
+            (mu_preds[ts], val_mu_preds[ts], test_mu_preds[ts]), axis=0
+        )
+        std_preds_ts = np.concatenate(
+            (std_preds[ts], val_std_preds[ts], test_std_preds[ts]), axis=0
+        )
+        y_true_ts = np.concatenate((train_obs[ts], val_obs[ts], test_obs[ts]), axis=0)
 
-            # Ensure embedding tail reflects the learned mean/var for this ts
-            embed_mu, embed_var = embeddings.get_embedding(ts)
-            # If the dataloader already wrote embed_mu, this is idempotent
-            x[-embed_dim:] = embed_mu
-            x_var = np.zeros_like(x, dtype=np.float32)
-            x_var[-embed_dim:] = embed_var
-
-            # Prediction with embedding variance
-            m_pred, v_pred = net(np.float32(x), np.float32(x_var))
-
-            mu_preds.extend(m_pred)
-            var_preds.extend(v_pred + sigma_v**2)
-
-            x_test.extend(x)
-            y_test.extend(y)
-
-        mu_preds = np.array(mu_preds)
-        std_preds = np.array(var_preds) ** 0.5
-        y_test = np.array(y_test)
-        x_test = np.array(x_test)
-
-        # Unscale the predictions
-        mu_preds = normalizer.unstandardize(mu_preds, mean_train[ts], std_train[ts])
-        std_preds = normalizer.unstandardize_std(std_preds, std_train[ts])
-        y_test = normalizer.unstandardize(y_test, mean_train[ts], std_train[ts])
+        val_start_index = int(len(train_obs[ts]))
+        test_start_index = int(val_start_index + len(val_obs[ts]))
 
         # save test predicitons for each time series
-        # Pad predictions to ensure length is 272
         mu_preds_padded = np.pad(
-            mu_preds.flatten(), (0, 272 - len(mu_preds)), constant_values=np.nan
+            mu_preds_ts.flatten(),
+            (0, horizon_cap - len(mu_preds_ts)),
+            constant_values=np.nan,
         )
         std_preds_padded = np.pad(
-            std_preds.flatten() ** 2, (0, 272 - len(std_preds)), constant_values=np.nan
+            std_preds_ts.flatten(),
+            (0, horizon_cap - len(std_preds_ts)),
+            constant_values=np.nan,
         )
-        y_test_padded = np.pad(
-            y_test.flatten(), (0, 272 - len(y_test)), constant_values=np.nan
+        y_true_padded = np.pad(
+            y_true_ts.flatten(),
+            (0, horizon_cap - len(y_true_ts)),
+            constant_values=np.nan,
         )
 
         ytestPd[:, ts] = mu_preds_padded
         SytestPd[:, ts] = std_preds_padded
-        ytestTr[:, ts] = y_test_padded
+        ytestTr[:, ts] = y_true_padded
+        val_start_indices[ts] = val_start_index
+        test_start_indices[ts] = test_start_index
 
-    np.savetxt(out_dir + "/ytestPd.csv", ytestPd, delimiter=",")
-    np.savetxt(out_dir + "/SytestPd.csv", SytestPd, delimiter=",")
-    np.savetxt(out_dir + "/ytestTr.csv", ytestTr, delimiter=",")
+    np.savetxt(out_dir + "/yPd.csv", ytestPd, delimiter=",")
+    np.savetxt(out_dir + "/SPd.csv", SytestPd, delimiter=",")
+    np.savetxt(out_dir + "/yTr.csv", ytestTr, delimiter=",")
+    split_indices = np.column_stack((val_start_indices, test_start_indices)).astype(
+        np.int32
+    )
+    np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
 
 def main(
-    nb_ts=127, num_epochs=100, batch_size=1, seed=1, early_stopping_criteria="log_lik"
+    nb_ts=127,
+    num_epochs=100,
+    batch_size=1,
+    seed=1,
+    early_stopping_criteria="log_lik",
+    experiments=["shared"],
 ):
     """
     Main function to run all experiments on time series
     """
-    # # Run1 --> local model
-    try:
-        local_model_run(
-            nb_ts,
-            num_epochs,
-            seed=seed,
-            early_stopping_criteria=early_stopping_criteria,
-            batch_size=1,  # local model does not need batching
+    available_experiments = ("local", "global", "embed", "shared")
+
+    if experiments is None:
+        parser = argparse.ArgumentParser(
+            description="Run HQ experiment 01 variants.",
+            allow_abbrev=False,
         )
-    except Exception as e:
-        print(f"Local model run failed: {e}")
+        parser.add_argument(
+            "--experiments",
+            "-e",
+            nargs="+",
+            choices=(*available_experiments, "all"),
+            default=["local"],
+            help="Experiments to run; use 'all' to run every available variant.",
+        )
+        args, _ = parser.parse_known_args()
+        experiments = args.experiments
+    else:
+        experiments = [exp.lower() for exp in experiments]
 
-    # # Run2 --> global model
-    # try:
-    #     global_model_run(
-    #         nb_ts,
-    #         num_epochs,
-    #         batch_size,
-    #         seed,
-    #         early_stopping_criteria,
-    #     )
-    # except Exception as e:
-    #     print(f"Global model run failed: {e}")
+    selected_experiments = set()
+    for exp in experiments:
+        if exp == "all":
+            selected_experiments.update(available_experiments)
+        else:
+            selected_experiments.add(exp)
 
-    # # Run3 --> global model with embeddings
-    # try:
-    #     embed_model_run(
-    #         nb_ts,
-    #         num_epochs,
-    #         batch_size,
-    #         seed,
-    #         early_stopping_criteria,
-    #     )
-    # except Exception as e:
-    #     print(f"Embed model run failed: {e}")
+    unknown_experiments = selected_experiments.difference(available_experiments)
+    if unknown_experiments:
+        raise ValueError(
+            "Unknown experiments requested: " + ", ".join(sorted(unknown_experiments))
+        )
 
-    # # Run4 --> global model with shared sub-embeddings
-    # try:
-    #     shared_model_run(
-    #         nb_ts,
-    #         num_epochs,
-    #         batch_size,
-    #         seed,
-    #         early_stopping_criteria,
-    #     )
-    # except Exception as e:
-    #     print(f"Shared model run failed: {e}")
+    if not selected_experiments:
+        selected_experiments.add("local")
+
+    # Run1 --> local model
+    if "local" in selected_experiments:
+        try:
+            local_model_run(
+                nb_ts,
+                num_epochs,
+                seed=seed,
+                early_stopping_criteria=early_stopping_criteria,
+                batch_size=1,  # local model does not need batching
+            )
+        except Exception as e:
+            print(f"Local model run failed: {e}")
+
+    # Run2 --> global model
+    if "global" in selected_experiments:
+        try:
+            global_model_run(
+                nb_ts,
+                num_epochs,
+                batch_size,
+                seed,
+                early_stopping_criteria,
+            )
+        except Exception as e:
+            print(f"Global model run failed: {e}")
+
+    # Run3 --> global model with embeddings
+    if "embed" in selected_experiments:
+        try:
+            embed_model_run(
+                nb_ts,
+                num_epochs,
+                batch_size,
+                seed,
+                early_stopping_criteria,
+            )
+        except Exception as e:
+            print(f"Embed model run failed: {e}")
+
+    # Run4 --> global model with shared sub-embeddings
+    if "shared" in selected_experiments:
+        try:
+            shared_model_run(
+                nb_ts,
+                num_epochs,
+                batch_size,
+                seed,
+                early_stopping_criteria,
+            )
+        except Exception as e:
+            print(f"Shared model run failed: {e}")
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
 import os
 
 
@@ -169,6 +170,25 @@ def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
 
 
 # -------------------------- Plotting -------------------------- #
+def plot_embedding(mu_embedding, n_series, in_dir, out_path, labels=None):
+    pca = PCA(n_components=2)
+    mu_emb_2d = pca.fit_transform(mu_embedding)
+
+    # plot embeddings
+    plt.figure(figsize=(8, 6))
+    plt.scatter(mu_emb_2d[:, 0], mu_emb_2d[:, 1], c="blue", alpha=0.7)
+    if labels is not None:
+        for i, label in enumerate(labels):
+            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], label)
+    else:
+        for i in range(n_series):
+            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], str(i))
+    plt.xlabel("Principal Component 1")
+    plt.ylabel("Principal Component 2")
+    plt.grid(True)
+    emb_plot_path = in_dir / out_path
+    plt.savefig(emb_plot_path, dpi=600, bbox_inches="tight")
+    plt.close()
 
 
 def plot_series(
@@ -180,7 +200,7 @@ def plot_series(
     sp = s_pred_col if s_pred_col is not None else None
     x = np.arange(len(yt))
 
-    plt.figure(figsize=(10, 4.2))
+    plt.figure(figsize=(10, 3))
     plt.plot(x, yt, label=r"$y_{true}$", color="red")
     if yp is not None:
         plt.plot(x, yp, label=r"$\mathbb{E}[Y']$", color="blue")
@@ -195,28 +215,29 @@ def plot_series(
             alpha=0.3,
             label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(std_factor),
         )
-    plt.axvline(
-        x=val_test_indices[ts_idx, 0], color="green", linestyle="--", label="Val Start"
+    # Shade validation region
+    plt.axvspan(
+        val_test_indices[ts_idx, 0],
+        val_test_indices[ts_idx, 1],
+        color="green",
+        alpha=0.15,
+        label="Validation",
+        linewidth=0,
     )
-    plt.axvline(
-        x=val_test_indices[ts_idx, 1],
-        color="orange",
-        linestyle="--",
-        label="Test Start",
-    )
-    plt.title(f"Series {ts_idx}")
     plt.xlabel("Time Index")
     plt.ylabel("Value")
-    plt.legend(loc="best")
-    plt.tight_layout()
+    plt.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.15),
+        ncol=4,
+        frameon=False,
+    )
     out_path = out_dir / f"series_{ts_idx:03d}.png"
-    plt.savefig(out_path, dpi=160)
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close()
 
 
 # -------------------------- Main -------------------------- #
-
-
 def main():
     parser = argparse.ArgumentParser(description="Evaluate forecasts and plot results.")
     parser.add_argument(
@@ -388,51 +409,164 @@ def main():
 
         data = np.load(in_dir / "embeddings/embeddings_start.npz")
         mu_embedding = data["mu_embedding"]
-        var_embedding = data["var_embedding"]
 
-        # apply PCA to reduce to 2D
-        from sklearn.decomposition import PCA
-
-        pca = PCA(n_components=2)
-        mu_emb_2d = pca.fit_transform(mu_embedding)
-
-        # plot embeddings
-        plt.figure(figsize=(8, 6))
-        plt.scatter(mu_emb_2d[:, 0], mu_emb_2d[:, 1], c="blue", alpha=0.7)
-        for i in range(n_series):
-            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], str(i), fontsize=9)
-        plt.xlabel("Principal Component 1")
-        plt.ylabel("Principal Component 2")
-        plt.grid(True)
-        plt.tight_layout()
-        emb_plot_path = in_dir / "embeddings_mu_pca_start.png"
-        plt.savefig(emb_plot_path, dpi=160)
-        plt.close()
+        plot_embedding(mu_embedding, n_series, in_dir, "embeddings_mu_pca_start.png")
 
     if os.path.exists(in_dir / "embeddings/embeddings_final.npz"):
 
         data = np.load(in_dir / "embeddings/embeddings_final.npz")
         mu_embedding = data["mu_embedding"]
-        var_embedding = data["var_embedding"]
 
-        # apply PCA to reduce to 2D
-        from sklearn.decomposition import PCA
+        plot_embedding(mu_embedding, n_series, in_dir, "embeddings_mu_pca_final.png")
 
-        pca = PCA(n_components=2)
-        mu_emb_2d = pca.fit_transform(mu_embedding)
+    embeddings_dir = in_dir / "embeddings"
+    required_files = [
+        "dam_embeddings_start.npz",
+        "dam_type_embeddings_start.npz",
+        "sensor_type_embeddings_start.npz",
+        "direction_embeddings_start.npz",
+        "sensor_embeddings_start.npz",
+    ]
+    if all((embeddings_dir / fname).is_file() for fname in required_files):
 
-        # plot embeddings
-        plt.figure(figsize=(8, 6))
-        plt.scatter(mu_emb_2d[:, 0], mu_emb_2d[:, 1], c="blue", alpha=0.7)
-        for i in range(n_series):
-            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], str(i), fontsize=9)
-        plt.xlabel("Principal Component 1")
-        plt.ylabel("Principal Component 2")
-        plt.grid(True)
-        plt.tight_layout()
-        emb_plot_path = in_dir / "embeddings_mu_pca_end.png"
-        plt.savefig(emb_plot_path, dpi=160)
-        plt.close()
+        # load embeddings
+        dam_embeddings = np.load(embeddings_dir / "dam_embeddings_start.npz")
+        dam_embeddings_mu = dam_embeddings["mu_embedding"]
+        plot_embedding(
+            dam_embeddings_mu,
+            dam_embeddings_mu.shape[0],
+            in_dir,
+            "dam_embeddings_mu_pca_start.png",
+            labels=["DRU", "GOU", "LGA", "LTU", "MAT", "M5"],
+        )
+
+        dam_type_embeddings = np.load(embeddings_dir / "dam_type_embeddings_start.npz")
+        dam_type_embeddings_mu = dam_type_embeddings["mu_embedding"]
+        plot_embedding(
+            dam_type_embeddings_mu,
+            dam_type_embeddings_mu.shape[0],
+            in_dir,
+            "dam_type_embeddings_mu_pca_start.png",
+            labels=["Run-of-River", "Reservoir"],
+        )
+
+        sensor_type_embeddings = np.load(
+            embeddings_dir / "sensor_type_embeddings_start.npz"
+        )
+        sensor_type_embeddings_mu = sensor_type_embeddings["mu_embedding"]
+        plot_embedding(
+            sensor_type_embeddings_mu,
+            sensor_type_embeddings_mu.shape[0],
+            in_dir,
+            "sensor_type_embeddings_mu_pca_start.png",
+            labels=["PIZ", "EXT", "PEN"],
+        )
+
+        direction_embeddings = np.load(
+            embeddings_dir / "direction_embeddings_start.npz"
+        )
+        direction_embeddings_mu = direction_embeddings["mu_embedding"]
+        plot_embedding(
+            direction_embeddings_mu,
+            direction_embeddings_mu.shape[0],
+            in_dir,
+            "direction_embeddings_mu_pca_start.png",
+            labels=["NA", "X", "Y", "Z"],
+        )
+
+        sensor_embeddings = np.load(embeddings_dir / "sensor_embeddings_start.npz")
+        sensor_embeddings_mu = sensor_embeddings["mu_embedding"]
+        plot_embedding(
+            sensor_embeddings_mu, n_series, in_dir, "sensor_embeddings_mu_pca_start.png"
+        )
+
+        # concatenate all embeddings and plot
+        embedding_mu = np.vstack(
+            [
+                dam_embeddings_mu,
+                dam_type_embeddings_mu,
+                sensor_type_embeddings_mu,
+                direction_embeddings_mu,
+                sensor_embeddings_mu,
+            ]
+        )
+        plot_embedding(
+            embedding_mu, n_series, in_dir, "stitched_embeddings_mu_pca_start.png"
+        )
+
+    required_files = [
+        "dam_embeddings_final.npz",
+        "dam_type_embeddings_final.npz",
+        "sensor_type_embeddings_final.npz",
+        "direction_embeddings_final.npz",
+        "sensor_embeddings_final.npz",
+    ]
+    if all((embeddings_dir / fname).is_file() for fname in required_files):
+
+        # load embeddings
+        dam_embeddings = np.load(embeddings_dir / "dam_embeddings_final.npz")
+        dam_embeddings_mu = dam_embeddings["mu_embedding"]
+        plot_embedding(
+            dam_embeddings_mu,
+            dam_embeddings_mu.shape[0],
+            in_dir,
+            "dam_embeddings_mu_pca_final.png",
+            labels=["DRU", "GOU", "LGA", "LTU", "MAT", "M5"],
+        )
+
+        dam_type_embeddings = np.load(embeddings_dir / "dam_type_embeddings_final.npz")
+        dam_type_embeddings_mu = dam_type_embeddings["mu_embedding"]
+        plot_embedding(
+            dam_type_embeddings_mu,
+            dam_type_embeddings_mu.shape[0],
+            in_dir,
+            "dam_type_embeddings_mu_pca_final.png",
+            labels=["Run-of-River", "Reservoir"],
+        )
+
+        sensor_type_embeddings = np.load(
+            embeddings_dir / "sensor_type_embeddings_final.npz"
+        )
+        sensor_type_embeddings_mu = sensor_type_embeddings["mu_embedding"]
+        plot_embedding(
+            sensor_type_embeddings_mu,
+            sensor_type_embeddings_mu.shape[0],
+            in_dir,
+            "sensor_type_embeddings_mu_pca_final.png",
+            labels=["PIZ", "EXT", "PEN"],
+        )
+
+        direction_embeddings = np.load(
+            embeddings_dir / "direction_embeddings_final.npz"
+        )
+        direction_embeddings_mu = direction_embeddings["mu_embedding"]
+        plot_embedding(
+            direction_embeddings_mu,
+            direction_embeddings_mu.shape[0],
+            in_dir,
+            "direction_embeddings_mu_pca_final.png",
+            labels=["NA", "X", "Y", "Z"],
+        )
+
+        sensor_embeddings = np.load(embeddings_dir / "sensor_embeddings_final.npz")
+        sensor_embeddings_mu = sensor_embeddings["mu_embedding"]
+        plot_embedding(
+            sensor_embeddings_mu, n_series, in_dir, "sensor_embeddings_mu_pca_final.png"
+        )
+
+        # concatenate all embeddings and plot
+        embedding_mu = np.vstack(
+            [
+                dam_embeddings_mu,
+                dam_type_embeddings_mu,
+                sensor_type_embeddings_mu,
+                direction_embeddings_mu,
+                sensor_embeddings_mu,
+            ]
+        )
+        plot_embedding(
+            embedding_mu, n_series, in_dir, "stitched_embeddings_mu_pca_final.png"
+        )
 
     print(
         f"[OK] Wrote {in_dir/'metrics_per_series.csv'} and {in_dir/'metrics_overall.csv'}"
