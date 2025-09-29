@@ -20,6 +20,8 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 import os
 
+LOG_2PI = np.log(2.0 * np.pi)
+
 
 # Plotting defaults
 import matplotlib as mpl
@@ -97,6 +99,16 @@ def compute90QL(y, ypred, Vpred):
     return np.sum(2 * e * (0.9 * Iq - (1 - 0.9) * Iq_)) / np.sum(np.abs(y))
 
 
+def log_lik(y_true, mu, sigma, eps=1e-12):
+    """Average Gaussian log-likelihood with numerical safeguards."""
+    sigma = np.maximum(np.abs(sigma), eps)
+    sigma_sq = sigma * sigma
+    residual = y_true - mu
+    return float(
+        np.nanmean(-0.5 * (LOG_2PI + np.log(sigma_sq) + (residual * residual) / sigma_sq))
+    )
+
+
 def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
     """Return a dict of per-series metrics evaluated on the test slice."""
 
@@ -147,6 +159,7 @@ def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
             "Avg_Std": np.nan,
             "ND": np.nan,
             "90QL": np.nan,
+            "log_lik": np.nan,
         }
 
     out["count"] = yt.size
@@ -166,6 +179,7 @@ def calc_metrics(y_true, y_pred, s_pred, std_factor, test_start_idx=None):
     out["Avg_Std"] = mean_sharpness(sp) if sp is not None else np.nan
     out["ND"] = computeND(yt, yp) if yp is not None else np.nan
     out["90QL"] = compute90QL(yt, yp, sp**2) if sp is not None else np.nan
+    out["log_lik"] = log_lik(yt, yp, sp) if s_pred is not None else np.nan
     return out
 
 
@@ -392,6 +406,7 @@ def main():
                 "Avg_Std",
                 "ND",
                 "90QL",
+                "log_lik",
             ]
         }
         overall["count"] = 0

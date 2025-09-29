@@ -216,9 +216,9 @@ def reset_lstm_states(net):
 
 def calculate_gaussian_posterior(m_pred, v_pred, y, var_obs):
     if not np.isnan(y).any():
-        K_overfit = v_pred / (v_pred + 1e-3)  # Kalman gain with small obs noise
+        K_overfit = v_pred / (v_pred + 1e-2)  # Kalman gain with small obs noise
         K = v_pred / (v_pred + var_obs)  # Kalman gain
-        m_pred = m_pred + K_overfit * (y - m_pred)  # posterior mean
+        m_pred = m_pred + K * (y - m_pred)  # posterior mean
         v_pred = (1.0 - K) * v_pred  # posterior variance
         return m_pred.astype(np.float32), v_pred.astype(np.float32)
     else:
@@ -263,6 +263,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         net_optim = []
         patience = 10
         min_epochs = 15
+        have_best = False
 
         # set random seed for reproducibility
         manual_seed(seed)
@@ -333,25 +334,27 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
             batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False)
 
-            look_back_buffer = None
+            look_back_buffer_mu = None
+            look_back_buffer_var = None
 
             for x, y in batch_iter:
+
+                x_var = np.zeros_like(x)  # takes care of the covariates
 
                 # replace nans in x with zeros
                 x = np.nan_to_num(x, nan=0.0)
 
-                if look_back_buffer is None:
-                    look_back_buffer = x[:input_seq_len]
+                if look_back_buffer_mu is None:
+                    look_back_buffer_mu = x[:input_seq_len]
+                    look_back_buffer_var = x_var[:input_seq_len]
                 else:
-                    look_back_buffer[:-1] = look_back_buffer[1:]  # shift left
-                    look_back_buffer[-1] = float(
-                        np.ravel(m_pred)[-1]
-                    )  # append most recent pred
-                    x[:input_seq_len] = look_back_buffer  # update input sequence
+                    x[:input_seq_len] = look_back_buffer_mu  # update input sequence
+                    x_var[:input_seq_len] = look_back_buffer_var
                     x = x.astype(np.float32)
+                    x_var = x_var.astype(np.float32)
 
                 # Feed forward
-                m_pred, v_pred = net(x)
+                m_pred, v_pred = net(x, x_var)
 
                 flat_m = np.ravel(m_pred)
                 flat_v = np.ravel(v_pred)
@@ -375,9 +378,15 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 std_preds.extend(np.sqrt(v_pred + var_obs))  # stores full uncertainty
                 train_obs.extend(y)
 
-                m_pred, std_pred = calculate_gaussian_posterior(
+                m_pred, v_pred = calculate_gaussian_posterior(
                     m_pred, v_pred, y, var_obs
                 )
+
+                # update look back
+                look_back_buffer_mu[:-1] = look_back_buffer_mu[1:]  # shift left
+                look_back_buffer_var[:-1] = look_back_buffer_var[1:]
+                look_back_buffer_mu[-1] = float(np.ravel(m_pred)[-1])
+                look_back_buffer_var[-1] = float(np.ravel(v_pred + var_obs)[-1])
 
             mu_preds = np.array(mu_preds)
             std_preds = np.array(std_preds)
@@ -402,36 +411,43 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             val_obs = []
 
             # define the lookback buffer for recursive prediction
-            look_back_buffer_val = copy.copy(look_back_buffer)
+            look_back_buffer_val_mu = copy.copy(look_back_buffer_mu)
+            look_back_buffer_val_var = copy.copy(look_back_buffer_var)
 
             # One-step recursive prediction over the validation stream
             for x, y in val_batch_iter:
 
-                if look_back_buffer_val is None:
-                    look_back_buffer_val = x[:input_seq_len]
-                else:
-                    look_back_buffer_val[:-1] = look_back_buffer_val[1:]  # shift left
-                    look_back_buffer_val[-1] = float(
-                        np.ravel(m_pred)[-1]
-                    )  # append most recent pred
-                    x[:input_seq_len] = look_back_buffer_val  # update input sequence
-                    x = x.astype(np.float32)
+                x_var = np.zeros_like(x)  # takes care of covariates
+
+                # get values from lookback_buffer
+                x[:input_seq_len] = look_back_buffer_val_mu  # update input sequence
+                x_var[:input_seq_len] = look_back_buffer_val_var
+                x = x.astype(np.float32)
+                x_var = x_var.astype(np.float32)
 
                 # Predicion
-                m_pred, v_pred = net(x)
+                m_pred, v_pred = net(x, x_var)
+
+                flat_m = np.ravel(m_pred)
+                flat_v = np.ravel(v_pred)
 
                 # get even positions corresponding to Z_out
-                m_pred = np.ravel(m_pred)[::2]
-                v_pred = np.ravel(v_pred)[::2]
+                m_pred = flat_m[::2]
+                v_pred = flat_v[::2]
                 var_obs = flat_m[1::2]  # odd indices var_v
 
                 mu_preds_val.extend(m_pred)
                 std_preds_val.extend(np.sqrt(v_pred + var_obs))
                 val_obs.extend(y)
 
-                m_pred, std_pred = calculate_gaussian_posterior(
+                m_pred, v_pred = calculate_gaussian_posterior(
                     m_pred, v_pred, y, var_obs
                 )
+
+                look_back_buffer_val_mu[:-1] = look_back_buffer_val_mu[1:]  # shift left
+                look_back_buffer_val_var[:-1] = look_back_buffer_val_var[1:]
+                look_back_buffer_val_mu[-1] = float(np.ravel(m_pred)[-1])
+                look_back_buffer_val_var[-1] = float(np.ravel(v_pred + var_obs)[-1])
 
             mu_preds_val = np.array(mu_preds_val)
             std_preds_val = np.array(std_preds_val)
@@ -463,6 +479,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             # early-stopping
             if early_stopping_criteria == "mse":
                 if float(mse_val) < float(mse_optim):
+                    have_best = True
                     mse_optim = mse_val
                     log_lik_optim = log_lik_val
                     epoch_optim = epoch
@@ -473,10 +490,12 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                         mu_preds_val,
                         std_preds_val,
                     )
-                    look_back_buffer_val_optim = copy.copy(look_back_buffer_val)
+                    look_back_buffer_val_mu_optim = copy.copy(look_back_buffer_val_mu)
+                    look_back_buffer_val_var_optim = copy.copy(look_back_buffer_val_var)
                     lstm_optim_states = net.get_lstm_states()
             elif early_stopping_criteria == "log_lik":
                 if float(log_lik_val) > float(log_lik_optim):
+                    have_best = True
                     mse_optim = mse_val
                     log_lik_optim = log_lik_val
                     epoch_optim = epoch
@@ -487,9 +506,16 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                         mu_preds_val,
                         std_preds_val,
                     )
-                    look_back_buffer_val_optim = copy.copy(look_back_buffer_val)
+                    look_back_buffer_val_mu_optim = copy.copy(look_back_buffer_val_mu)
+                    look_back_buffer_val_var_optim = copy.copy(look_back_buffer_val_var)
                     lstm_optim_states = net.get_lstm_states()
             if (epoch + 1) >= min_epochs and int(epoch) - int(epoch_optim) > patience:
+                if not have_best:
+                    net_optim = net.state_dict()
+                    states_optim = (mu_preds, std_preds, mu_preds_val, std_preds_val)
+                    lstm_optim_states = net.get_lstm_states()
+                    look_back_buffer_val_mu_optim = copy.copy(look_back_buffer_val_mu)
+                    look_back_buffer_val_var_optim = copy.copy(look_back_buffer_val_var)
                 break
 
         # -- Testing --
@@ -509,20 +535,19 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         test_obs = []
 
         # define the lookback buffer for recursive prediction
-        look_back_buffer_test = copy.copy(look_back_buffer_val_optim)
+        look_back_buffer_test_mu = copy.copy(look_back_buffer_val_mu_optim)
+        look_back_buffer_test_var = copy.copy(look_back_buffer_val_var_optim)
 
         # One-step recursive prediction over the validation stream
         for x, y in test_batch_iter:
 
-            if look_back_buffer_test is None:
-                look_back_buffer_test = x[:input_seq_len]
-            else:
-                look_back_buffer_test[:-1] = look_back_buffer_test[1:]  # shift left
-                look_back_buffer_test[-1] = float(
-                    np.ravel(m_pred)[-1]
-                )  # append most recent pred
-                x[:input_seq_len] = look_back_buffer_test  # update input sequence
-                x = x.astype(np.float32)
+            x_var = np.zeros_like(x)  # takes care of covariates
+
+            # get values from lookback_buffer
+            x[:input_seq_len] = look_back_buffer_test_mu  # update input sequence
+            x_var[:input_seq_len] = look_back_buffer_test_var
+            x = x.astype(np.float32)
+            x_var = x_var.astype(np.float32)
 
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0)
@@ -530,14 +555,22 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             # Predicion
             m_pred, v_pred = net(x)
 
+            flat_m = np.ravel(m_pred)
+            flat_v = np.ravel(v_pred)
+
             # get even positions corresponding to Z_out
-            m_pred = np.ravel(m_pred)[::2]
-            v_pred = np.ravel(v_pred)[::2]
+            m_pred = flat_m[::2]
+            v_pred = flat_v[::2]
             var_obs = flat_m[1::2]  # odd indices var_v
 
             mu_preds_test.extend(m_pred)
             var_preds_test.extend(np.sqrt(v_pred + var_obs))
             test_obs.extend(y)
+
+            look_back_buffer_test_mu[:-1] = look_back_buffer_test_mu[1:]  # shift left
+            look_back_buffer_test_mu[-1] = float(np.ravel(m_pred)[-1])
+            look_back_buffer_test_var[:-1] = look_back_buffer_test_var[1:]
+            look_back_buffer_test_var[-1] = float(np.ravel(v_pred + var_obs)[-1])
 
         mu_preds_test = np.array(mu_preds_test)
         std_preds_test = np.array(var_preds_test)
@@ -605,7 +638,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     mse_optim = 1e100
     epoch_optim = 0
     net_optim = []
-    patience = 10
+    patience = 15
 
     # Seed
     manual_seed(seed)
@@ -637,6 +670,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         scale_method="standard",
         scale_covariates=True,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     # Use the same scaling for validation/test
@@ -662,6 +696,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     # -----------------------
@@ -681,7 +716,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     # Training
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     states_optim = None
-    look_back_buffer_optim = None
+    look_back_buffer_optim_mu = None
+    look_back_buffer_optim_var = None
     train_mses = []
 
     for epoch in pbar:
@@ -699,17 +735,13 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         )
 
         # define the lookback buffer for recursive prediction
-        look_back_buffer = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+        look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+        look_back_buffer_var = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
         lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
-        ts_i = -1  # current time series id
 
         for x, y, ts_id, _ in batch_iter:
 
-            # reset LSTM states
-            # if train_dtl.order_mode == "by_window" or ts_i != ts_id:
-            #     reset_lstm_states(net)
-
-            ts_i = copy.copy(ts_id)
+            x_var = np.zeros_like(x)
 
             y = np.concatenate(y, axis=0).astype(np.float32)
 
@@ -719,16 +751,24 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0)
 
-            if np.isnan(look_back_buffer[ts_idx]).all():
-                look_back_buffer[ts_idx] = x[:, :input_seq_len]
+            if np.isnan(look_back_buffer_mu[ts_idx]).all():
+                look_back_buffer_mu[ts_idx] = x[:, :input_seq_len]
+                look_back_buffer_var[ts_idx] = x_var[:, :input_seq_len]
             else:
-                x[:, :input_seq_len] = look_back_buffer[ts_idx]  # update input sequence
+                x[:, :input_seq_len] = look_back_buffer_mu[
+                    ts_idx
+                ]  # update input sequence
+                x_var[:, :input_seq_len] = look_back_buffer_var[
+                    ts_idx
+                ]  # update input sequence
                 x = x.astype(np.float32)
+                x_var = x_var.astype(np.float32)
 
             flat_x = np.concatenate(x, axis=0)
+            flat_v = np.concatenate(x_var, axis=0)
 
             # Forward
-            m_pred, v_pred = net(flat_x)
+            m_pred, v_pred = net(flat_x, flat_v)
 
             flat_m = np.ravel(m_pred)
             flat_v = np.ravel(v_pred)
@@ -756,7 +796,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             m_prior = m_pred.copy()
             std_prior = np.sqrt(v_pred + var_obs)
 
-            m_pred, std_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
+            m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
 
             # Unstadardize
             mu_s = np.asarray(global_mean)[ts_idx].reshape(B, 1)
@@ -772,10 +812,15 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
                 std_preds[s].extend(np.asarray(scaled_std[b]).ravel().tolist())
                 train_obs[s].extend(np.asarray(scaled_y[b]).ravel().tolist())
 
-            look_back_buffer = update_look_back_buffer(
-                look_back_buffer,
+            look_back_buffer_mu = update_look_back_buffer(
+                look_back_buffer_mu,
                 ts_idx=ts_id,
                 m_pred=m_pred,
+            )
+            look_back_buffer_var = update_look_back_buffer(
+                look_back_buffer_var,
+                ts_idx=ts_id,
+                m_pred=v_pred,
             )
 
         train_mse = np.nanmean(train_mses)
@@ -791,21 +836,19 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         val_obs = [[] for _ in range(nb_ts)]
 
         # define the lookback buffer for recursive prediction
-        look_back_buffer_val = copy.copy(look_back_buffer)
-        ts_i = -1  # current time series id
+        look_back_buffer_val_mu = copy.copy(look_back_buffer_mu)
+        look_back_buffer_val_var = copy.copy(look_back_buffer_var)
+
         val_mses = []
         val_log_liks = []
 
         # One-step recursive prediction over the validation stream
         for x, y, ts_id, _ in val_batch_iter:
 
+            x_var = np.zeros_like(x)  # takes care of covariates
+
             # set LSTM states
             net.set_lstm_states(lstm_states[int(ts_id[0])])
-
-            # if val_dtl.order_mode == "by_window" or ts_i != ts_id:
-            #     reset_lstm_states(net)
-
-            ts_i = copy.copy(ts_id)
 
             y = np.concatenate(y, axis=0).astype(np.float32)
 
@@ -815,18 +858,20 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0)
 
-            if np.isnan(look_back_buffer_val[ts_idx]).all():
-                look_back_buffer_val[ts_idx] = x[:, :input_seq_len]
-            else:
-                x[:, :input_seq_len] = look_back_buffer_val[
-                    ts_idx
-                ]  # update input sequence
-                x = x.astype(np.float32)
+            x[:, :input_seq_len] = look_back_buffer_val_mu[
+                ts_idx
+            ]  # update input sequence
+            x = x.astype(np.float32)
+            x_var[:, :input_seq_len] = look_back_buffer_val_var[
+                ts_idx
+            ]  # update input sequence
+            x_var = x_var.astype(np.float32)
 
             flat_x = np.concatenate(x, axis=0)
+            flat_var = np.concatenate(x_var, axis=0)
 
             # Predicion
-            m_pred, v_pred = net(flat_x)
+            m_pred, v_pred = net(flat_x, flat_var)
 
             flat_m = np.ravel(m_pred)
             flat_v = np.ravel(v_pred)
@@ -845,7 +890,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
                 metric.log_likelihood(prediction=m_prior, observation=y, std=std_prior)
             )
 
-            m_pred, std_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
+            m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
 
             # Unstadardize
             mu_s = np.asarray(global_mean)[ts_idx].reshape(B, 1)
@@ -861,10 +906,15 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
                 val_std_preds[s].extend(np.asarray(scaled_std[b]).ravel().tolist())
                 val_obs[s].extend(np.asarray(scaled_y[b]).ravel().tolist())
 
-            look_back_buffer_val = update_look_back_buffer(
-                look_back_buffer_val,
+            look_back_buffer_val_mu = update_look_back_buffer(
+                look_back_buffer_val_mu,
                 ts_idx=ts_id,
                 m_pred=m_pred,
+            )
+            look_back_buffer_val_var = update_look_back_buffer(
+                look_back_buffer_val_var,
+                ts_idx=ts_id,
+                m_pred=v_pred,
             )
 
         # Compute log-likelihood for validation set
@@ -890,7 +940,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
                     copy.deepcopy(val_mu_preds),
                     copy.deepcopy(val_std_preds),
                 )
-                look_back_buffer_optim = copy.deepcopy(look_back_buffer_val)
+                look_back_buffer_optim_mu = copy.deepcopy(look_back_buffer_val_mu)
+                look_back_buffer_optim_var = copy.deepcopy(look_back_buffer_val_var)
                 lstm_optim_states = copy.deepcopy(lstm_states)
         elif early_stopping_criteria == "log_lik":
             if float(log_lik_val) > float(log_lik_optim):
@@ -904,7 +955,8 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
                     copy.deepcopy(val_mu_preds),
                     copy.deepcopy(val_std_preds),
                 )
-                look_back_buffer_optim = copy.deepcopy(look_back_buffer_val)
+                look_back_buffer_optim_mu = copy.deepcopy(look_back_buffer_val_mu)
+                look_back_buffer_optim_var = copy.deepcopy(look_back_buffer_val_var)
                 lstm_optim_states = copy.deepcopy(lstm_states)
         if int(epoch) - int(epoch_optim) > patience:
             break
@@ -945,6 +997,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     test_batch_iter = test_dtl.create_data_loader(
@@ -957,18 +1010,11 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     test_obs = [[] for _ in range(nb_ts)]
 
     # define the lookback buffer for recursive prediction (per series)
-    if look_back_buffer_optim is not None:
-        look_back_buffer_test = copy.copy(look_back_buffer_optim)
-    else:
-        look_back_buffer_test = copy.copy(look_back_buffer_val)
-    ts_i = -1  # current time series id
+    look_back_buffer_test_mu = copy.copy(look_back_buffer_optim_mu)
+    look_back_buffer_test_var = copy.copy(look_back_buffer_optim_var)
 
     for x, y, ts_id, _ in test_batch_iter:
 
-        # if test_dtl.order_mode == "by_window" or ts_i != ts_id:
-        #     reset_lstm_states(net)
-
-        ts_i = copy.copy(ts_id)
 
         ts_idx_arr = np.atleast_1d(np.asarray(ts_id, dtype=int))
         ts_idx = int(ts_idx_arr[0])
@@ -977,12 +1023,13 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
         # replace nans in x with zeros
         x = np.nan_to_num(x, nan=0.0).squeeze(0)
+        x_var = np.zeros_like(x)  # takes care of covariates
 
-        if np.isnan(look_back_buffer_test[ts_idx]).all():
-            look_back_buffer_test[ts_idx] = x[:input_seq_len]
-        else:
-            x[:input_seq_len] = look_back_buffer_test[ts_idx]
-            x = x.astype(np.float32)
+
+        x[:input_seq_len] = look_back_buffer_test_mu[ts_idx]
+        x = x.astype(np.float32)
+        x_var[:input_seq_len] = look_back_buffer_test_var[ts_idx]
+        x_var = x_var.astype(np.float32)
 
         # Prediction
         m_pred, v_pred = net(x)
@@ -1010,14 +1057,11 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         test_obs[ts_idx].extend(np.asarray(scaled_y).ravel().tolist())
 
         # Update lookback buffer with most recent prediction
-        look_back_buffer_test[ts_idx][:-1] = look_back_buffer_test[ts_idx][1:]
-        look_back_buffer_test[ts_idx][-1] = float(np.ravel(m_pred)[-1])
+        look_back_buffer_test_mu[ts_idx][:-1] = look_back_buffer_test_mu[ts_idx][1:]
+        look_back_buffer_test_mu[ts_idx][-1] = float(np.ravel(m_pred)[-1])
 
-        # look_back_buffer_test = update_look_back_buffer(
-        #     look_back_buffer_test,
-        #     ts_idx=ts_id,
-        #     m_pred=m_pred,
-        # )
+        look_back_buffer_test_var[ts_idx][:-1] = look_back_buffer_test_var[ts_idx][1:]
+        look_back_buffer_test_var[ts_idx][-1] = float(np.ravel(v_pred)[-1])
 
     # concatenate all predictions over train/val/test for each series
     for ts in range(nb_ts):
@@ -1116,8 +1160,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
     # Build TRAIN loader over ALL series
     train_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_train_values.csv",
-        date_time_file="data/hq/split_train_datetimes.csv",
+        x_file="data/hq/train_0.3/split_train_values.csv",
+        date_time_file="data/hq/train_0.3/split_train_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1128,6 +1172,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         scale_method="standard",
         scale_covariates=True,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     # Use the same scaling for validation/test
@@ -1137,8 +1182,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     covariate_stds = train_dtl.covariate_stds
 
     val_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_val_values.csv",
-        date_time_file="data/hq/split_val_datetimes.csv",
+        x_file="data/hq/train_0.3/split_val_values.csv",
+        date_time_file="data/hq/train_0.3/split_val_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1153,6 +1198,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     # -----------------------
@@ -1461,8 +1507,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     # Testing
     print("Testing...")
     test_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_test_values.csv",
-        date_time_file="data/hq/split_test_datetimes.csv",
+        x_file="data/hq/train_0.3/split_test_values.csv",
+        date_time_file="data/hq/train_0.3/split_test_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1477,6 +1523,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     test_batch_iter = test_dtl.create_data_loader(
@@ -1721,8 +1768,8 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
     # Build TRAIN loader over ALL series
     train_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_train_values.csv",
-        date_time_file="data/hq/split_train_datetimes.csv",
+        x_file="data/hq/train_0.3/split_train_values.csv",
+        date_time_file="data/hq/train_0.3/split_train_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1733,6 +1780,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         scale_method="standard",
         scale_covariates=True,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     # Use the same scaling for validation/test
@@ -1742,8 +1790,8 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     covariate_stds = train_dtl.covariate_stds
 
     val_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_val_values.csv",
-        date_time_file="data/hq/split_val_datetimes.csv",
+        x_file="data/hq/train_0.3/split_val_values.csv",
+        date_time_file="data/hq/train_0.3/split_val_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1758,6 +1806,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     # -----------------------
@@ -2125,8 +2174,8 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     # Testing
     print("Testing...")
     test_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_test_values.csv",
-        date_time_file="data/hq/split_test_datetimes.csv",
+        x_file="data/hq/train_0.3/split_test_values.csv",
+        date_time_file="data/hq/train_0.3/split_test_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -2141,6 +2190,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
+        random_seed=seed,
     )
 
     test_batch_iter = test_dtl.create_data_loader(
@@ -2282,7 +2332,7 @@ def main(
     batch_size=1,
     seed=1,
     early_stopping_criteria="log_lik",
-    experiments=["shared"],
+    experiments=None,
 ):
     """
     Main function to run all experiments on time series

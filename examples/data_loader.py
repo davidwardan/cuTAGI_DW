@@ -887,6 +887,7 @@ class GlobalTimeSeriesDataloaderV2:
         embed_at_end: bool = False,  # if True, append embedding after the rolled time steps
         min_len_guard: bool = False,  # skip series shorter than in+out, instead of raising
         order_mode: str = "by_window",  # "by_window" | "by_series" | "interleave"
+        random_seed: Optional[int] = None,
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -911,6 +912,7 @@ class GlobalTimeSeriesDataloaderV2:
         self.min_len_guard = min_len_guard
 
         self.order_mode = order_mode
+        self._rng = np.random.default_rng(random_seed)
 
         # processed outputs
         self.dataset = self._process_all()
@@ -939,16 +941,16 @@ class GlobalTimeSeriesDataloaderV2:
         n = x_rolled.shape[0]
         indices = np.arange(n)
         if shuffle:
-            np.random.shuffle(indices)
+            self._rng.shuffle(indices)
 
         if num_samples is not None:
             num_samples = min(n, num_samples)
             if weighted_sampling and (weights is not None):
-                chosen = np.random.choice(
+                chosen = self._rng.choice(
                     indices, size=num_samples, replace=True, p=weights / np.sum(weights)
                 )
             else:
-                chosen = np.random.choice(indices, size=num_samples, replace=False)
+                chosen = self._rng.choice(indices, size=num_samples, replace=False)
         else:
             chosen = indices
 
@@ -967,7 +969,7 @@ class GlobalTimeSeriesDataloaderV2:
             boundaries = np.flatnonzero(np.diff(sid)) + 1
             if boundaries.size:
                 segments = np.split(indices, boundaries)
-                perm = np.random.permutation(len(segments))
+                perm = self._rng.permutation(len(segments))
                 indices = np.concatenate([segments[i] for i in perm])
                 chosen = indices
 
