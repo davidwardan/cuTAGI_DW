@@ -105,7 +105,9 @@ def log_lik(y_true, mu, sigma, eps=1e-12):
     sigma_sq = sigma * sigma
     residual = y_true - mu
     return float(
-        np.nanmean(-0.5 * (LOG_2PI + np.log(sigma_sq) + (residual * residual) / sigma_sq))
+        np.nanmean(
+            -0.5 * (LOG_2PI + np.log(sigma_sq) + (residual * residual) / sigma_sq)
+        )
     )
 
 
@@ -249,6 +251,67 @@ def plot_series(
     out_path = out_dir / f"series_{ts_idx:03d}.png"
     plt.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close()
+
+
+def plot_train_metrics(metrics_dir, out_dir):
+    metrics_paths = sorted(metrics_dir.glob("metrics_*.npz"))
+    if not metrics_paths:
+        return False
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for metrics_path in metrics_paths:
+        with np.load(metrics_path) as data:
+            train_mse = np.asarray(data["train_mse"])
+            val_mse = np.asarray(data["val_mse"])
+            train_log_lik = np.asarray(data["train_log_lik"])
+            val_log_lik = np.asarray(data["val_log_lik"])
+            epoch_optim = (
+                int(np.squeeze(data["epoch_optim"])) if "epoch_optim" in data else 0
+            )
+
+        lengths = [arr.size for arr in (train_mse, val_mse, train_log_lik, val_log_lik)]
+        if not lengths:
+            continue
+
+        num_epochs = min(lengths)
+        if num_epochs == 0:
+            continue
+
+        epochs = np.arange(1, num_epochs + 1)
+
+        fig, axes = plt.subplots(2, 1, sharex=True, figsize=(8, 4.5))
+
+        axes[0].plot(epochs, train_mse[:num_epochs], label="train", color="tab:blue")
+        axes[0].plot(epochs, val_mse[:num_epochs], label="val", color="tab:orange")
+        if epoch_optim > 0 and epoch_optim <= num_epochs:
+            axes[0].axvline(epoch_optim, color="tab:green", linestyle="--", linewidth=1)
+        axes[0].set_ylabel("MSE")
+        axes[0].legend(loc="upper right", frameon=False)
+
+        axes[1].plot(
+            epochs,
+            train_log_lik[:num_epochs],
+            label="train",
+            color="tab:blue",
+        )
+        axes[1].plot(
+            epochs,
+            val_log_lik[:num_epochs],
+            label="val",
+            color="tab:orange",
+        )
+        if epoch_optim > 0 and epoch_optim <= num_epochs:
+            axes[1].axvline(epoch_optim, color="tab:green", linestyle="--", linewidth=1)
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("Log Likelihood")
+        axes[1].legend(loc="upper right", frameon=False)
+
+        fig.tight_layout()
+        fig.savefig(out_dir / f"{metrics_path.stem}.png", dpi=300, bbox_inches="tight")
+        plt.close(fig)
+
+    return True
 
 
 # -------------------------- Main -------------------------- #
@@ -583,11 +646,21 @@ def main():
             embedding_mu, n_series, in_dir, "stitched_embeddings_mu_pca_final.png"
         )
 
+    train_metrics_plot_dir = None
+    if args.plots:
+        metrics_dir = in_dir / "train_metrics"
+        if metrics_dir.is_dir():
+            out_dir = in_dir / "train_metrics_plot"
+            if plot_train_metrics(metrics_dir, out_dir):
+                train_metrics_plot_dir = out_dir
+
     print(
         f"[OK] Wrote {in_dir/'metrics_per_series.csv'} and {in_dir/'metrics_overall.csv'}"
     )
     if args.plots:
         print(f"[OK] Plots saved to {plot_dir}")
+        if train_metrics_plot_dir is not None:
+            print(f"[OK] Training curves saved to {train_metrics_plot_dir}")
 
 
 if __name__ == "__main__":

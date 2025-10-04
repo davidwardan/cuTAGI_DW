@@ -921,6 +921,7 @@ class GlobalTimeSeriesDataloaderV2:
     def load_data_from_csv(data_file: str) -> np.ndarray:
         """Load CSV -> 2D numpy (T, N). Skips the first row (header)."""
         df = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
+        # df = df.iloc[:, :5] #TODO remove when done with debugging
         return df.values
 
     def create_data_loader(
@@ -952,6 +953,24 @@ class GlobalTimeSeriesDataloaderV2:
             else:
                 chosen = self._rng.choice(indices, size=num_samples, replace=False)
         else:
+            chosen = indices
+
+        if (
+            self.order_mode == "by_window"
+            and not shuffle
+            and not weighted_sampling
+            and num_samples is None
+            and window_id is not None
+            and len(window_id) == len(indices)
+            and len(indices) > 0
+            and shuffle_series_blocks
+        ):
+            boundaries = np.flatnonzero(np.diff(window_id)) + 1
+            segments = np.split(indices.copy(), boundaries) if boundaries.size else [indices.copy()]
+            for segment in segments:
+                if segment.size > 1:
+                    self._rng.shuffle(segment)
+            indices = np.concatenate(segments)
             chosen = indices
 
         if (
