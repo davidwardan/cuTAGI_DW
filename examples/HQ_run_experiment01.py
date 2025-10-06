@@ -1276,12 +1276,10 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
 def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria):
     """
-    Run a single global model across ALL time series using the interleaved dataloader.
-    Training/validation: all series at once (round-robin windows).
-    Testing: per-series loop preserved (using ts_indices filter) to keep your 1-step recursive logic.
+    Run a single global model across All time series and learn an embedding for each series.
     """
 
-    print("Running embedding model...")
+    print("Running global+embed model...")
 
     # Config
     output_col = [0]
@@ -1289,14 +1287,19 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     input_seq_len = 52
     output_seq_len = 1
     seq_stride = 1
+
+    # early-stopping trackers
     log_lik_optim = -1e100
     mse_optim = 1e100
     epoch_optim = 0
     net_optim = []
-    patience = 10
+    patience = 10  # epochs to wait for improvement before early stopping
+    min_epochs = 0  # minimum number of epochs before early stopping
+    have_best = False
 
-    # Seed
-    manual_seed(seed)
+    # --- Output Directory ---
+    out_dir = "out/experiment01_embed"
+    os.makedirs(out_dir, exist_ok=True)
 
     # Initialize embeddings
     embedding_dim = 10
@@ -1306,18 +1309,13 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         seed=seed,
     )
 
-    # --- Output Directory ---
-    out_dir = "out/experiment01_embed"
-    os.makedirs(out_dir, exist_ok=True)
-
     # save embeddings at beginning
     if not os.path.exists(out_dir + "/embeddings"):
         os.makedirs(out_dir + "/embeddings", exist_ok=True)
     embeddings.save(os.path.join(out_dir, "embeddings/embeddings_start.npz"))
 
     # Pre-allocate final CSVs
-    horizon_cap = 2000
-    # create placeholders
+    horizon_cap = 2000  # manually set
     ytestPd = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
     SytestPd = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
     ytestTr = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
@@ -1326,8 +1324,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
     # Build TRAIN loader over ALL series
     train_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_train_values.csv",
-        date_time_file="data/hq/split_train_datetimes.csv",
+        x_file="data/hq/train_0.3/split_train_values.csv",
+        date_time_file="data/hq/train_0.3/split_train_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1337,8 +1335,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         keep_last_time_cov=True,
         scale_method="standard",
         scale_covariates=True,
-        order_mode="by_series",
-        random_seed=seed,
+        order_mode="by_window",
+        random_seed=seed,  # defined for reproducibility of series shuffling
     )
 
     # Use the same scaling for validation/test
@@ -1348,8 +1346,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     covariate_stds = train_dtl.covariate_stds
 
     val_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_val_values.csv",
-        date_time_file="data/hq/split_val_datetimes.csv",
+        x_file="data/hq/train_0.3/split_val_values.csv",
+        date_time_file="data/hq/train_0.3/split_val_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1364,13 +1362,12 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
-        random_seed=seed,
     )
 
-    # -----------------------
-    # Network
+    # --- Define Model ---
+    manual_seed(seed)
     net = Sequential(
-        LSTM(input_seq_len + embedding_dim + num_features - 1, 40, 1),
+        LSTM(input_seq_len + num_features - 1, 40, 1),
         LSTM(40, 40, 1),
         Linear(40, 2),
         EvenExp(),
@@ -1380,14 +1377,20 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     else:
         net.set_threads(1)
     out_updater = OutputUpdater(net.device)
-    net.input_state_update = True
 
-    # Training
-    pbar = tqdm(range(num_epochs), desc="Training Progress")
+    # optimal states placeholders
     states_optim = None
-    look_back_buffer_optim = None
-    train_mses = []
+    look_back_buffer_mu_optim = None
+    look_back_buffer_var_optim = None
 
+    # save for plotting
+    train_mses = []
+    train_log_liks = []
+    val_mses = []
+    val_log_liks = []
+
+    # --- Training ---
+    pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
         mu_preds = [[] for _ in range(nb_ts)]
         std_preds = [[] for _ in range(nb_ts)]
@@ -1395,43 +1398,60 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
         batch_iter = train_dtl.create_data_loader(
             batch_size=batch_size,
-            shuffle=False,
+            shuffle=False,  # full shuffle
             include_ids=True,
-            shuffle_series_blocks=(
-                True if train_dtl.order_mode == "by_series" else False
-            ),
+            shuffle_series_blocks=True,  # ordered shuffle
         )
 
         # define the lookback buffer for recursive prediction
-        look_back_buffer = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+        look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+        look_back_buffer_var = np.full((nb_ts, input_seq_len), 1.0, dtype=np.float32)
         lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
-        ts_i = -1  # current time series id
+        ts_i = -1  # used to track changes in series for by_series mode
 
         for x, y, ts_id, _ in batch_iter:
 
-            # reset LSTM states
-            # if train_dtl.order_mode == "by_window" or ts_i != ts_id:
-            #     reset_lstm_states(net)
+            ts_idx = ts_id.item()
+            # B = int(len(ts_idx))  # current batch size
+            B = 1  # current batch size
 
-            ts_i = copy.copy(ts_id)
+            # what to do with LSTM states depends on order_mode and batch size
+            # TODO: need to update this to handle batches
+            if train_dtl.order_mode == "by_series":
+                if B == 1 and ts_idx != ts_i and epoch != 0:
+                    net.reset_lstm_states()
+                ts_i = ts_idx
+            elif train_dtl.order_mode == "by_window":
+                if lstm_states[ts_idx] is None and epoch != 0:
+                    net.reset_lstm_states()
+                elif lstm_states[ts_idx] is not None:
+                    net.set_lstm_states(lstm_states[ts_idx])
 
-            y = np.concatenate(y, axis=0).astype(np.float32)
-
-            ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))
-            B = int(len(ts_idx))  # current batch size
-
-            # replace nans in x with zeros
-            x = np.nan_to_num(x, nan=0.0)
-
-            if np.isnan(look_back_buffer[ts_idx]).all():
-                look_back_buffer[ts_idx] = x[:, :input_seq_len]
             else:
-                x[:, :input_seq_len] = look_back_buffer[ts_idx]  # update input sequence
+                net.reset_lstm_states()
+                print("Warning: LSTM states reset for each batch.")
+
+            x = np.nan_to_num(x, nan=0.0)  # clean input from nans
+            x_var = np.zeros_like(x)  # takes care of covariates
+            y = np.concatenate(y, axis=0).astype(np.float32)  # shape (B,)
+
+            # initialize look back buffer if first step for any series in batch
+            if np.isnan(look_back_buffer_mu[ts_idx]).all():
+                look_back_buffer_mu[ts_idx] = x[:, :input_seq_len]
+            else:
+                x[:, :input_seq_len] = look_back_buffer_mu[
+                    ts_idx
+                ]  # update input sequence
                 x = x.astype(np.float32)
+
+            # always update the var buffer (no nans)
+            x_var[:, :input_seq_len] = look_back_buffer_var[
+                ts_idx
+            ]  # update input sequence
+            x_var = x_var.astype(np.float32)
 
             # append embeddings to each input in the batch
             embed_mu, embed_var = embeddings(ts_idx)  # shape: (B, embedding_dim)
-            x_var = np.zeros_like(x)
             x = np.concatenate(
                 (x, embed_mu), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
@@ -1439,11 +1459,16 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 (x_var, embed_var), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
 
-            flat_x = np.concatenate(x, axis=0, dtype=np.float32)
-            flat_x_var = np.concatenate(x_var, axis=0, dtype=np.float32)
+            # flatten input for model
+            flat_x = np.concatenate(
+                x, axis=0
+            )  # shape (B*(input_seq_len + num_features -1),)
+            flat_var = np.concatenate(
+                x_var, axis=0
+            )  # shape (B*(input_seq_len + num_features -1),)
 
             # Forward
-            m_pred, v_pred = net(flat_x, flat_x_var)
+            m_pred, v_pred = net(flat_x, flat_var)
 
             flat_m = np.ravel(m_pred)
             flat_v = np.ravel(v_pred)
@@ -1453,9 +1478,8 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             var_obs = flat_m[1::2]  # odd indices var_v
 
             # store lstm states
-            lstm_states[int(ts_id[0])] = net.get_lstm_states()
-
-            train_mses.append(metric.mse(m_pred, y))
+            # TODO: update to handle batches
+            lstm_states[ts_idx] = net.get_lstm_states()
 
             # Update output layer
             out_updater.update_heteros(
@@ -1468,30 +1492,12 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             net.backward()
             net.step()
 
+            # store prior states
             m_prior = m_pred.copy()
             std_prior = np.sqrt(v_pred + var_obs)
 
-            m_pred, std_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
-
-            # Unstadardize
-            mu_s = np.asarray(global_mean)[ts_idx].reshape(B, 1)
-            sd_s = np.asarray(global_std)[ts_idx].reshape(B, 1)
-            scaled_m = normalizer.unstandardize(m_prior.reshape(B, -1), mu_s, sd_s)
-            scaled_std = normalizer.unstandardize_std(std_prior.reshape(B, -1), sd_s)
-            scaled_y = normalizer.unstandardize(y.reshape(B, -1), mu_s, sd_s)
-
-            # extend the correct series
-            for b in range(B):
-                s = ts_idx[b]
-                mu_preds[s].extend(np.asarray(scaled_m[b]).ravel().tolist())
-                std_preds[s].extend(np.asarray(scaled_std[b]).ravel().tolist())
-                train_obs[s].extend(np.asarray(scaled_y[b]).ravel().tolist())
-
-            look_back_buffer = update_look_back_buffer(
-                look_back_buffer,
-                ts_idx=ts_id,
-                m_pred=m_pred,
-            )
+            # get the posterior states
+            m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
 
             # get updates for embeddings
             mu_delta, var_delta = net.get_input_states()
@@ -1505,53 +1511,99 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 ts_idx, x_update[:, -embedding_dim:], var_update[:, -embedding_dim:]
             )
 
-        train_mse = np.nanmean(train_mses)
+            # store for plotting
+            for b in range(B):
+                sid = int(ts_id[b])
 
-        # Validating
+                # append to per-series lists
+                mu_preds[sid].append(float(m_prior[b]))
+                std_preds[sid].append(float(std_prior[b]))
+                train_obs[sid].append(float(y[b]))
+
+            look_back_buffer_mu = update_look_back_buffer(
+                look_back_buffer_mu,
+                ts_idx=ts_id,
+                m_pred=m_pred,
+            )
+            look_back_buffer_var = update_look_back_buffer(
+                look_back_buffer_var,
+                ts_idx=ts_id,
+                m_pred=v_pred,
+            )
+
+        # get train metrics
+        mses = []
+        log_liks = []
+        for s in range(nb_ts):
+            pred = np.asarray(mu_preds[s])
+            std = np.asarray(std_preds[s])
+            obs = np.asarray(train_obs[s])
+            train_mse = metric.mse(pred, obs)
+            train_log_lik = metric.log_likelihood(
+                prediction=pred, observation=obs, std=std
+            )
+            mses.append(train_mse)
+            log_liks.append(train_log_lik)
+
+        train_mse = np.nanmean(mses)
+        train_log_lik = np.nanmean(log_liks)
+        train_mses.append(train_mse)
+        train_log_liks.append(train_log_lik)
+
+        # unstandardize
+        for s in range(nb_ts):
+            mu_preds[s] = np.array(mu_preds[s])
+            std_preds[s] = np.array(std_preds[s])
+            train_obs[s] = np.array(train_obs[s])
+            mu_preds[s] = normalizer.unstandardize(
+                mu_preds[s], global_mean[s], global_std[s]
+            )
+            std_preds[s] = normalizer.unstandardize_std(std_preds[s], global_std[s])
+            train_obs[s] = normalizer.unstandardize(
+                train_obs[s], global_mean[s], global_std[s]
+            )
+
+        # --- Validation ---
         print("Validating...")
         val_batch_iter = val_dtl.create_data_loader(
             batch_size, shuffle=False, include_ids=True
         )
 
+        # create placeholders for predictions and observations
         val_mu_preds = [[] for _ in range(nb_ts)]
         val_std_preds = [[] for _ in range(nb_ts)]
         val_obs = [[] for _ in range(nb_ts)]
 
         # define the lookback buffer for recursive prediction
-        look_back_buffer_val = copy.copy(look_back_buffer)
-        ts_i = -1  # current time series id
-        val_mses = []
-        val_log_liks = []
+        look_back_buffer_val_mu = np.copy(look_back_buffer_mu)
+        look_back_buffer_val_var = np.copy(look_back_buffer_var)
 
         # One-step recursive prediction over the validation stream
         for x, y, ts_id, _ in val_batch_iter:
 
             # set LSTM states
-            net.set_lstm_states(lstm_states[int(ts_id[0])])
-
-            # if val_dtl.order_mode == "by_window" or ts_i != ts_id:
-            #     reset_lstm_states(net)
-
-            ts_i = copy.copy(ts_id)
-
-            y = np.concatenate(y, axis=0).astype(np.float32)
+            net.set_lstm_states(lstm_states[ts_id.item()])
 
             ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))  # shape: (B,)
-            B = int(len(ts_idx))
+            B = int(len(ts_idx))  # current batch size
 
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0)
+            x_var = np.zeros_like(x)  # takes care of covariates
+            y = np.concatenate(y, axis=0).astype(np.float32)
 
-            if np.isnan(look_back_buffer_val[ts_idx]).all():
-                look_back_buffer_val[ts_idx] = x[:, :input_seq_len]
-            else:
-                x[:, :input_seq_len] = look_back_buffer_val[
-                    ts_idx
-                ]  # update input sequence
-                x = x.astype(np.float32)
+            # insert values from lookback_buffer
+            x[:, :input_seq_len] = look_back_buffer_val_mu[
+                ts_idx
+            ]  # update input sequence
+            x = x.astype(np.float32)
+            x_var[:, :input_seq_len] = look_back_buffer_val_var[
+                ts_idx
+            ]  # update input sequence
+            x_var = x_var.astype(np.float32)
 
+            # append embeddings to each input in the batch
             embed_mu, embed_var = embeddings(ts_idx)  # shape: (B, embedding_dim)
-            x_var = np.zeros_like(x)
             x = np.concatenate(
                 (x, embed_mu), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
@@ -1559,11 +1611,12 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 (x_var, embed_var), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
 
-            flat_x = np.concatenate(x, axis=0, dtype=np.float32)
-            flat_x_var = np.concatenate(x_var, axis=0, dtype=np.float32)
+            # flatten input for model
+            flat_x = np.concatenate(x, axis=0)
+            flat_var = np.concatenate(x_var, axis=0)
 
             # Predicion
-            m_pred, v_pred = net(flat_x, flat_x_var)
+            m_pred, v_pred = net(flat_x, flat_var)
 
             flat_m = np.ravel(m_pred)
             flat_v = np.ravel(v_pred)
@@ -1572,80 +1625,144 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             v_pred = flat_v[::2]  # even indices
             var_obs = flat_m[1::2]  # odd indices var_v
 
+            # save prior states for plotting and metrics
             m_prior = m_pred.copy()
             std_prior = np.sqrt(v_pred + var_obs)
 
-            lstm_states[int(ts_id[0])] = net.get_lstm_states()
+            # store lstm states
+            lstm_states[ts_id.item()] = net.get_lstm_states()
 
-            val_mses.append(metric.mse(m_pred, y))
-            val_log_liks.append(
-                metric.log_likelihood(prediction=m_prior, observation=y, std=std_prior)
-            )
+            # get the posterior states
+            m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
 
-            m_pred, std_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
-
-            # Unstadardize
-            mu_s = np.asarray(global_mean)[ts_idx].reshape(B, 1)
-            sd_s = np.asarray(global_std)[ts_idx].reshape(B, 1)
-            scaled_m = normalizer.unstandardize(m_prior.reshape(B, -1), mu_s, sd_s)
-            scaled_std = normalizer.unstandardize_std(std_prior.reshape(B, -1), sd_s)
-            scaled_y = normalizer.unstandardize(y.reshape(B, -1), mu_s, sd_s)
-
-            # extend the correct series
             for b in range(B):
-                s = ts_idx[b]
-                val_mu_preds[s].extend(np.asarray(scaled_m[b]).ravel().tolist())
-                val_std_preds[s].extend(np.asarray(scaled_std[b]).ravel().tolist())
-                val_obs[s].extend(np.asarray(scaled_y[b]).ravel().tolist())
+                sid = int(ts_idx[b])
 
-            look_back_buffer_val = update_look_back_buffer(
-                look_back_buffer_val,
+                # append to per-series lists
+                val_mu_preds[sid].append(float(m_prior[b]))
+                val_std_preds[sid].append(float(std_prior[b]))
+                val_obs[sid].append(float(y[b]))
+
+            look_back_buffer_val_mu = update_look_back_buffer(
+                look_back_buffer_val_mu,
                 ts_idx=ts_id,
                 m_pred=m_pred,
             )
+            look_back_buffer_val_var = update_look_back_buffer(
+                look_back_buffer_val_var,
+                ts_idx=ts_id,
+                m_pred=v_pred,
+            )
 
-        # Compute log-likelihood for validation set
-        mse_val = np.nanmean(val_mses)
-        log_lik_val = np.nanmean(val_log_liks)
+        # get validation metrics
+        mses = []
+        log_liks = []
+        for s in range(nb_ts):
+            pred = np.asarray(val_mu_preds[s])
+            std = np.asarray(val_std_preds[s])
+            obs = np.asarray(val_obs[s])
+            val_mse = metric.mse(pred, obs)
+            val_log_lik = metric.log_likelihood(
+                prediction=pred, observation=obs, std=std
+            )
+            mses.append(val_mse)
+            log_liks.append(val_log_lik)
+
+        val_mse = np.nanmean(mses)
+        val_log_lik = np.nanmean(log_liks)
+        val_mses.append(val_mse)
+        val_log_liks.append(val_log_lik)
+
+        # unstandardize
+        for s in range(nb_ts):
+            val_mu_preds[s] = np.array(val_mu_preds[s])
+            val_std_preds[s] = np.array(val_std_preds[s])
+            val_obs[s] = np.array(val_obs[s])
+            val_mu_preds[s] = normalizer.unstandardize(
+                val_mu_preds[s], global_mean[s], global_std[s]
+            )
+            val_std_preds[s] = normalizer.unstandardize_std(
+                val_std_preds[s], global_std[s]
+            )
+            val_obs[s] = normalizer.unstandardize(
+                val_obs[s], global_mean[s], global_std[s]
+            )
 
         # Progress bar
         pbar.set_description(
-            f"Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| mse_val: {mse_val:>7.4f} | log_lik_val: {log_lik_val:>7.4f}",
+            f"Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| lg_lik: {train_log_lik:>7.4f}| mse_val: {val_mse:>7.4f} | log_lk_val: {val_log_lik:>7.4f}",
             refresh=True,
         )
 
+        # check if warmup period is done
+        warmup_done = (epoch + 1) >= min_epochs
+
         # early-stopping
         if early_stopping_criteria == "mse":
-            if float(mse_val) < float(mse_optim):
-                mse_optim = mse_val
-                log_lik_optim = log_lik_val
+            if (
+                warmup_done
+                and float(val_mse) < float(mse_optim)
+                and val_mse is not np.nan
+            ):
+                have_best = True
+                mse_optim = val_mse
+                log_lik_optim = val_log_lik
                 epoch_optim = epoch
                 net_optim = net.state_dict()
                 states_optim = (
-                    copy.deepcopy(mu_preds),
-                    copy.deepcopy(std_preds),
-                    copy.deepcopy(val_mu_preds),
-                    copy.deepcopy(val_std_preds),
+                    mu_preds,
+                    std_preds,
+                    val_mu_preds,
+                    val_std_preds,
                 )
-                look_back_buffer_optim = copy.deepcopy(look_back_buffer_val)
+                look_back_buffer_mu_optim = np.copy(look_back_buffer_val_mu)
+                look_back_buffer_var_optim = np.copy(look_back_buffer_val_var)
                 lstm_optim_states = copy.deepcopy(lstm_states)
                 embeddings_optim = copy.deepcopy(embeddings)
         elif early_stopping_criteria == "log_lik":
-            if float(log_lik_val) > float(log_lik_optim):
-                mse_optim = mse_val
-                log_lik_optim = log_lik_val
+            if (
+                warmup_done
+                and float(val_log_lik) > float(log_lik_optim)
+                and val_log_lik is not np.nan
+            ):
+                have_best = True
+                mse_optim = val_mse
+                log_lik_optim = val_log_lik
                 epoch_optim = epoch
                 net_optim = net.state_dict()
                 states_optim = (
-                    copy.deepcopy(mu_preds),
-                    copy.deepcopy(std_preds),
-                    copy.deepcopy(val_mu_preds),
-                    copy.deepcopy(val_std_preds),
+                    mu_preds,
+                    std_preds,
+                    val_mu_preds,
+                    val_std_preds,
                 )
-                look_back_buffer_optim = copy.deepcopy(look_back_buffer_val)
+                look_back_buffer_mu_optim = np.copy(look_back_buffer_val_mu)
+                look_back_buffer_var_optim = np.copy(look_back_buffer_val_var)
                 lstm_optim_states = copy.deepcopy(lstm_states)
                 embeddings_optim = copy.deepcopy(embeddings)
-        if int(epoch) - int(epoch_optim) > patience:
+        if warmup_done:
+            last_improvement = epoch_optim if have_best else (min_epochs - 1)
+            if epoch - last_improvement >= patience:
+                if not have_best:
+                    net_optim = net.state_dict()
+                    states_optim = (
+                        mu_preds,
+                        std_preds,
+                        val_mu_preds,
+                        val_std_preds,
+                    )
+                    lstm_optim_states = copy.deepcopy(lstm_states)
+                    look_back_buffer_mu_optim = np.copy(look_back_buffer_val_mu)
+                    look_back_buffer_var_optim = np.copy(look_back_buffer_val_var)
+                    embeddings_optim = copy.deepcopy(embeddings)
+                break
+        if (
+            np.isnan(train_mse)
+            or np.isnan(train_log_lik)
+            or np.isnan(val_mse)
+            or np.isnan(val_log_lik)
+        ):
+            print("Warning: NaN detected in training/validation metrics. Stopping...")
             break
 
     if states_optim is None:
@@ -1661,20 +1778,30 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     # Load optimal model
     if net_optim:
         net.load_state_dict(net_optim)
+    net.save(os.path.join(out_dir, "param/model.pth"))
 
     # load optimal embeddings
     if embeddings_optim:
         embeddings = embeddings_optim
     embeddings.save(os.path.join(out_dir, "embeddings/embeddings_final.npz"))
 
-    # Save model
-    net.save(os.path.join(out_dir, "param/model.pth"))
+    # save training/validation metrics
+    metrics = {
+        "train_mse": np.array(train_mses),
+        "train_log_lik": np.array(train_log_liks),
+        "val_mse": np.array(val_mses),
+        "val_log_lik": np.array(val_log_liks),
+        "epoch_optim": epoch_optim + 1,
+    }
+    if not os.path.exists(out_dir + "/train_metrics"):
+        os.makedirs(out_dir + "/train_metrics")
+    np.savez(out_dir + "/train_metrics/metrics_0.npz", **metrics)
 
-    # Testing
+    # --- Testing ---
     print("Testing...")
     test_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/split_test_values.csv",
-        date_time_file="data/hq/split_test_datetimes.csv",
+        x_file="data/hq/train_0.3/split_test_values.csv",
+        date_time_file="data/hq/train_0.3/split_test_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1689,7 +1816,6 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
-        random_seed=seed,
     )
 
     test_batch_iter = test_dtl.create_data_loader(
@@ -1702,36 +1828,27 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     test_obs = [[] for _ in range(nb_ts)]
 
     # define the lookback buffer for recursive prediction (per series)
-    if look_back_buffer_optim is not None:
-        look_back_buffer_test = copy.copy(look_back_buffer_optim)
-    else:
-        look_back_buffer_test = copy.copy(look_back_buffer_val)
-    ts_i = -1  # current time series id
+    look_back_buffer_test_mu = np.copy(look_back_buffer_mu_optim)
+    look_back_buffer_test_var = np.copy(look_back_buffer_var_optim)
 
     for x, y, ts_id, _ in test_batch_iter:
 
-        # if test_dtl.order_mode == "by_window" or ts_i != ts_id:
-        #     reset_lstm_states(net)
+        ts_idx = ts_id.item()  # get the integer index of the time series
 
-        ts_i = copy.copy(ts_id)
-
-        ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))
-        ts_idx = int(ts_idx[0])  # shape: (B,)
-
+        # set LSTM states
         net.set_lstm_states(lstm_optim_states[ts_idx])
 
         # replace nans in x with zeros
-        x = np.nan_to_num(x, nan=0.0).squeeze(0)
+        x = x.reshape(-1)
+        x_var = np.zeros_like(x)  # takes care of covariates
 
-        if np.isnan(look_back_buffer_test[ts_idx]).all():
-            look_back_buffer_test[ts_idx] = x[:input_seq_len]
-        else:
-            x[:input_seq_len] = look_back_buffer_test[ts_idx]
-            x = x.astype(np.float32)
+        x[:input_seq_len] = look_back_buffer_test_mu[ts_idx]
+        x_var[:input_seq_len] = look_back_buffer_test_var[ts_idx]
+        x = x.astype(np.float32)
+        x_var = x_var.astype(np.float32)
 
         # append embeddings to input
         embed_mu, embed_var = embeddings(ts_idx)  # shape: (1, embedding_dim)
-        x_var = np.zeros_like(x)
         x = np.concatenate(
             (x, embed_mu), axis=0
         )  # shape: (input_seq_len + embedding_dim + num_features - 1,)
@@ -1751,6 +1868,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         v_pred = flat_v[::2]  # even indices
         var_obs = flat_m[1::2]  # odd indices var_v
 
+        # store lstm states
         lstm_optim_states[ts_idx] = net.get_lstm_states()
 
         # Unstadardize
@@ -1767,8 +1885,11 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         test_obs[ts_idx].extend(np.asarray(scaled_y).ravel().tolist())
 
         # Update lookback buffer with most recent prediction
-        look_back_buffer_test[ts_idx][:-1] = look_back_buffer_test[ts_idx][1:]
-        look_back_buffer_test[ts_idx][-1] = float(np.ravel(m_pred)[-1])
+        look_back_buffer_test_mu[ts_idx][:-1] = look_back_buffer_test_mu[ts_idx][1:]
+        look_back_buffer_test_mu[ts_idx][-1] = float(np.ravel(m_pred)[-1])
+
+        look_back_buffer_test_var[ts_idx][:-1] = look_back_buffer_test_var[ts_idx][1:]
+        look_back_buffer_test_var[ts_idx][-1] = float(np.ravel(v_pred)[-1])
 
     # concatenate all predictions over train/val/test for each series
     for ts in range(nb_ts):
