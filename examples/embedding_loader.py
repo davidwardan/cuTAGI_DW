@@ -37,8 +37,12 @@ class TimeSeriesEmbeddings:
             # small, fixed variance
             self.var_embedding = np.full(embedding_dim, 1.0)
         else:
-            self.mu_embedding = np.full(embedding_dim, 1.0)
-            self.var_embedding = np.ones(embedding_dim)
+            self.mu_embedding = np.full(embedding_dim, 1.0, dtype=np.float32)
+            self.var_embedding = np.ones(embedding_dim, dtype=np.float32)
+
+        # ensure correct data types
+        self.mu_embedding = self.mu_embedding.astype(np.float32)
+        self.var_embedding = self.var_embedding.astype(np.float32)
 
     def __call__(self, idx: int) -> tuple:
         return self.mu_embedding[idx], self.var_embedding[idx]
