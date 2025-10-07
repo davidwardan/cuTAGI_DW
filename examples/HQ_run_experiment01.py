@@ -348,7 +348,7 @@ def local_model_run(
 
             # define the lookback buffer for recursive prediction
             look_back_buffer_mu = np.full(input_seq_len, np.nan, dtype=np.float32)
-            look_back_buffer_var = np.full(input_seq_len, 1.0, dtype=np.float32)
+            look_back_buffer_var = np.full(input_seq_len, 0.0, dtype=np.float32)
 
             # Always start with zeroed LSTM states for each epoch
             if (
@@ -702,7 +702,7 @@ def global_model_run(
     epoch_optim = 0
     net_optim = []
     patience = 10  # epochs to wait for improvement before early stopping
-    min_epochs = 0  # minimum number of epochs before early stopping
+    min_epochs = 15  # minimum number of epochs before early stopping
     have_best = False
 
     # --- Output Directory ---
@@ -798,7 +798,7 @@ def global_model_run(
 
         # define the lookback buffer for recursive prediction
         look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
-        look_back_buffer_var = np.full((nb_ts, input_seq_len), 1.0, dtype=np.float32)
+        look_back_buffer_var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
         lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
         ts_i = -1  # used to track changes in series for by_series mode
 
@@ -867,8 +867,45 @@ def global_model_run(
                 print("v_pred: ", v_pred)
                 printed = True
             if printed:
-                print(net.state_dict()["LSTM.0"])
-                raise ValueError("nan/inf detected")
+                param = net.state_dict()
+                for k, v in param.items():
+                    if any(np.isnan(np.array(v_item)).any() for v_item in v):
+                        print(f"nan in param: {k}")
+                # plot look back with y
+                import matplotlib.pyplot as plt
+                current_look_back_mu = look_back_buffer_mu[ts_id]
+                current_look_back_std = np.sqrt(look_back_buffer_var[ts_id])
+                for b in range(B):
+                    sid = int(ts_id[b])
+                    plt.figure(figsize=(10, 5))
+                    plt.plot(
+                        np.arange(input_seq_len),
+                        current_look_back_mu[b],
+                        label="look_back_mu",
+                    )
+                    plt.fill_between(
+                        np.arange(input_seq_len),
+                        current_look_back_mu[b] - 1 * current_look_back_std[b],
+                        current_look_back_mu[b] + 1 * current_look_back_std[b],
+                        color="gray",
+                        alpha=0.5,
+                        label="look_back_+-std",
+                    )
+                    plt.scatter(
+                        input_seq_len,
+                        y[b],
+                        color="red",
+                        label="y",
+                        zorder=5,
+                    )
+                    plt.title(f"Series {sid} | Batch idx {b}")
+                    plt.xlabel("Time step")
+                    plt.ylabel("Value")
+                    plt.legend()
+                    plt.show()
+
+
+                raise ValueError("nan/inf detected.")
 
             # Update output layer
             out_updater.update_heteros(
@@ -1415,12 +1452,12 @@ def embed_model_run(
             batch_size=batch_size,
             shuffle=False,  # full shuffle
             include_ids=True,
-            # shuffle_series_blocks=True,  # ordered shuffle
+            shuffle_series_blocks=True,  # ordered shuffle
         )
 
         # define the lookback buffer for recursive prediction
         look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
-        look_back_buffer_var = np.full((nb_ts, input_seq_len), 1.0, dtype=np.float32)
+        look_back_buffer_var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
         lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
         ts_i = -1  # used to track changes in series for by_series mode
 
@@ -2073,7 +2110,7 @@ def shared_model_run(
         time_covariates=["week_of_year"],
         keep_last_time_cov=True,
         scale_method="standard",
-        order_mode="by_series",
+        order_mode="by_window",
         random_seed=seed,  # defined for reproducibility of series shuffling
     )
 
@@ -2139,12 +2176,12 @@ def shared_model_run(
             batch_size=batch_size,
             shuffle=False,  # full shuffle
             include_ids=True,
-            # shuffle_series_blocks=True,  # ordered shuffle
+            shuffle_series_blocks=True,  # ordered shuffle
         )
 
         # define the lookback buffer for recursive prediction
         look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
-        look_back_buffer_var = np.full((nb_ts, input_seq_len), 1.0, dtype=np.float32)
+        look_back_buffer_var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
         lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
         ts_i = -1  # used to track changes in series for by_series mode
 
@@ -2769,7 +2806,7 @@ def main(
             "-e",
             nargs="+",
             choices=(*available_experiments, "all"),
-            default=["local"],
+            default=None,
             help="Experiments to run; use 'all' to run every available variant.",
         )
         args, _ = parser.parse_known_args()
