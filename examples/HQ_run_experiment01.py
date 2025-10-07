@@ -11,7 +11,7 @@ from examples.embedding_loader import (
 )
 from examples.data_loader import (
     TimeSeriesDataloader,
-    GlobalTimeSeriesDataloaderV2,
+    GlobalTimeSeriesDataloader,
 )
 from pytagi import manual_seed
 import pytagi.metric as metric
@@ -224,7 +224,9 @@ def calculate_gaussian_posterior(m_pred, v_pred, y, var_obs):
         return m_pred, v_pred
 
 
-def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria):
+def local_model_run(
+    nb_ts, num_epochs, batch_size, seed, early_stopping_criteria, train_size
+):
     """ "
     Runs a seperate local model for each time series in the dataset
     """
@@ -266,8 +268,8 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         have_best = False
 
         train_dtl = TimeSeriesDataloader(
-            x_file="data/hq/train_0.3/split_train_values.csv",
-            date_time_file="data/hq/train_0.3/split_train_datetimes.csv",
+            x_file=f"data/hq/train_{train_size}/split_train_values.csv",
+            date_time_file=f"data/hq/train_{train_size}/split_train_datetimes.csv",
             time_covariates=["week_of_year"],
             keep_last_time_cov=True,
             output_col=output_col,
@@ -279,8 +281,8 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         )
 
         val_dtl = TimeSeriesDataloader(
-            x_file="data/hq/train_0.3/split_val_values.csv",
-            date_time_file="data/hq/train_0.3/split_val_datetimes.csv",
+            x_file="data/hq/split_val_values.csv",
+            date_time_file="data/hq/split_val_datetimes.csv",
             time_covariates=["week_of_year"],
             keep_last_time_cov=True,
             output_col=output_col,
@@ -294,8 +296,8 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         )
 
         test_dtl = TimeSeriesDataloader(
-            x_file="data/hq/train_0.3/split_test_values.csv",
-            date_time_file="data/hq/train_0.3/split_test_datetimes.csv",
+            x_file="data/hq/split_test_values.csv",
+            date_time_file="data/hq/split_test_datetimes.csv",
             time_covariates=["week_of_year"],
             keep_last_time_cov=True,
             output_col=output_col,
@@ -404,7 +406,7 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
                 look_back_buffer_mu[:-1] = look_back_buffer_mu[1:]  # shift left
                 look_back_buffer_var[:-1] = look_back_buffer_var[1:]
                 look_back_buffer_mu[-1] = float(np.ravel(m_pred)[-1])
-                look_back_buffer_var[-1] = float(np.ravel(v_pred)[-1])
+                look_back_buffer_var[-1] = float(np.ravel(v_pred + var_obs)[-1])
 
             mu_preds = np.array(mu_preds)
             std_preds = np.array(std_preds)
@@ -676,7 +678,9 @@ def local_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
 
-def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria):
+def global_model_run(
+    nb_ts, num_epochs, batch_size, seed, early_stopping_criteria, train_size
+):
     """
     Run a single global model across ALL time series using the interleaved dataloader.
     Training/validation: all series at once (round-robin windows).
@@ -714,9 +718,9 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     test_start_indices = np.full(nb_ts, -1, dtype=np.int32)
 
     # Build TRAIN loader over ALL series
-    train_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_train_values.csv",
-        date_time_file="data/hq/train_0.3/split_train_datetimes.csv",
+    train_dtl = GlobalTimeSeriesDataloader(
+        x_file=f"data/hq/train_{train_size}/split_train_values.csv",
+        date_time_file=f"data/hq/train_{train_size}/split_train_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -725,7 +729,6 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         time_covariates=["week_of_year"],
         keep_last_time_cov=True,
         scale_method="standard",
-        scale_covariates=True,
         order_mode="by_window",
         random_seed=seed,  # defined for reproducibility of series shuffling
     )
@@ -736,9 +739,9 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     covariate_means = train_dtl.covariate_means
     covariate_stds = train_dtl.covariate_stds
 
-    val_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_val_values.csv",
-        date_time_file="data/hq/train_0.3/split_val_datetimes.csv",
+    val_dtl = GlobalTimeSeriesDataloader(
+        x_file="data/hq/split_val_values.csv",
+        date_time_file="data/hq/split_val_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -749,7 +752,6 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         scale_method="standard",
         x_mean=global_mean,
         x_std=global_std,
-        scale_covariates=True,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
@@ -852,9 +854,21 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             v_pred = flat_v[::2]  # even indices
             var_obs = flat_m[1::2]  # odd indices var_v
 
-            # store lstm states
-            # TODO: update to handle batches
-            lstm_states[ts_idx] = net.get_lstm_states()
+            # debug for nans
+            printed = False
+            if np.isinf(v_pred).any() or np.isnan(v_pred).any():
+                print("nan/inf in v_pred")
+                print("var_obs: ", var_obs)
+                print("v_pred: ", v_pred)
+                printed = True
+            if np.isinf(var_obs).any() or np.isnan(var_obs).any():
+                print("nan/inf in var_obs")
+                print("var_obs: ", var_obs)
+                print("v_pred: ", v_pred)
+                printed = True
+            if printed:
+                print(net.state_dict()["LSTM.0"])
+                raise ValueError("nan/inf detected")
 
             # Update output layer
             out_updater.update_heteros(
@@ -866,6 +880,10 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             # Backward + step
             net.backward()
             net.step()
+
+            # store lstm states
+            # TODO: update to handle batches
+            lstm_states[ts_idx] = net.get_lstm_states()
 
             m_prior = m_pred.copy()
             std_prior = np.sqrt(v_pred + var_obs)
@@ -889,7 +907,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             look_back_buffer_var = update_look_back_buffer(
                 look_back_buffer_var,
                 ts_idx=ts_id,
-                m_pred=v_pred,
+                m_pred=v_pred + var_obs,
             )
 
         # get train metrics
@@ -1001,7 +1019,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             look_back_buffer_val_var = update_look_back_buffer(
                 look_back_buffer_val_var,
                 ts_idx=ts_id,
-                m_pred=v_pred,
+                m_pred=v_pred + var_obs,
             )
 
         # get validation metrics
@@ -1141,9 +1159,9 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
     # --- Testing ---
     print("Testing...")
-    test_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_test_values.csv",
-        date_time_file="data/hq/train_0.3/split_test_datetimes.csv",
+    test_dtl = GlobalTimeSeriesDataloader(
+        x_file="data/hq/split_test_values.csv",
+        date_time_file="data/hq/split_test_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1154,7 +1172,6 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         scale_method="standard",
         x_mean=global_mean,
         x_std=global_std,
-        scale_covariates=True,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
@@ -1223,7 +1240,7 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         look_back_buffer_test_mu[ts_idx][-1] = float(np.ravel(m_pred)[-1])
 
         look_back_buffer_test_var[ts_idx][:-1] = look_back_buffer_test_var[ts_idx][1:]
-        look_back_buffer_test_var[ts_idx][-1] = float(np.ravel(v_pred)[-1])
+        look_back_buffer_test_var[ts_idx][-1] = float(np.ravel(v_pred + var_obs)[-1])
 
     # concatenate all predictions over train/val/test for each series
     for ts in range(nb_ts):
@@ -1270,7 +1287,9 @@ def global_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
 
-def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria):
+def embed_model_run(
+    nb_ts, num_epochs, batch_size, seed, early_stopping_criteria, train_size
+):
     """
     Run a single global model across All time series and learn an embedding for each series.
     """
@@ -1290,7 +1309,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     epoch_optim = 0
     net_optim = []
     patience = 10  # epochs to wait for improvement before early stopping
-    min_epochs = 0  # minimum number of epochs before early stopping
+    min_epochs = 10  # minimum number of epochs before early stopping
     have_best = False
 
     # --- Output Directory ---
@@ -1319,9 +1338,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     test_start_indices = np.full(nb_ts, -1, dtype=np.int32)
 
     # Build TRAIN loader over ALL series
-    train_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_train_values.csv",
-        date_time_file="data/hq/train_0.3/split_train_datetimes.csv",
+    train_dtl = GlobalTimeSeriesDataloader(
+        x_file=f"data/hq/train_{train_size}/split_train_values.csv",
+        date_time_file=f"data/hq/train_{train_size}/split_train_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1330,7 +1349,6 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         time_covariates=["week_of_year"],
         keep_last_time_cov=True,
         scale_method="standard",
-        scale_covariates=True,
         order_mode="by_window",
         random_seed=seed,  # defined for reproducibility of series shuffling
     )
@@ -1341,9 +1359,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     covariate_means = train_dtl.covariate_means
     covariate_stds = train_dtl.covariate_stds
 
-    val_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_val_values.csv",
-        date_time_file="data/hq/train_0.3/split_val_datetimes.csv",
+    val_dtl = GlobalTimeSeriesDataloader(
+        x_file="data/hq/split_val_values.csv",
+        date_time_file="data/hq/split_val_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1354,7 +1372,6 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         scale_method="standard",
         x_mean=global_mean,
         x_std=global_std,
-        scale_covariates=True,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
@@ -1398,7 +1415,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             batch_size=batch_size,
             shuffle=False,  # full shuffle
             include_ids=True,
-            shuffle_series_blocks=True,  # ordered shuffle
+            # shuffle_series_blocks=True,  # ordered shuffle
         )
 
         # define the lookback buffer for recursive prediction
@@ -1410,8 +1427,7 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         for x, y, ts_id, _ in batch_iter:
 
             ts_idx = ts_id.item()
-            # B = int(len(ts_idx))  # current batch size
-            B = 1  # current batch size
+            B = int(len(ts_id))  # current batch size
 
             # what to do with LSTM states depends on order_mode and batch size
             # TODO: need to update this to handle batches
@@ -1469,10 +1485,6 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             v_pred = flat_v[::2]  # even indices
             var_obs = flat_m[1::2]  # odd indices var_v
 
-            # store lstm states
-            # TODO: update to handle batches
-            lstm_states[ts_idx] = net.get_lstm_states()
-
             # Update output layer
             out_updater.update_heteros(
                 output_states=net.output_z_buffer,
@@ -1483,6 +1495,10 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
             # Backward + step
             net.backward()
             net.step()
+
+            # store posterior lstm states
+            # TODO: update to handle batches
+            lstm_states[ts_idx] = net.get_lstm_states()
 
             # store prior states
             m_prior = m_pred.copy()
@@ -1789,9 +1805,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
 
     # --- Testing ---
     print("Testing...")
-    test_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_test_values.csv",
-        date_time_file="data/hq/train_0.3/split_test_datetimes.csv",
+    test_dtl = GlobalTimeSeriesDataloader(
+        x_file="data/hq/split_test_values.csv",
+        date_time_file="data/hq/split_test_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -1802,7 +1818,6 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
         scale_method="standard",
         x_mean=global_mean,
         x_std=global_std,
-        scale_covariates=True,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
@@ -1927,7 +1942,9 @@ def embed_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria
     np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
 
-def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteria):
+def shared_model_run(
+    nb_ts, num_epochs, batch_size, seed, early_stopping_criteria, train_size
+):
     """
     Run a single global model across All time series and learn an embedding for each series.
     """
@@ -1947,7 +1964,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     epoch_optim = 0
     net_optim = []
     patience = 10  # epochs to wait for improvement before early stopping
-    min_epochs = 0  # minimum number of epochs before early stopping
+    min_epochs = 10  # minimum number of epochs before early stopping
     have_best = False
 
     # --- Output Directory ---
@@ -2045,9 +2062,9 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     test_start_indices = np.full(nb_ts, -1, dtype=np.int32)
 
     # Build TRAIN loader over ALL series
-    train_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_train_values.csv",
-        date_time_file="data/hq/train_0.3/split_train_datetimes.csv",
+    train_dtl = GlobalTimeSeriesDataloader(
+        x_file=f"data/hq/train_{train_size}/split_train_values.csv",
+        date_time_file=f"data/hq/train_{train_size}/split_train_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -2056,8 +2073,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         time_covariates=["week_of_year"],
         keep_last_time_cov=True,
         scale_method="standard",
-        scale_covariates=True,
-        order_mode="by_window",
+        order_mode="by_series",
         random_seed=seed,  # defined for reproducibility of series shuffling
     )
 
@@ -2067,9 +2083,9 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
     covariate_means = train_dtl.covariate_means
     covariate_stds = train_dtl.covariate_stds
 
-    val_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_val_values.csv",
-        date_time_file="data/hq/train_0.3/split_val_datetimes.csv",
+    val_dtl = GlobalTimeSeriesDataloader(
+        x_file="data/hq/split_val_values.csv",
+        date_time_file="data/hq/split_val_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -2080,7 +2096,6 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         scale_method="standard",
         x_mean=global_mean,
         x_std=global_std,
-        scale_covariates=True,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
@@ -2124,7 +2139,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             batch_size=batch_size,
             shuffle=False,  # full shuffle
             include_ids=True,
-            shuffle_series_blocks=True,  # ordered shuffle
+            # shuffle_series_blocks=True,  # ordered shuffle
         )
 
         # define the lookback buffer for recursive prediction
@@ -2136,8 +2151,7 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         for x, y, ts_id, _ in batch_iter:
 
             ts_idx = ts_id.item()
-            # B = int(len(ts_idx))  # current batch size
-            B = 1  # current batch size
+            B = int(len(ts_id))  # current batch size
 
             # what to do with LSTM states depends on order_mode and batch size
             # TODO: need to update this to handle batches
@@ -2205,10 +2219,6 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             v_pred = flat_v[::2]  # even indices
             var_obs = flat_m[1::2]  # odd indices var_v
 
-            # store lstm states
-            # TODO: update to handle batches
-            lstm_states[ts_idx] = net.get_lstm_states()
-
             # Update output layer
             out_updater.update_heteros(
                 output_states=net.output_z_buffer,
@@ -2219,6 +2229,10 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
             # Backward + step
             net.backward()
             net.step()
+
+            # store posterior lstm states
+            # TODO: update to handle batches
+            lstm_states[ts_idx] = net.get_lstm_states()
 
             # store prior states
             m_prior = m_pred.copy()
@@ -2585,9 +2599,9 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
     # --- Testing ---
     print("Testing...")
-    test_dtl = GlobalTimeSeriesDataloaderV2(
-        x_file="data/hq/train_0.3/split_test_values.csv",
-        date_time_file="data/hq/train_0.3/split_test_datetimes.csv",
+    test_dtl = GlobalTimeSeriesDataloader(
+        x_file="data/hq/split_test_values.csv",
+        date_time_file="data/hq/split_test_datetimes.csv",
         output_col=output_col,
         input_seq_len=input_seq_len,
         output_seq_len=output_seq_len,
@@ -2598,7 +2612,6 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
         scale_method="standard",
         x_mean=global_mean,
         x_std=global_std,
-        scale_covariates=True,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
         order_mode="by_series",
@@ -2734,10 +2747,11 @@ def shared_model_run(nb_ts, num_epochs, batch_size, seed, early_stopping_criteri
 
 def main(
     nb_ts=127,
-    num_epochs=1,
+    num_epochs=100,
     batch_size=1,
     seed=1,
     early_stopping_criteria="log_lik",
+    train_size="1.0",  # proportion of training data to use: "0.3", "0.4", "0.6", "0.8", "1.0"
     experiments=None,
 ):
     """
@@ -2788,6 +2802,7 @@ def main(
                 seed=seed,
                 early_stopping_criteria=early_stopping_criteria,
                 batch_size=1,  # local model does not need batching
+                train_size=train_size,
             )
         except Exception as e:
             print(f"Local model run failed: {e}")
@@ -2801,6 +2816,7 @@ def main(
                 batch_size,
                 seed,
                 early_stopping_criteria,
+                train_size,
             )
         except Exception as e:
             print(f"Global model run failed: {e}")
@@ -2814,6 +2830,7 @@ def main(
                 batch_size,
                 seed,
                 early_stopping_criteria,
+                train_size,
             )
         except Exception as e:
             print(f"Embed model run failed: {e}")
@@ -2827,6 +2844,7 @@ def main(
                 batch_size,
                 seed,
                 early_stopping_criteria,
+                train_size,
             )
         except Exception as e:
             print(f"Shared model run failed: {e}")

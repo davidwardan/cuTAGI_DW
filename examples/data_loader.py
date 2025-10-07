@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Generator, Optional, Tuple
+from typing import Generator, Optional, Tuple, List, Dict
 
 import numpy as np
 import pandas as pd
@@ -550,302 +550,7 @@ class TimeSeriesDataloader:
 #         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
 
 
-# TODO: remove this version
 class GlobalTimeSeriesDataloader:
-    """Similar to TimeSeriesDataloader but with global normalization"""
-
-    def __init__(
-        self,
-        x_file: str,
-        date_time_file: str,
-        output_col: np.ndarray,
-        input_seq_len: int,
-        output_seq_len: int,
-        num_features: int,
-        stride: int,
-        ts_idx: Optional[int] = None,
-        x_mean: Optional[np.ndarray] = None,
-        x_std: Optional[np.ndarray] = None,
-        time_covariates: Optional[str] = None,
-        scale_i: Optional[float] = None,
-        scale_method: Optional[str] = None,  # other options: 'standard', 'deepAR'
-        idx_as_feature: Optional[bool] = False,
-        min_max_scaler: Optional[list] = None,
-        scale_covariates: Optional[bool] = False,
-        covariate_means: Optional[np.ndarray] = None,
-        covariate_stds: Optional[np.ndarray] = None,
-        embedding_dim: Optional[int] = None,
-        embedding: Optional[np.ndarray] = None,
-        embed_at_end: Optional[
-            bool
-        ] = False,  # if True, embedding is added at the end of the input sequence
-        keep_last_time_cov: Optional[bool] = True,
-    ) -> None:
-        self.x_file = x_file
-        self.date_time_file = date_time_file
-        self.output_col = output_col
-        self.input_seq_len = input_seq_len
-        self.output_seq_len = output_seq_len
-        self.num_features = num_features
-        self.stride = stride
-        self.ts_idx = ts_idx  # add time series index when data having multiple ts
-        self.time_covariates = time_covariates  # for adding time covariates
-        self.scale_i = scale_i  # scaling factor for ith time series
-        self.scale_method = scale_method
-        self.x_mean = x_mean
-        self.x_std = x_std
-        self.idx_as_feature = idx_as_feature
-        self.min_max_scaler = min_max_scaler
-        self.scale_covariates = scale_covariates
-        self.covariate_means = covariate_means
-        self.covariate_stds = covariate_stds
-        self.embedding_dim = embedding_dim
-        self.embedding = embedding
-        self.embed_at_end = embed_at_end
-        self.keep_last_time_cov = keep_last_time_cov
-        self.dataset = self.process_data()
-
-    @staticmethod
-    def load_data_from_csv(data_file: str) -> np.ndarray:
-        """Load data from csv file"""
-
-        data = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
-
-        return data.values
-
-    @staticmethod
-    def batch_generator(
-        input_data: np.ndarray,
-        output_data: np.ndarray,
-        batch_size: int,
-        shuffle: bool = True,
-        weights: Optional[np.ndarray] = None,
-        num_samples: Optional[int] = None,
-    ) -> Generator[Tuple[np.ndarray, ...], None, None]:
-        """
-        Generator function to yield batches of data.
-        """
-
-        num_data = input_data.shape[0]
-        indices = np.arange(num_data)
-        if shuffle:
-            np.random.shuffle(indices)
-
-        if num_samples is not None:
-            num_samples = min(num_data, num_samples)
-            if weights is None:
-                selected_indices = np.random.choice(
-                    indices, size=num_samples, replace=False
-                )
-            else:
-                selected_indices = np.random.choice(
-                    indices, size=num_samples, replace=True, p=weights
-                )
-        else:
-            selected_indices = indices
-
-        # Calculate the number of batches
-        total_batches = int(np.ceil(len(selected_indices) / batch_size))
-
-        for batch_num in range(total_batches):
-            start_idx = batch_num * batch_size
-            end_idx = start_idx + batch_size
-            batch_indices = selected_indices[start_idx:end_idx]
-            yield input_data[batch_indices].flatten(), output_data[
-                batch_indices
-            ].flatten()
-
-    def process_data(self) -> dict:
-        """Process time series"""
-        # Initialization
-        utils = Utils()
-
-        # Load data
-        x = self.load_data_from_csv(self.x_file)
-        date_time = self.load_data_from_csv(self.date_time_file)
-        # choose target column
-        if self.ts_idx is not None:
-            x = x[:, self.ts_idx : self.ts_idx + 1]
-            date_time = date_time[:, self.ts_idx : self.ts_idx + 1]
-
-            # TODO: remove padded nan rows
-            last_valid_idx = np.where(~np.isnan(x))[0][-1]
-            x = x[: last_valid_idx + 1]
-            date_time = date_time[: last_valid_idx + 1]
-
-        # # check if len of x is sufficient
-        # min_len = self.input_seq_len + self.output_seq_len
-        # try:
-        #     assert len(x) >= min_len
-        # except AssertionError:
-        #     raise ValueError(
-        #         f"Time series {self.ts_idx} is too short. It should be at least {min_len} long."
-        #     )
-
-        # Add time covariates
-        if self.time_covariates is not None:
-            date_time = np.array(date_time, dtype="datetime64")
-            for time_cov in self.time_covariates:
-                if time_cov == "hour_of_day":
-                    hour_of_day = date_time.astype("datetime64[h]").astype(int) % 24
-                    x = np.concatenate((x, hour_of_day), axis=1)
-                elif time_cov == "day_of_week":
-                    day_of_week = date_time.astype("datetime64[D]").astype(int) % 7
-                    x = np.concatenate((x, day_of_week), axis=1)
-                elif time_cov == "week_of_year":
-                    week_of_year = (
-                        date_time.astype("datetime64[W]").astype(int) % 52 + 1
-                    )
-                    x = np.concatenate((x, week_of_year), axis=1)
-                elif time_cov == "month_of_year":
-                    month_of_year = (
-                        date_time.astype("datetime64[M]").astype(int) % 12 + 1
-                    )
-                    x = np.concatenate((x, month_of_year), axis=1)
-                elif time_cov == "quarter_of_year":
-                    month_of_year = (
-                        date_time.astype("datetime64[M]").astype(int) % 12 + 1
-                    )
-                    quarter_of_year = (month_of_year - 1) // 3 + 1
-                    x = np.concatenate((x, quarter_of_year), axis=1)
-
-        # standardize covariates
-        if self.scale_covariates:
-            # Compute means and stds for covariates if missing
-            if self.covariate_means is None or self.covariate_stds is None:
-                self.covariate_means = np.nanmean(x, axis=0)
-                self.covariate_stds = np.nanstd(x, axis=0)
-            # Avoid division by zero for any zero std entries
-            cov_idx = slice(1, self.num_features)
-            stds = self.covariate_stds[cov_idx]
-            stds = np.where(stds == 0.0, 1.0, stds)
-            # Standardize all covariate columns at once
-            x[:, cov_idx] = (x[:, cov_idx] - self.covariate_means[cov_idx]) / stds
-
-        # scale the observations using time series dependent scaling factors
-        if self.scale_method:
-            mode = self.scale_method.strip().lower()
-
-            # --- deepAR scaling ---
-            if mode == "deepar":
-                if self.scale_i is None:
-                    # deepAR often uses mean absolute value; here we add 1 to avoid zero‐division
-                    self.scale_i = 1.0 + np.nanmean(x[:, 0])
-                x[:, 0] /= self.scale_i
-
-            # --- standard z‑score scaling ---
-            elif mode == "standard":
-                # recompute if either is missing
-                if self.x_mean is None or self.x_std is None:
-                    self.x_mean, self.x_std = Normalizer.compute_mean_std(x[:, 0])
-                x[:, 0] = Normalizer.standardize(
-                    data=x[:, 0], mu=self.x_mean, std=self.x_std
-                )
-
-        # Create rolling windows
-        x_rolled, y_rolled = utils.create_rolling_window(
-            data=x,
-            output_col=self.output_col,
-            input_seq_len=self.input_seq_len,
-            output_seq_len=self.output_seq_len,
-            num_features=self.num_features,
-            stride=self.stride,
-        )
-
-        # remove time covariates, only keep the time cov at the last time step
-        if self.keep_last_time_cov:
-            x_rolled = self.remove_time_cov(x_rolled)
-
-        # Create embedding for time series index
-        if self.embedding_dim is not None or self.embedding is not None:
-            if self.embedding_dim is not None and self.embedding is None:
-                self.embedding = np.full((self.embedding_dim,), self.ts_idx)
-            if self.embed_at_end:
-                # TODO: add embedding at the end of the sequence
-                x_rolled = np.concatenate(
-                    [
-                        x_rolled,
-                        np.tile(self.embedding, (x_rolled.shape[0], 1)),
-                    ],
-                    axis=1,
-                )
-            else:
-                x_rolled = self.roll_embedding(x_rolled, self.embedding)
-
-        # Dataloader
-        dataset = {}
-        dataset["value"] = (x_rolled, y_rolled)
-
-        # NOTE: Datetime is saved for the visualization purpose
-        dataset["date_time"] = [np.datetime64(date) for date in np.squeeze(date_time)]
-
-        # store weights for weighted sampling. Default is uniform sampling
-        if self.scale_method == "deepAR":
-            dataset["weights"] = self.scale_i * np.ones(x_rolled.shape[0])
-
-        return dataset
-
-    def roll_embedding(self, x_rolled: np.ndarray, embedding: np.ndarray) -> np.ndarray:
-        # Assuming embedding is a 1D vector; if not, adjust accordingly
-        emb_dim = embedding.shape[0] if embedding.ndim == 1 else embedding.shape[1]
-
-        # Reshape the rolled data into a (num_data, seq_len, features) array.
-        x_rolled_reshaped = x_rolled.reshape(
-            x_rolled.shape[0], self.input_seq_len, self.num_features
-        )
-
-        # Reshape and broadcast the embedding vector to match the sequence length.
-        embedding_vector = embedding.reshape(1, 1, -1)
-        embedding_broadcasted = np.broadcast_to(
-            embedding_vector, (x_rolled.shape[0], self.input_seq_len, emb_dim)
-        )
-
-        # Concatenate the original features and the embedding along the last dimension.
-        concatenated = np.concatenate(
-            [x_rolled_reshaped, embedding_broadcasted], axis=2
-        )
-
-        # Reshape back to a 2D array with shape (x_rolled.shape[0], self.input_seq_len * (features + emb_dim)).
-        new_x_rolled = concatenated.reshape(
-            x_rolled.shape[0], self.input_seq_len * (self.num_features + emb_dim)
-        )
-
-        return new_x_rolled.astype(np.float32)
-
-    def remove_time_cov(self, x):
-        x_new = np.zeros(
-            (len(x), self.input_seq_len + self.num_features - 1),
-            dtype=np.float32,
-        )
-        for i in range(0, len(x)):
-            x_ = x[i]
-            keep_idx = np.arange(0, len(x_), self.num_features)
-            x_new[i] = np.concatenate((x_[keep_idx], x_[-self.num_features + 1 :]))
-        return x_new
-
-    def create_data_loader(
-        self,
-        batch_size: int,
-        shuffle: bool = True,
-        weighted_sampling: bool = False,
-        weights: Optional[np.ndarray] = None,
-        num_samples: Optional[int] = None,
-    ):
-        return self.batch_generator(
-            *self.dataset["value"],
-            batch_size,
-            shuffle,
-            weights,
-            num_samples,
-        )
-
-
-import numpy as np
-import pandas as pd
-from typing import Generator, Tuple, Optional, List, Dict
-
-
-class GlobalTimeSeriesDataloaderV2:
     """
     Multi-TS dataloader with configurable ordering of (x, y) windows.
 
@@ -856,7 +561,6 @@ class GlobalTimeSeriesDataloaderV2:
         - "by_window": Take window #0 from ts0, ts1, ..., tsN-1; then window #1 from ts0, ts1, ..., tsN-1; etc.
                        (Preserves CSV series order; this is the default.)
         - "by_series": All windows of ts0, then all windows of ts1, ..., tsN-1.
-        - "interleave": Round-robin across series (your original behavior).
     """
 
     def __init__(
@@ -866,28 +570,21 @@ class GlobalTimeSeriesDataloaderV2:
         output_col: np.ndarray,
         input_seq_len: int,
         output_seq_len: int,
-        num_features: int,  # target + covariates count expected *before* embeddings
+        num_features: int,  # target + covariates count expected (no embeddings)
         stride: int,
         scale_method: Optional[str] = None,  # 'standard' | 'deepAR' | None
         x_mean: Optional[List[float]] = None,
         x_std: Optional[List[float]] = None,
-        scale_covariates: bool = False,
+        scale_covariates: bool = True,  # Can set False for debugging purposes
         covariate_means: Optional[np.ndarray] = None,
         covariate_stds: Optional[np.ndarray] = None,
         time_covariates: Optional[
             List[str]
         ] = None,  # e.g. ["hour_of_day", "day_of_week"]
         keep_last_time_cov: bool = True,
-        embedding_dim: Optional[
-            int
-        ] = None,  # if provided without `embedding`, will create an index vector
-        embedding: Optional[
-            np.ndarray
-        ] = None,  # shape (n_ts, emb_dim) or (emb_dim,) broadcast
-        embed_at_end: bool = False,  # if True, append embedding after the rolled time steps
         min_len_guard: bool = False,  # skip series shorter than in+out, instead of raising
-        order_mode: str = "by_window",  # "by_window" | "by_series" | "interleave"
-        random_seed: Optional[int] = None,
+        order_mode: str = "by_window",  # "by_window" | "by_series"
+        random_seed: Optional[int] = None,  # Needed to allow for same shuffled batches
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -906,9 +603,6 @@ class GlobalTimeSeriesDataloaderV2:
         self.covariate_means = covariate_means
         self.covariate_stds = covariate_stds
 
-        self.embedding_dim = embedding_dim
-        self.embedding = embedding
-        self.embed_at_end = embed_at_end
         self.min_len_guard = min_len_guard
 
         self.order_mode = order_mode
@@ -921,18 +615,17 @@ class GlobalTimeSeriesDataloaderV2:
     def load_data_from_csv(data_file: str) -> np.ndarray:
         """Load CSV -> 2D numpy (T, N). Skips the first row (header)."""
         df = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
-        # df = df.iloc[:, :5] #TODO remove when done with debugging
         return df.values
 
     def create_data_loader(
         self,
         batch_size: int,
         shuffle: bool = False,  # default False to preserve defined ordering
-        weighted_sampling: bool = False,
+        weighted_sampling: bool = False,  # allows to sample batches depending on assigned weights
         weights: Optional[np.ndarray] = None,
         num_samples: Optional[int] = None,
         include_ids: bool = False,
-        shuffle_series_blocks: bool = False,
+        shuffle_series_blocks: bool = False,  # Will shuffle while respecting series blocks
     ) -> Generator[Tuple[np.ndarray, ...], None, None]:
         x_rolled, y_rolled = self.dataset["value"]
         series_id = self.dataset.get("series_id", None)
@@ -955,6 +648,7 @@ class GlobalTimeSeriesDataloaderV2:
         else:
             chosen = indices
 
+        # Code block to shuffle order of series per window
         if (
             self.order_mode == "by_window"
             and not shuffle
@@ -966,13 +660,18 @@ class GlobalTimeSeriesDataloaderV2:
             and shuffle_series_blocks
         ):
             boundaries = np.flatnonzero(np.diff(window_id)) + 1
-            segments = np.split(indices.copy(), boundaries) if boundaries.size else [indices.copy()]
+            segments = (
+                np.split(indices.copy(), boundaries)
+                if boundaries.size
+                else [indices.copy()]
+            )
             for segment in segments:
                 if segment.size > 1:
                     self._rng.shuffle(segment)
             indices = np.concatenate(segments)
             chosen = indices
 
+        # Code block to shuffle order of series
         if (
             batch_size == 1
             and self.order_mode == "by_series"
@@ -1015,16 +714,12 @@ class GlobalTimeSeriesDataloaderV2:
         ), "Values CSV and datetime CSV must have identical shapes (T, N)."
 
         T, N = X_all.shape  # T is time steps, N is number of series
-        n_ts = N
-
-        # Build embeddings per series (if requested)
-        emb_mat = self._prepare_embeddings(n_ts)
 
         # Precompute covariates per series; also collect to compute global cov stats if needed
         per_ts_series = []
         cov_collect = []  # for global cov means/stds if scale_covariates is True
 
-        for j in range(n_ts):
+        for j in range(N):
             xj, dtj = X_all[:, j], DT_all[:, j]
             xj, dtj = self._trim_trailing_nans(
                 xj, dtj
@@ -1079,7 +774,7 @@ class GlobalTimeSeriesDataloaderV2:
                 self.x_mean = per_means
                 self.x_std = per_stds
 
-        # Roll per series (with scaling, cov scaling, embedding packing)
+        # Roll per series (with scaling, cov scaling)
         rolled_per_ts = []
         scale_is_per_window = []  # deepAR weights, aligned later
         for j, s in enumerate(per_ts_series):
@@ -1119,20 +814,9 @@ class GlobalTimeSeriesDataloaderV2:
                 stride=self.stride,
             )
 
-            # Optionally keep only last-step covariates
+            # Optionally keep only last-step covariates (depends on lstm definition)
             if self.keep_last_time_cov and Xj.shape[1] > 1:
                 xw = self._keep_last_cov_only(xw, Xj.shape[1])
-
-            # Add embeddings
-            if emb_mat is not None:
-                ej = emb_mat[j]
-                xw = self._append_embedding_to_windows(
-                    xw,
-                    emb_vec=ej,
-                    input_seq_len=self.input_seq_len,
-                    feat_count=(Xj.shape[1]),
-                    embed_at_end=self.embed_at_end,
-                )
 
             rolled_per_ts.append((xw.astype(np.float32), yw.astype(np.float32)))
 
@@ -1151,10 +835,6 @@ class GlobalTimeSeriesDataloaderV2:
             )
         elif self.order_mode == "by_series":
             X, Y, W, S, K = self._order_by_series(rolled_per_ts, scale_is_per_window)
-        elif self.order_mode == "interleave":
-            X, Y, W, S, K = self._interleave_round_robin(
-                rolled_per_ts, scale_is_per_window
-            )
         else:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
 
@@ -1277,115 +957,7 @@ class GlobalTimeSeriesDataloaderV2:
         out[:, L:] = last_cov
         return out
 
-    @staticmethod
-    def _append_embedding_to_windows(
-        xw: np.ndarray,
-        emb_vec: np.ndarray,
-        input_seq_len: int,
-        feat_count: int,
-        embed_at_end: bool,
-    ) -> np.ndarray:
-        """
-        Append embedding either:
-          - per step across the window (if embed_at_end=False), or
-          - as a tail block (if embed_at_end=True).
-        """
-        emb_vec = np.asarray(emb_vec, dtype=np.float32).reshape(-1)
-        emb_dim = emb_vec.shape[0]
-
-        if embed_at_end:
-            # xw: (Nw, L*F)  -> concat (Nw, emb_dim)
-            emb_block = np.tile(emb_vec, (xw.shape[0], 1))
-            return np.concatenate([xw, emb_block], axis=1).astype(np.float32)
-
-        # else: repeat at each time step
-        Nw = xw.shape[0]
-        seq = xw.reshape(Nw, input_seq_len, feat_count)
-        emb_rep = np.tile(emb_vec.reshape(1, 1, emb_dim), (Nw, input_seq_len, 1))
-        seq_cat = np.concatenate([seq, emb_rep], axis=2)
-        return seq_cat.reshape(Nw, input_seq_len * (feat_count + emb_dim)).astype(
-            np.float32
-        )
-
-    def _prepare_embeddings(self, n_ts: int) -> Optional[np.ndarray]:
-        """
-        Returns matrix of shape (n_ts, emb_dim) or None.
-        - If self.embedding is provided as (n_ts, D): use it
-        - If provided as (D,): broadcast to all series
-        - If not provided but embedding_dim is set: create a vector filled with the series index j
-        """
-        if self.embedding is None and self.embedding_dim is None:
-            return None
-
-        if self.embedding is not None:
-            emb = np.asarray(self.embedding, dtype=np.float32)
-            if emb.ndim == 1:
-                emb = np.tile(emb.reshape(1, -1), (n_ts, 1))
-            else:
-                assert (
-                    emb.shape[0] == n_ts
-                ), "Embedding matrix must have shape (n_ts, emb_dim)."
-            return emb
-
-        # create simple index-based embeddings
-        D = int(self.embedding_dim)
-        out = np.zeros((n_ts, D), dtype=np.float32)
-        for j in range(n_ts):
-            out[j, :] = float(j)
-        return out
-
     # Ordering helpers
-    @staticmethod
-    def _interleave_round_robin(
-        rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
-        per_ts_deepar_weights: List[Optional[np.ndarray]],
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray]:
-        n_ts = len(rolled_per_ts)
-        counts = [len(yw) for (_, yw) in rolled_per_ts]
-        if max(counts, default=0) == 0:
-            return (
-                np.empty((0, 0), dtype=np.float32),
-                np.empty((0, 0), dtype=np.float32),
-                None,
-                np.empty((0,), dtype=np.int32),  # series_id
-                np.empty((0,), dtype=np.int32),  # window_id
-            )
-
-        sample_x = next((x for (x, y) in rolled_per_ts if len(y) > 0), None)
-        sample_y = next((y for (x, y) in rolled_per_ts if len(y) > 0), None)
-        feat_x = sample_x.shape[1]
-        feat_y = sample_y.shape[1]
-
-        total = sum(counts)
-        X = np.zeros((total, feat_x), dtype=np.float32)
-        Y = np.zeros((total, feat_y), dtype=np.float32)
-        S = np.zeros((total,), dtype=np.int32)  # series_id
-        K = np.zeros((total,), dtype=np.int32)  # window_id
-        W = (
-            np.zeros((total,), dtype=np.float32)
-            if any(w is not None for w in per_ts_deepar_weights)
-            else None
-        )
-
-        write = 0
-        max_k = max(counts)
-        for k in range(max_k):
-            for j in range(n_ts):
-                xj, yj = rolled_per_ts[j]
-                if k < len(yj):
-                    X[write] = xj[k]
-                    Y[write] = yj[k]
-                    S[write] = j
-                    K[write] = k
-                    if W is not None and per_ts_deepar_weights[j] is not None:
-                        W[write] = per_ts_deepar_weights[j][k]
-                    write += 1
-
-        S, K = S[:write], K[:write]
-        if W is not None:
-            return X[:write], Y[:write], W[:write], S, K
-        return X[:write], Y[:write], None, S, K
-
     @staticmethod
     def _order_by_window_index(
         rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
