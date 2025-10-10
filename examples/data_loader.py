@@ -722,9 +722,9 @@ class GlobalTimeSeriesDataloader:
         for j in range(N):
             xj, dtj = X_all[:, j], DT_all[:, j]
             # TODO: debug this
-            # xj, dtj = self._trim_trailing_nans(
-            #     xj, dtj
-            # )  # needed for some series that are shorter than T
+            xj, dtj = self._trim_trailing_nans(
+                xj, dtj
+            )  # needed for some series that are shorter than T
 
             # Build [target, covs...]
             covs = self._time_covariates_from_datetime_column(dtj)

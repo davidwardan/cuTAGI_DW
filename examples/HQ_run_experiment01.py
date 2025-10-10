@@ -203,25 +203,152 @@ def update_look_back_buffer(
     return look_back_buffer
 
 
+# TODO: this needs to handle batches update where y is not nan for some samples and for other return pred
 def calculate_gaussian_posterior(m_pred, v_pred, y, var_obs):
-    if not np.isnan(y).any():
-        # Ensure variances are non-negative and add a small epsilon to prevent division by zero
-        K = v_pred / (v_pred + var_obs)  # Kalman gain
-        m_post = m_pred + K * (y - m_pred)  # posterior mean
-        v_post = (1.0 - K) * v_pred  # posterior variance
 
-        # nan or inf reutn pred
-        if (
-            np.isnan(m_post).any()
-            or np.isnan(v_post).any()
-            or np.isinf(m_post).any()
-            or np.isinf(v_post).any()
-        ):
-            return m_pred, v_pred
-        else:
-            return m_post.astype(np.float32), v_post.astype(np.float32)
+    # get the indices where y is nan
+    nan_indices = np.isnan(y)
+    y = np.where(nan_indices, m_pred, y)
+    var_obs = np.where(nan_indices, 0.0, var_obs)
+
+    # kalman update
+    K = v_pred / (v_pred + var_obs)  # Kalman gain
+    m_post = m_pred + K * (y - m_pred)  # posterior mean
+    v_post = (1.0 - K) * v_pred  # posterior variance
+
+    return m_post.astype(np.float32), v_post.astype(np.float32)
+
+
+def batch_get_lstm_states(ts_ids, net, lstm_states):
+    """Capture the current LSTM states for each series id in the batch.
+
+    Aggregates the hidden and cell state means/variances returned by
+    ``net.get_lstm_states()`` and stores the slice relevant to every series id
+    in ``ts_ids`` inside the ``lstm_states`` cache.
+    """
+    states = net.get_lstm_states()
+    batch_size = len(ts_ids)
+    if states and batch_size > 0:
+        per_layer_states = {}
+        for layer_idx, layer_state in states.items():
+            mu_h, var_h, mu_c, var_c = (list(arr) for arr in layer_state)
+            total = len(mu_h)
+            chunk, rem = divmod(total, batch_size) if batch_size else (total, 0)
+            per_layer_states[layer_idx] = (
+                mu_h,
+                var_h,
+                mu_c,
+                var_c,
+                chunk if rem == 0 else 0,
+            )
+
+        for batch_pos, sid_val in enumerate(ts_ids):
+            series_idx = int(sid_val)
+            series_states = {}
+            for layer_idx, (
+                mu_h,
+                var_h,
+                mu_c,
+                var_c,
+                chunk,
+            ) in per_layer_states.items():
+                if chunk > 0 and batch_size > 1:
+                    start = batch_pos * chunk
+                    end = start + chunk
+                    series_states[layer_idx] = (
+                        mu_h[start:end],
+                        var_h[start:end],
+                        mu_c[start:end],
+                        var_c[start:end],
+                    )
+                else:
+                    series_states[layer_idx] = (
+                        mu_h.copy(),
+                        var_h.copy(),
+                        mu_c.copy(),
+                        var_c.copy(),
+                    )
+            lstm_states[series_idx] = series_states
+
+    return lstm_states
+
+
+def batch_set_lstm_states(ts_ids, net, lstm_states):
+    """Restore cached LSTM states for the provided series ids onto the network."""
+    # TODO: not the best way to reset states, but works for now
+    try:
+        net.reset_lstm_states()
+    except:
+        pass
+    ts_indices = [int(sid) for sid in ts_ids]
+    base_states = net.get_lstm_states()
+
+    if isinstance(lstm_states, dict):
+        cached_states = {idx: lstm_states.get(idx) for idx in ts_indices}
     else:
-        return m_pred, v_pred
+        cached_states = {}
+        lstm_len = len(lstm_states) if hasattr(lstm_states, "__len__") else 0
+        for idx in ts_indices:
+            cached_states[idx] = lstm_states[idx] if 0 <= idx < lstm_len else None
+
+    batch_size = len(ts_indices)
+    merged_states: dict[
+        int, tuple[list[float], list[float], list[float], list[float]]
+    ] = {}
+
+    for layer_idx, layer_state in base_states.items():
+        base_mu_h, base_var_h, base_mu_c, base_var_c = (
+            list(arr) for arr in layer_state
+        )
+        total = len(base_mu_h)
+        if total == 0:
+            merged_states[layer_idx] = (
+                base_mu_h,
+                base_var_h,
+                base_mu_c,
+                base_var_c,
+            )
+            continue
+
+        for batch_pos, series_idx in enumerate(ts_indices):
+            stored_state = cached_states.get(series_idx)
+            if not stored_state:
+                continue
+            if isinstance(stored_state, dict):
+                series_layer_state = stored_state.get(layer_idx)
+            else:
+                try:
+                    series_layer_state = stored_state[layer_idx]
+                except (IndexError, KeyError, TypeError):
+                    series_layer_state = None
+            if not series_layer_state:
+                continue
+
+            mu_h, var_h, mu_c, var_c = series_layer_state
+            state_len = len(mu_h)
+            if batch_size > 1 and state_len and state_len * batch_size == total:
+                start = batch_pos * state_len
+                end = start + state_len
+                base_mu_h[start:end] = mu_h
+                base_var_h[start:end] = var_h
+                base_mu_c[start:end] = mu_c
+                base_var_c[start:end] = var_c
+            else:
+                base_mu_h = list(mu_h)
+                base_var_h = list(var_h)
+                base_mu_c = list(mu_c)
+                base_var_c = list(var_c)
+                break
+
+        merged_states[layer_idx] = (
+            base_mu_h,
+            base_var_h,
+            base_mu_c,
+            base_var_c,
+        )
+
+    if merged_states:
+        net.set_lstm_states(merged_states)
 
 
 def local_model_run(
@@ -730,7 +857,6 @@ def global_model_run(
         keep_last_time_cov=True,
         scale_method="standard",
         order_mode="by_window",
-        random_seed=seed,  # defined for reproducibility of series shuffling
     )
 
     # Use the same scaling for validation/test
@@ -754,7 +880,7 @@ def global_model_run(
         x_std=global_std,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
-        order_mode="by_series",
+        order_mode="by_window",
     )
 
     # --- Define Model ---
@@ -765,10 +891,8 @@ def global_model_run(
         Linear(40, 2),
         EvenExp(),
     )
-    if batch_size > 1:
-        net.set_threads(8)
-    else:
-        net.set_threads(1)
+
+    net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
     # optimal states placeholders
@@ -793,46 +917,34 @@ def global_model_run(
             batch_size=batch_size,
             shuffle=False,  # full shuffle
             include_ids=True,
-            shuffle_series_blocks=True,  # ordered shuffle
+            # shuffle_series_blocks=True,  # ordered shuffle
         )
 
         # define the lookback buffer for recursive prediction
         look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
         look_back_buffer_var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
-        lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
-        ts_i = -1  # used to track changes in series for by_series mode
+        lstm_states = [None for _ in range(nb_ts)]
 
         for x, y, ts_id, _ in batch_iter:
 
-            ts_idx = ts_id.item()
             B = int(len(ts_id))  # current batch size
+            ts_ids = np.asarray(ts_id, dtype=np.int64).reshape(-1)
 
-            # what to do with LSTM states depends on order_mode and batch size
-            # TODO: need to update this to handle batches
-            if train_dtl.order_mode == "by_series":
-                if B == 1 and ts_idx != ts_i and epoch != 0:
-                    net.reset_lstm_states()
-                ts_i = ts_idx
-            elif train_dtl.order_mode == "by_window":
-                if lstm_states[ts_idx] is None and epoch != 0:
-                    net.reset_lstm_states()
-                elif lstm_states[ts_idx] is not None:
-                    net.set_lstm_states(lstm_states[ts_idx])
-
-            else:
-                net.reset_lstm_states()
-                print("Warning: LSTM states reset for each batch.")
+            # set/reset LSTM states for the current batch
+            batch_set_lstm_states(ts_ids, net, lstm_states)
 
             x = np.nan_to_num(x, nan=0.0)  # clean input from nans
             x_var = np.zeros_like(x)  # takes care of covariates
             y = np.concatenate(y, axis=0).astype(np.float32)  # shape (B,)
 
             # initialize look back buffer if first step for any series in batch
-            if np.isnan(look_back_buffer_mu[ts_id]).all():
-                look_back_buffer_mu[ts_id] = x[:, :input_seq_len]
-            else:
-                x[:, :input_seq_len] = look_back_buffer_mu[
-                    ts_id
+            ts_buffer = look_back_buffer_mu[ts_ids]
+            needs_init = np.isnan(ts_buffer).all(axis=1)
+            if np.any(needs_init):
+                look_back_buffer_mu[ts_ids[needs_init]] = x[needs_init, :input_seq_len]
+            if np.any(~needs_init):
+                x[~needs_init, :input_seq_len] = look_back_buffer_mu[
+                    ts_ids[~needs_init]
                 ]  # update input sequence
 
             # always update the var buffer (no nans)
@@ -854,59 +966,6 @@ def global_model_run(
             v_pred = flat_v[::2]  # even indices
             var_obs = flat_m[1::2]  # odd indices var_v
 
-            # debug for nans
-            printed = False
-            if np.isinf(v_pred).any() or np.isnan(v_pred).any():
-                print("nan/inf in v_pred")
-                print("var_obs: ", var_obs)
-                print("v_pred: ", v_pred)
-                printed = True
-            if np.isinf(var_obs).any() or np.isnan(var_obs).any():
-                print("nan/inf in var_obs")
-                print("var_obs: ", var_obs)
-                print("v_pred: ", v_pred)
-                printed = True
-            if printed:
-                param = net.state_dict()
-                for k, v in param.items():
-                    if any(np.isnan(np.array(v_item)).any() for v_item in v):
-                        print(f"nan in param: {k}")
-                # plot look back with y
-                import matplotlib.pyplot as plt
-                current_look_back_mu = look_back_buffer_mu[ts_id]
-                current_look_back_std = np.sqrt(look_back_buffer_var[ts_id])
-                for b in range(B):
-                    sid = int(ts_id[b])
-                    plt.figure(figsize=(10, 5))
-                    plt.plot(
-                        np.arange(input_seq_len),
-                        current_look_back_mu[b],
-                        label="look_back_mu",
-                    )
-                    plt.fill_between(
-                        np.arange(input_seq_len),
-                        current_look_back_mu[b] - 1 * current_look_back_std[b],
-                        current_look_back_mu[b] + 1 * current_look_back_std[b],
-                        color="gray",
-                        alpha=0.5,
-                        label="look_back_+-std",
-                    )
-                    plt.scatter(
-                        input_seq_len,
-                        y[b],
-                        color="red",
-                        label="y",
-                        zorder=5,
-                    )
-                    plt.title(f"Series {sid} | Batch idx {b}")
-                    plt.xlabel("Time step")
-                    plt.ylabel("Value")
-                    plt.legend()
-                    plt.show()
-
-
-                raise ValueError("nan/inf detected.")
-
             # Update output layer
             out_updater.update_heteros(
                 output_states=net.output_z_buffer,
@@ -919,8 +978,7 @@ def global_model_run(
             net.step()
 
             # store lstm states
-            # TODO: update to handle batches
-            lstm_states[ts_idx] = net.get_lstm_states()
+            lstm_states = batch_get_lstm_states(ts_ids, net, lstm_states)
 
             m_prior = m_pred.copy()
             std_prior = np.sqrt(v_pred + var_obs)
@@ -944,7 +1002,7 @@ def global_model_run(
             look_back_buffer_var = update_look_back_buffer(
                 look_back_buffer_var,
                 ts_idx=ts_id,
-                m_pred=v_pred + var_obs,
+                m_pred=v_pred,
             )
 
         # get train metrics
@@ -997,11 +1055,11 @@ def global_model_run(
         # One-step recursive prediction over the validation stream
         for x, y, ts_id, _ in val_batch_iter:
 
-            # set LSTM states
-            net.set_lstm_states(lstm_states[ts_id.item()])
+            B = int(len(ts_id))  # current batch size
+            ts_ids = np.asarray(ts_id, dtype=np.int64).reshape(-1)
 
-            ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))  # shape: (B,)
-            B = int(len(ts_idx))  # current batch size
+            # set LSTM states for the current batch
+            batch_set_lstm_states(ts_ids, net, lstm_states)
 
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0)
@@ -1035,7 +1093,7 @@ def global_model_run(
             std_prior = np.sqrt(v_pred + var_obs)
 
             # store lstm states
-            lstm_states[ts_id.item()] = net.get_lstm_states()
+            lstm_states = batch_get_lstm_states(ts_ids, net, lstm_states)
 
             # get the posterior states
             m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
@@ -1056,7 +1114,7 @@ def global_model_run(
             look_back_buffer_val_var = update_look_back_buffer(
                 look_back_buffer_val_var,
                 ts_idx=ts_id,
-                m_pred=v_pred + var_obs,
+                m_pred=v_pred,
             )
 
         # get validation metrics
@@ -1354,7 +1412,7 @@ def embed_model_run(
     os.makedirs(out_dir, exist_ok=True)
 
     # Initialize embeddings
-    embedding_dim = 15
+    embedding_dim = 10
     embeddings = TimeSeriesEmbeddings(
         (nb_ts, embedding_dim),
         encoding_type="normal",
@@ -1387,7 +1445,6 @@ def embed_model_run(
         keep_last_time_cov=True,
         scale_method="standard",
         order_mode="by_window",
-        random_seed=seed,  # defined for reproducibility of series shuffling
     )
 
     # Use the same scaling for validation/test
@@ -1411,7 +1468,7 @@ def embed_model_run(
         x_std=global_std,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
-        order_mode="by_series",
+        order_mode="by_window",
     )
 
     # --- Define Model ---
@@ -1422,10 +1479,7 @@ def embed_model_run(
         Linear(40, 2),
         EvenExp(),
     )
-    if batch_size > 1:
-        net.set_threads(8)
-    else:
-        net.set_threads(1)
+    net.set_threads(8)
     out_updater = OutputUpdater(net.device)
 
     net.input_state_update = True  # enable input state updates for embeddings
@@ -1452,46 +1506,34 @@ def embed_model_run(
             batch_size=batch_size,
             shuffle=False,  # full shuffle
             include_ids=True,
-            shuffle_series_blocks=True,  # ordered shuffle
+            # shuffle_series_blocks=True,  # ordered shuffle
         )
 
         # define the lookback buffer for recursive prediction
         look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
         look_back_buffer_var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
-        lstm_states = [None] * nb_ts  # placeholder for LSTM states per series
-        ts_i = -1  # used to track changes in series for by_series mode
+        lstm_states = [None for _ in range(nb_ts)]
 
         for x, y, ts_id, _ in batch_iter:
 
-            ts_idx = ts_id.item()
             B = int(len(ts_id))  # current batch size
+            ts_ids = np.asarray(ts_id, dtype=np.int64).reshape(-1)
 
-            # what to do with LSTM states depends on order_mode and batch size
-            # TODO: need to update this to handle batches
-            if train_dtl.order_mode == "by_series":
-                if B == 1 and ts_idx != ts_i and epoch != 0:
-                    net.reset_lstm_states()
-                ts_i = ts_idx
-            elif train_dtl.order_mode == "by_window":
-                if lstm_states[ts_idx] is None and epoch != 0:
-                    net.reset_lstm_states()
-                elif lstm_states[ts_idx] is not None:
-                    net.set_lstm_states(lstm_states[ts_idx])
-
-            else:
-                net.reset_lstm_states()
-                print("Warning: LSTM states reset for each batch.")
+            # set/reset LSTM states for the current batch
+            batch_set_lstm_states(ts_ids, net, lstm_states)
 
             x = np.nan_to_num(x, nan=0.0)  # clean input from nans
             x_var = np.zeros_like(x)  # takes care of covariates
             y = np.concatenate(y, axis=0).astype(np.float32)  # shape (B,)
 
             # initialize look back buffer if first step for any series in batch
-            if np.isnan(look_back_buffer_mu[ts_id]).all():
-                look_back_buffer_mu[ts_id] = x[:, :input_seq_len]
-            else:
-                x[:, :input_seq_len] = look_back_buffer_mu[
-                    ts_id
+            ts_buffer = look_back_buffer_mu[ts_ids]
+            needs_init = np.isnan(ts_buffer).all(axis=1)
+            if np.any(needs_init):
+                look_back_buffer_mu[ts_ids[needs_init]] = x[needs_init, :input_seq_len]
+            if np.any(~needs_init):
+                x[~needs_init, :input_seq_len] = look_back_buffer_mu[
+                    ts_ids[~needs_init]
                 ]  # update input sequence
 
             # always update the var buffer (no nans)
@@ -1500,12 +1542,12 @@ def embed_model_run(
             ]  # update input sequence
 
             # append embeddings to each input in the batch
-            embed_mu, embed_var = embeddings(ts_idx)  # shape: (B, embedding_dim)
+            embed_mu, embed_var = embeddings(ts_id)  # shape: (B, embedding_dim)
             x = np.concatenate(
-                (x, embed_mu.reshape(1, -1)), axis=1
+                (x, embed_mu), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
             x_var = np.concatenate(
-                (x_var, embed_var.reshape(1, -1)), axis=1
+                (x_var, embed_var), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
 
             # flatten input for pytagi
@@ -1534,8 +1576,7 @@ def embed_model_run(
             net.step()
 
             # store posterior lstm states
-            # TODO: update to handle batches
-            lstm_states[ts_idx] = net.get_lstm_states()
+            lstm_states = batch_get_lstm_states(ts_ids, net, lstm_states)
 
             # store prior states
             m_prior = m_pred.copy()
@@ -1543,6 +1584,8 @@ def embed_model_run(
 
             # get the posterior states
             m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
+            #TODO: get posterior aleatoric uncertainty
+
 
             # get updates for embeddings
             mu_delta, var_delta = net.get_input_states()
@@ -1626,11 +1669,11 @@ def embed_model_run(
         # One-step recursive prediction over the validation stream
         for x, y, ts_id, _ in val_batch_iter:
 
-            # set LSTM states
-            net.set_lstm_states(lstm_states[ts_id.item()])
+            B = int(len(ts_id))  # current batch size
+            ts_ids = np.asarray(ts_id, dtype=np.int64).reshape(-1)
 
-            ts_idx = np.atleast_1d(np.asarray(ts_id, dtype=int))  # shape: (B,)
-            B = int(len(ts_idx))  # current batch size
+            # set LSTM states for the current batch
+            batch_set_lstm_states(ts_ids, net, lstm_states)
 
             # replace nans in x with zeros
             x = np.nan_to_num(x, nan=0.0)
@@ -1648,10 +1691,10 @@ def embed_model_run(
             # append embeddings to each input in the batch
             embed_mu, embed_var = embeddings(ts_id)  # shape: (B, embedding_dim)
             x = np.concatenate(
-                (x, embed_mu.reshape(1, -1)), axis=1
+                (x, embed_mu), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
             x_var = np.concatenate(
-                (x_var, embed_var.reshape(1, -1)), axis=1
+                (x_var, embed_var), axis=1
             )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
 
             # flatten input for pytagi
@@ -1673,10 +1716,11 @@ def embed_model_run(
             std_prior = np.sqrt(v_pred + var_obs)
 
             # store lstm states
-            lstm_states[ts_id.item()] = net.get_lstm_states()
+            lstm_states = batch_get_lstm_states(ts_ids, net, lstm_states)
 
             # get the posterior states
             m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
+            var_obs, _ = calculate_gaussian_posterior(var_obs, flat_v[1::2], y, var_obs)
 
             for b in range(B):
                 sid = int(ts_id[b])
@@ -1891,10 +1935,10 @@ def embed_model_run(
         # append embeddings to each input in the batch
         embed_mu, embed_var = embeddings(ts_id)  # shape: (B, embedding_dim)
         x = np.concatenate(
-            (x, embed_mu.reshape(1, -1)), axis=1
+            (x, embed_mu), axis=1
         )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
         x_var = np.concatenate(
-            (x_var, embed_var.reshape(1, -1)), axis=1
+            (x_var, embed_var), axis=1
         )  # shape: (B, input_seq_len + embedding_dim + num_features - 1)
 
         # flatten input for pytagi
@@ -2785,11 +2829,11 @@ def shared_model_run(
 def main(
     nb_ts=127,
     num_epochs=100,
-    batch_size=1,
+    batch_size=127,
     seed=1,
     early_stopping_criteria="log_lik",
     train_size="1.0",  # proportion of training data to use: "0.3", "0.4", "0.6", "0.8", "1.0"
-    experiments=None,
+    experiments=["embed"],
 ):
     """
     Main function to run all experiments on time series
