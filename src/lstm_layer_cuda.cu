@@ -835,7 +835,7 @@ void LSTMCuda::forward(BaseHiddenStates &input_states,
     output_states.block_size = batch_size;
     output_states.actual_size = this->output_size * this->seq_len;
 
-    if (this->seq_len == 1 && batch_size == 1) {
+    if (this->seq_len == 1) {
         cudaSetDevice(this->device_idx);
         cudaMemcpy(this->lstm_state.d_mu_h_prev, this->lstm_state.d_mu_h_prior,
                    this->lstm_state.num_states * sizeof(float),
@@ -916,7 +916,7 @@ void LSTMCuda::forward(BaseHiddenStates &input_states,
     }
 
     // Saved the previous hidden states
-    if (this->seq_len == 1 && batch_size == 1) {
+    if (this->seq_len == 1) {
         cudaMemcpy(this->lstm_state.d_mu_h_prior, cu_output_states->d_mu_a,
                    this->lstm_state.num_states * sizeof(float),
                    cudaMemcpyDeviceToDevice);
@@ -1007,7 +1007,7 @@ void LSTMCuda::backward(BaseDeltaStates &input_delta_states,
         }
     }
 
-    if (this->seq_len == 1 && batch_size == 1) {
+    if (this->seq_len == 1) {
         const unsigned int ps_grid_size =
             (this->lstm_state.num_states + this->num_cuda_threads - 1) /
             this->num_cuda_threads;
@@ -1081,17 +1081,6 @@ void LSTMCuda::d_set_LSTM_states(const std::vector<float> &mu_h,
                                  const std::vector<float> &var_h,
                                  const std::vector<float> &mu_c,
                                  const std::vector<float> &var_c) {
-    // Size check
-    if (mu_h.size() != lstm_state.num_states ||
-        var_h.size() != lstm_state.num_states ||
-        mu_c.size() != lstm_state.num_states ||
-        var_c.size() != lstm_state.num_states) {
-        std::cerr << "setLSTMStates() size mismatch. "
-                  << "Expected " << lstm_state.num_states << " states.\n";
-        return;
-    }
-
-    // Copy from host to device
     cudaMemcpy(lstm_state.d_mu_h_prior, mu_h.data(),
                lstm_state.num_states * sizeof(float), cudaMemcpyHostToDevice);
 

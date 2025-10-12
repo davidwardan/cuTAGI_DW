@@ -445,7 +445,8 @@ def local_model_run(
             Linear(40, 2),
             EvenExp(),
         )
-        net.set_threads(1)  # faster for batch size 1
+        net.to_device("cuda")
+        # net.set_threads(1)  # faster for batch size 1
         out_updater = OutputUpdater(net.device)
 
         # define placeholders for optimal states
@@ -892,7 +893,8 @@ def global_model_run(
         EvenExp(),
     )
 
-    net.set_threads(8)
+    # net.set_threads(8)
+    net.to_device("cuda")
     out_updater = OutputUpdater(net.device)
 
     # optimal states placeholders
@@ -1479,7 +1481,8 @@ def embed_model_run(
         Linear(40, 2),
         EvenExp(),
     )
-    net.set_threads(8)
+    # net.set_threads(8)
+    net.to_device("cuda")
     out_updater = OutputUpdater(net.device)
 
     net.input_state_update = True  # enable input state updates for embeddings
@@ -2833,7 +2836,7 @@ def main(
     seed=1,
     early_stopping_criteria="log_lik",
     train_size="1.0",  # proportion of training data to use: "0.3", "0.4", "0.6", "0.8", "1.0"
-    experiments=["embed"],
+    experiments=None,
 ):
     """
     Main function to run all experiments on time series
