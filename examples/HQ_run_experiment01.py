@@ -13,10 +13,10 @@ from examples.data_loader import (
     TimeSeriesDataloader,
     GlobalTimeSeriesDataloader,
 )
-from pytagi import manual_seed
+from pytagi import manual_seed, exponential_scheduler
 import pytagi.metric as metric
 from pytagi import Normalizer as normalizer
-from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
+from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp, LayerNorm
 
 import matplotlib as mpl
 
@@ -352,7 +352,13 @@ def batch_set_lstm_states(ts_ids, net, lstm_states):
 
 
 def local_model_run(
-    nb_ts, num_epochs, batch_size, seed, early_stopping_criteria, train_size
+    nb_ts,
+    num_epochs,
+    batch_size,
+    seed,
+    early_stopping_criteria,
+    train_size,
+    sigma_v_bounds,
 ):
     """ "
     Runs a seperate local model for each time series in the dataset
@@ -373,6 +379,12 @@ def local_model_run(
     ytestTr = np.full((horizon_cap, nb_ts), np.nan)
     val_start_indices = np.full(nb_ts, -1, dtype=np.int32)
     test_start_indices = np.full(nb_ts, -1, dtype=np.int32)
+
+    # check noise observation
+    if sigma_v_bounds[0] is None or sigma_v_bounds[1] is None:
+        use_AGVI = True
+    else:
+        use_AGVI = False
 
     # --- Load Data ---
     pbar = tqdm(ts_idx, desc="Loading Data Progress")
@@ -439,14 +451,22 @@ def local_model_run(
 
         # --- Define Model ---
         manual_seed(seed)
-        net = Sequential(
-            LSTM(num_features + input_seq_len - 1, 40, 1),
-            LSTM(40, 40, 1),
-            Linear(40, 2),
-            EvenExp(),
-        )
-        net.to_device("cuda")
-        # net.set_threads(1)  # faster for batch size 1
+        if use_AGVI:
+            net = Sequential(
+                LSTM(num_features + input_seq_len - 1, 40, 1),
+                LSTM(40, 40, 1),
+                Linear(40, 2),
+                EvenExp(),
+            )
+        else:
+            net = Sequential(
+                LSTM(num_features + input_seq_len - 1, 40, 1),
+                LSTM(40, 40, 1),
+                Linear(40, 1),
+            )
+            sigma_v = sigma_v_bounds[0]
+        # net.to_device("cuda")
+        net.set_threads(1)  # faster for batch size 1
         out_updater = OutputUpdater(net.device)
 
         # define placeholders for optimal states
@@ -473,6 +493,18 @@ def local_model_run(
 
             # define the batch iterator
             batch_iter = train_dtl.create_data_loader(batch_size, shuffle=False)
+
+            if not use_AGVI:
+                # Decaying observation's variance
+                sigma_v = exponential_scheduler(
+                    curr_v=sigma_v,
+                    min_v=sigma_v_bounds[1],
+                    decaying_factor=0.99,
+                    curr_iter=epoch,
+                )
+                var_obs = np.full(
+                    (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
+                )
 
             # define the lookback buffer for recursive prediction
             look_back_buffer_mu = np.full(input_seq_len, np.nan, dtype=np.float32)
@@ -503,19 +535,27 @@ def local_model_run(
                 # Feed forward
                 m_pred, v_pred = net(x, x_var)
 
-                flat_m = np.ravel(m_pred)
-                flat_v = np.ravel(v_pred)
+                if use_AGVI:
+                    flat_m = np.ravel(m_pred)
+                    flat_v = np.ravel(v_pred)
 
-                m_pred = flat_m[::2]  # even indices
-                v_pred = flat_v[::2]  # even indices
-                var_obs = flat_m[1::2]  # odd indices var_v
+                    m_pred = flat_m[::2]  # even indices
+                    v_pred = flat_v[::2]  # even indices
+                    var_obs = flat_m[1::2]  # odd indices var_v
 
-                # Update output layer
-                out_updater.update_heteros(
-                    output_states=net.output_z_buffer,
-                    mu_obs=y,
-                    delta_states=net.input_delta_z_buffer,
-                )
+                    # Update output layer
+                    out_updater.update_heteros(
+                        output_states=net.output_z_buffer,
+                        mu_obs=y,
+                        delta_states=net.input_delta_z_buffer,
+                    )
+                else:
+                    out_updater.update(
+                        output_states=net.output_z_buffer,
+                        mu_obs=y,
+                        var_obs=var_obs,
+                        delta_states=net.input_delta_z_buffer,
+                    )
 
                 # Feed backward
                 net.backward()
@@ -584,13 +624,14 @@ def local_model_run(
                 # Predicion
                 m_pred, v_pred = net(x, x_var)
 
-                flat_m = np.ravel(m_pred)
-                flat_v = np.ravel(v_pred)
+                if use_AGVI:
+                    flat_m = np.ravel(m_pred)
+                    flat_v = np.ravel(v_pred)
 
-                # get even positions corresponding to Z_out
-                m_pred = flat_m[::2]
-                v_pred = flat_v[::2]
-                var_obs = flat_m[1::2]  # odd indices var_v
+                    # get even positions corresponding to Z_out
+                    m_pred = flat_m[::2]
+                    v_pred = flat_v[::2]
+                    var_obs = flat_m[1::2]  # odd indices var_v
 
                 mu_preds_val.extend(m_pred)
                 std_preds_val.extend(np.sqrt(v_pred + var_obs))  # epistemic + aleatoric
@@ -633,7 +674,7 @@ def local_model_run(
 
             # Progress bar
             pbar.set_description(
-                f"Ts #{ts+1}/{nb_ts} | Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| lg_lik: {train_log_lik:>7.4f}| mse_val: {val_mse:>7.4f} | log_lk_val: {val_log_lik:>7.4f}",
+                f"Ts #{ts+1}/{nb_ts} | Epoch {epoch + 1}/{num_epochs}| mse: {train_mse:>7.4f}| lg_lik: {train_log_lik:>7.4f}| mse_val: {val_mse:>7.4f} | log_lk_val: {val_log_lik:>7.4f} | sigma_v: {sigma_v:>7.4f}",
                 refresh=True,
             )
 
@@ -740,13 +781,14 @@ def local_model_run(
             # Predicion
             m_pred, v_pred = net(x, x_var)
 
-            flat_m = np.ravel(m_pred)
-            flat_v = np.ravel(v_pred)
+            if use_AGVI:
+                flat_m = np.ravel(m_pred)
+                flat_v = np.ravel(v_pred)
 
-            # get even positions corresponding to Z_out
-            m_pred = flat_m[::2]
-            v_pred = flat_v[::2]
-            var_obs = flat_m[1::2]  # odd indices var_v
+                # get even positions corresponding to Z_out
+                m_pred = flat_m[::2]
+                v_pred = flat_v[::2]
+                var_obs = flat_m[1::2]  # odd indices var_v
 
             mu_preds_test.extend(m_pred)
             var_preds_test.extend(np.sqrt(v_pred + var_obs))
@@ -807,7 +849,13 @@ def local_model_run(
 
 
 def global_model_run(
-    nb_ts, num_epochs, batch_size, seed, early_stopping_criteria, train_size
+    nb_ts,
+    num_epochs,
+    batch_size,
+    seed,
+    early_stopping_criteria,
+    train_size,
+    sigma_v_bounds,
 ):
     """
     Run a single global model across ALL time series using the interleaved dataloader.
@@ -830,7 +878,7 @@ def global_model_run(
     epoch_optim = 0
     net_optim = []
     patience = 10  # epochs to wait for improvement before early stopping
-    min_epochs = 15  # minimum number of epochs before early stopping
+    min_epochs = 0  # minimum number of epochs before early stopping
     have_best = False
 
     # --- Output Directory ---
@@ -844,6 +892,12 @@ def global_model_run(
     ytestTr = np.full((horizon_cap, nb_ts), np.nan, dtype=np.float32)
     val_start_indices = np.full(nb_ts, -1, dtype=np.int32)
     test_start_indices = np.full(nb_ts, -1, dtype=np.int32)
+
+    # check noise observation
+    if sigma_v_bounds[0] is None or sigma_v_bounds[1] is None:
+        use_AGVI = True
+    else:
+        use_AGVI = False
 
     # Build TRAIN loader over ALL series
     train_dtl = GlobalTimeSeriesDataloader(
@@ -886,15 +940,23 @@ def global_model_run(
 
     # --- Define Model ---
     manual_seed(seed)
-    net = Sequential(
-        LSTM(input_seq_len + num_features - 1, 40, 1),
-        LSTM(40, 40, 1),
-        Linear(40, 2),
-        EvenExp(),
-    )
+    if use_AGVI:
+        net = Sequential(
+            LSTM(num_features + input_seq_len - 1, 40, 1),
+            LSTM(40, 40, 1),
+            Linear(40, 2),
+            EvenExp(),
+        )
+    else:
+        net = Sequential(
+            LSTM(num_features + input_seq_len - 1, 40, 1),
+            LSTM(40, 40, 1),
+            Linear(40, 1),
+        )
+        sigma_v = sigma_v_bounds[0]
 
-    # net.set_threads(8)
-    net.to_device("cuda")
+    net.set_threads(8)
+    # net.to_device("cuda")
     out_updater = OutputUpdater(net.device)
 
     # optimal states placeholders
@@ -922,6 +984,18 @@ def global_model_run(
             # shuffle_series_blocks=True,  # ordered shuffle
         )
 
+        if not use_AGVI:
+            # Decaying observation's variance
+            sigma_v = exponential_scheduler(
+                curr_v=sigma_v,
+                min_v=sigma_v_bounds[1],
+                decaying_factor=0.99,
+                curr_iter=epoch,
+            )
+            var_obs = np.full(
+                (batch_size * len(output_col),), sigma_v**2, dtype=np.float32
+            )
+
         # define the lookback buffer for recursive prediction
         look_back_buffer_mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
         look_back_buffer_var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
@@ -931,6 +1005,10 @@ def global_model_run(
 
             B = int(len(ts_id))  # current batch size
             ts_ids = np.asarray(ts_id, dtype=np.int64).reshape(-1)
+            if not use_AGVI:
+                var_obs = np.full(
+                    (B * len(output_col),), sigma_v**2, dtype=np.float32
+                )
 
             # set/reset LSTM states for the current batch
             batch_set_lstm_states(ts_ids, net, lstm_states)
@@ -961,19 +1039,27 @@ def global_model_run(
             # Forward
             m_pred, v_pred = net(flat_x, flat_var)
 
-            flat_m = np.ravel(m_pred)
-            flat_v = np.ravel(v_pred)
+            if use_AGVI:
+                flat_m = np.ravel(m_pred)
+                flat_v = np.ravel(v_pred)
 
-            m_pred = flat_m[::2]  # even indices
-            v_pred = flat_v[::2]  # even indices
-            var_obs = flat_m[1::2]  # odd indices var_v
+                m_pred = flat_m[::2]  # even indices
+                v_pred = flat_v[::2]  # even indices
+                var_obs = flat_m[1::2]  # odd indices var_v
 
-            # Update output layer
-            out_updater.update_heteros(
-                output_states=net.output_z_buffer,
-                mu_obs=y.flatten(),
-                delta_states=net.input_delta_z_buffer,
-            )
+                # Update output layer
+                out_updater.update_heteros(
+                    output_states=net.output_z_buffer,
+                    mu_obs=y.flatten(),
+                    delta_states=net.input_delta_z_buffer,
+                )
+            else:
+                out_updater.update(
+                    output_states=net.output_z_buffer,
+                    mu_obs=y,
+                    var_obs=var_obs,
+                    delta_states=net.input_delta_z_buffer,
+                )
 
             # Backward + step
             net.backward()
@@ -1004,7 +1090,7 @@ def global_model_run(
             look_back_buffer_var = update_look_back_buffer(
                 look_back_buffer_var,
                 ts_idx=ts_id,
-                m_pred=v_pred,
+                m_pred=v_pred + var_obs,
             )
 
         # get train metrics
@@ -1059,6 +1145,10 @@ def global_model_run(
 
             B = int(len(ts_id))  # current batch size
             ts_ids = np.asarray(ts_id, dtype=np.int64).reshape(-1)
+            if not use_AGVI:
+                var_obs = np.full(
+                    (B * len(output_col),), sigma_v**2, dtype=np.float32
+                )
 
             # set LSTM states for the current batch
             batch_set_lstm_states(ts_ids, net, lstm_states)
@@ -1083,12 +1173,13 @@ def global_model_run(
             # Predicion
             m_pred, v_pred = net(flat_x, flat_var)
 
-            flat_m = np.ravel(m_pred)
-            flat_v = np.ravel(v_pred)
+            if use_AGVI:
+                flat_m = np.ravel(m_pred)
+                flat_v = np.ravel(v_pred)
 
-            m_pred = flat_m[::2]  # even indices
-            v_pred = flat_v[::2]  # even indices
-            var_obs = flat_m[1::2]  # odd indices var_v
+                m_pred = flat_m[::2]  # even indices
+                v_pred = flat_v[::2]  # even indices
+                var_obs = flat_m[1::2]  # odd indices var_v
 
             # save prior states for plotting and metrics
             m_prior = m_pred.copy()
@@ -1116,7 +1207,7 @@ def global_model_run(
             look_back_buffer_val_var = update_look_back_buffer(
                 look_back_buffer_val_var,
                 ts_idx=ts_id,
-                m_pred=v_pred,
+                m_pred=v_pred + var_obs,
             )
 
         # get validation metrics
@@ -1289,9 +1380,16 @@ def global_model_run(
 
     for x, y, ts_id, _ in test_batch_iter:
 
+        if not use_AGVI:
+            B = int(len(ts_id))  # current batch size
+            var_obs = np.full(
+                (B * len(output_col),), sigma_v**2, dtype=np.float32
+            )
+
         ts_idx = ts_id.item()  # get the integer index of the time series
 
         # set LSTM states
+        net.reset_lstm_states()
         net.set_lstm_states(lstm_optim_states[ts_idx])
 
         x_var = np.zeros_like(x)  # takes care of covariates
@@ -1309,12 +1407,13 @@ def global_model_run(
         # Prediction
         m_pred, v_pred = net(flat_x, flat_var)
 
-        flat_m = np.ravel(m_pred)
-        flat_v = np.ravel(v_pred)
+        if use_AGVI:
+            flat_m = np.ravel(m_pred)
+            flat_v = np.ravel(v_pred)
 
-        m_pred = flat_m[::2]  # even indices
-        v_pred = flat_v[::2]  # even indices
-        var_obs = flat_m[1::2]  # odd indices var_v
+            m_pred = flat_m[::2]  # even indices
+            v_pred = flat_v[::2]  # even indices
+            var_obs = flat_m[1::2]  # odd indices var_v
 
         # store lstm states
         lstm_optim_states[ts_idx] = net.get_lstm_states()
@@ -1481,8 +1580,8 @@ def embed_model_run(
         Linear(40, 2),
         EvenExp(),
     )
-    # net.set_threads(8)
-    net.to_device("cuda")
+    net.set_threads(1)
+    # net.to_device("cuda")
     out_updater = OutputUpdater(net.device)
 
     net.input_state_update = True  # enable input state updates for embeddings
@@ -1587,8 +1686,7 @@ def embed_model_run(
 
             # get the posterior states
             m_pred, v_pred = calculate_gaussian_posterior(m_pred, v_pred, y, var_obs)
-            #TODO: get posterior aleatoric uncertainty
-
+            # TODO: get posterior aleatoric uncertainty
 
             # get updates for embeddings
             mu_delta, var_delta = net.get_input_states()
@@ -2026,6 +2124,7 @@ def embed_model_run(
     np.savetxt(out_dir + "/split_indices.csv", split_indices, fmt="%d", delimiter=",")
 
 
+# TODO: Update the shared embedding run
 def shared_model_run(
     nb_ts, num_epochs, batch_size, seed, early_stopping_criteria, train_size
 ):
@@ -2182,7 +2281,7 @@ def shared_model_run(
         x_std=global_std,
         covariate_means=covariate_means,
         covariate_stds=covariate_stds,
-        order_mode="by_series",
+        order_mode="by_window",
     )
 
     # --- Define Model ---
@@ -2832,10 +2931,11 @@ def shared_model_run(
 def main(
     nb_ts=127,
     num_epochs=100,
-    batch_size=127,
+    batch_size=20,
     seed=1,
     early_stopping_criteria="log_lik",
     train_size="1.0",  # proportion of training data to use: "0.3", "0.4", "0.6", "0.8", "1.0"
+    sigma_v_bounds=(None, None),  # observation noise bounds
     experiments=None,
 ):
     """
@@ -2887,6 +2987,7 @@ def main(
                 early_stopping_criteria=early_stopping_criteria,
                 batch_size=1,  # local model does not need batching
                 train_size=train_size,
+                sigma_v_bounds=sigma_v_bounds,
             )
         except Exception as e:
             print(f"Local model run failed: {e}")
@@ -2901,6 +3002,7 @@ def main(
                 seed,
                 early_stopping_criteria,
                 train_size,
+                sigma_v_bounds=sigma_v_bounds,
             )
         except Exception as e:
             print(f"Global model run failed: {e}")
@@ -2915,6 +3017,7 @@ def main(
                 seed,
                 early_stopping_criteria,
                 train_size,
+                sigma_v_bounds=sigma_v_bounds,
             )
         except Exception as e:
             print(f"Embed model run failed: {e}")
@@ -2929,6 +3032,7 @@ def main(
                 seed,
                 early_stopping_criteria,
                 train_size,
+                sigma_v_bounds=sigma_v_bounds,
             )
         except Exception as e:
             print(f"Shared model run failed: {e}")

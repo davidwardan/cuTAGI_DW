@@ -584,7 +584,10 @@ class GlobalTimeSeriesDataloader:
         keep_last_time_cov: bool = True,
         min_len_guard: bool = False,  # skip series shorter than in+out, instead of raising
         order_mode: str = "by_window",  # "by_window" | "by_series"
-        random_seed: Optional[int] = None,  # Needed to allow for same shuffled batches
+        seed: Optional[int] = None,  # Needed to allow for same shuffled batches
+        max_len: Optional[int] = None,  # Not implemented
+        True_output: Optional[np.ndarray] = None,  # For debugging purposes
+        ts_to_use: Optional[List[int]] = None,  # If only a subset of series is desired
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -606,7 +609,10 @@ class GlobalTimeSeriesDataloader:
         self.min_len_guard = min_len_guard
 
         self.order_mode = order_mode
-        self._rng = np.random.default_rng(random_seed)
+        self._rng = np.random.default_rng(seed)
+        self.max_len = max_len  # Not implemented
+        self.True_output = True_output  # For debugging purposes
+        self.ts_to_use = ts_to_use  # If only a subset of series is desired
 
         # processed outputs
         self.dataset = self._process_all()
@@ -616,6 +622,12 @@ class GlobalTimeSeriesDataloader:
         """Load CSV -> 2D numpy (T, N). Skips the first row (header)."""
         df = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
         return df.values
+
+    def sliced_data(self, df: np.ndarray) -> np.ndarray:
+        """If ts_to_use is provided, slice the data to only include those series."""
+        if self.ts_to_use is not None:
+            return df[:, self.ts_to_use]
+        return df
 
     def create_data_loader(
         self,
@@ -691,10 +703,40 @@ class GlobalTimeSeriesDataloader:
                 indices = np.concatenate([segments[i] for i in perm])
                 chosen = indices
 
-        total_batches = int(np.ceil(len(chosen) / batch_size))
+        if (
+            self.order_mode == "by_window"
+            and not shuffle
+            and not weighted_sampling
+            and num_samples is None
+            and window_id is not None
+            and len(window_id) == len(indices)
+        ):
+            win_seq = window_id[chosen]
+            boundaries = np.flatnonzero(np.diff(win_seq)) + 1
+            segments = (
+                np.split(chosen, boundaries) if boundaries.size else [chosen.copy()]
+            )
+            for segment in segments:
+                if segment.size == 0:
+                    continue
+                for start in range(0, segment.size, batch_size):
+                    sl = segment[start : start + batch_size]
+                    Xb = x_rolled[sl].reshape(len(sl), -1)
+                    Yb = y_rolled[sl].reshape(len(sl), -1)
+                    if include_ids and (series_id is not None):
+                        Sb = series_id[sl]
+                        Kb = window_id[sl]
+                        yield Xb, Yb, Sb, Kb
+                    else:
+                        yield Xb, Yb
+            return
+
+        total_batches = int(np.ceil(len(chosen) / batch_size)) if batch_size > 0 else 0
 
         for b in range(total_batches):
             sl = chosen[b * batch_size : (b + 1) * batch_size]
+            if sl.size == 0:
+                continue
             Xb = x_rolled[sl].reshape(len(sl), -1)
             Yb = y_rolled[sl].reshape(len(sl), -1)
             if include_ids and (series_id is not None) and (window_id is not None):
@@ -709,6 +751,18 @@ class GlobalTimeSeriesDataloader:
         # Load matrices (T, N)
         X_all = self.load_data_from_csv(self.x_file)
         DT_all = self.load_data_from_csv(self.date_time_file)
+
+        # Optionally slice to only a subset of series
+        if self.ts_to_use is not None:
+            X_all = self.sliced_data(X_all)
+            DT_all = self.sliced_data(DT_all)
+
+        # Get metadata
+        self.max_len = X_all.shape[0] if self.max_len is None else self.max_len
+        self.True_output = (
+            X_all.copy() if self.True_output is None else self.True_output
+        )
+
         assert (
             X_all.shape == DT_all.shape
         ), "Values CSV and datetime CSV must have identical shapes (T, N)."
@@ -874,7 +928,12 @@ class GlobalTimeSeriesDataloader:
         """Build covariates for a single datetime column."""
         if not self.time_covariates:
             return None
-        dt = dt_col.astype("datetime64[ns]")
+        # Ensure the input is a numpy array of datetime64[ns]
+        if not np.issubdtype(dt_col.dtype, np.datetime64):
+            dt = dt_col.astype("datetime64[ns]")
+        else:
+            dt = dt_col
+
         cols = []
         for cov in self.time_covariates:
             c = cov.lower()
@@ -885,10 +944,9 @@ class GlobalTimeSeriesDataloader:
             elif c == "day_of_week":
                 cols.append((dt.astype("datetime64[D]").astype(int) % 7).reshape(-1, 1))
             elif c == "week_of_year":
-                # ISO weeks are tricky; this approximates with 0-51
-                cols.append(
-                    ((dt.astype("datetime64[W]").astype(int) % 52) + 1).reshape(-1, 1)
-                )
+                dt_series = pd.Series(dt)
+                cols.append(dt_series.dt.isocalendar().week.values.reshape(-1, 1))
+
             elif c == "month_of_year":
                 cols.append(
                     ((dt.astype("datetime64[M]").astype(int) % 12) + 1).reshape(-1, 1)

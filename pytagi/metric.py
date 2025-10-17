@@ -140,51 +140,75 @@ def classification_error(prediction: np.ndarray, label: np.ndarray) -> float:
             count += 1
     return count / len(prediction)
 
+def mase(y, y_pred, y_train, seasonality: int = 1):
+    """Computes the Mean Absolute Scaled Error (MASE) for a single time series.
 
-def computeRMSE(y, ypred):
-    e = np.reshape((y - ypred) ** 2, (-1, 1))
-    return np.sqrt(np.mean(e))
+    This metric scales the mean absolute error of the forecast by the in-sample
+    naive forecast error so that scores are comparable across series.
 
+    :param y: Observed values of shape (n_samples,).
+    :type y: np.ndarray
+    :param y_pred: Forecasted values matching ``y``.
+    :type y_pred: np.ndarray
+    :param y_train: Training data used to compute the naive seasonal differences.
+    :type y_train: np.ndarray
+    :param seasonality: Seasonal period; use 1 for non-seasonal data.
+    :type seasonality: int
+    :return: The MASE value; returns ``np.nan`` when scaling is undefined.
+    :rtype: float
+    """
+    y_train = y_train[~np.isnan(y_train)]
+    if len(y_train) <= seasonality:
+        return np.nan
+    scale = np.mean(np.abs(y_train[seasonality:] - y_train[:-seasonality]))
+    if scale == 0:
+        return np.nan
+    mae = np.mean(np.abs(y - y_pred))
+    return mae / scale
 
-# TODO: needs to be reveiwed
-def computeMASE(y, ypred, ytrain, seasonality):
-    nbts = y.shape[1]
-    se = np.full((1, y.shape[1]), np.nan)
-    for i in range(nbts):
-        ytrain_ = ytrain[:, i]
-        # remove nans
-        ytrain_ = ytrain_[~np.isnan(ytrain_)]
-        if len(ytrain_) > seasonality:
-            se[0, i] = np.mean(np.abs(ytrain_[seasonality:] - ytrain_[:-seasonality]))
-    se[se == 0] = np.nan
-    MASE = np.mean(np.abs(y - ypred) / se)
-    MASE = np.nanmean(MASE)
-    return MASE
+def p50(y, ypred):
+    """Computes the normalized median absolute error.
 
+    :param y: Observed target values.
+    :type y: np.ndarray
+    :param ypred: Predicted 50th percentile (median) values.
+    :type ypred: np.ndarray
+    :return: Median absolute error normalized by the sum of the absolute targets.
+    :rtype: float
+    """
+    ypred_50q = ypred
+    e = y - ypred_50q
+    return np.sum(np.abs(e)) / np.sum(np.abs(y))
 
-def computeND(y, ypred):
-    return np.sum(np.abs(ypred - y)) / np.sum(np.abs(y))
+def p90(y, ypred, spred):
+    """Computes the normalized tilted loss for the 90th percentile.
 
-
-def compute90QL(y, ypred, Vpred):
-    ypred_90q = ypred + 1.282 * np.sqrt(Vpred)
+    :param y: Observed target values.
+    :type y: np.ndarray
+    :param ypred: Predicted mean values.
+    :type ypred: np.ndarray
+    :param spred: Predicted standard deviations.
+    :type spred: np.ndarray
+    :return: 90th percentile tilted loss normalized by the sum of absolute targets.
+    :rtype: float
+    """
+    ypred_90q = ypred + 1.282 * spred  # 1.282 is the z-score for the 90th percentile
     Iq = y > ypred_90q
     Iq_ = y <= ypred_90q
     e = y - ypred_90q
-    return np.sum(2 * e * (0.9 * Iq - (1 - 0.9) * Iq_)) / np.sum(np.abs(y))
-
+    return np.sum(2 * e * (0.9 * Iq - 0.1 * Iq_)) / np.sum(np.abs(y))
 
 def computeCRPS(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
-    """
-    Compute the CRPS (Continuous Ranked Probability Score) for Gaussian predictive distribution.
+    """Computes the CRPS for Gaussian predictive distributions.
 
-    Parameters:
-    - y: True observations (n_samples,)
-    - mu: Predictive means (n_samples,)
-    - sigma: Predictive standard deviations (n_samples,)
-
-    Returns:
-    - Averaged CRPS score
+    :param y: Observed target values of shape ``(n_samples,)``.
+    :type y: np.ndarray
+    :param mu: Predictive mean values of shape ``(n_samples,)``.
+    :type mu: np.ndarray
+    :param sigma: Predictive standard deviations of shape ``(n_samples,)``.
+    :type sigma: np.ndarray
+    :return: The average CRPS across samples.
+    :rtype: float
     """
     # Ensure proper shape
     y = y.reshape(-1)
