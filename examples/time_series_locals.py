@@ -913,8 +913,8 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                     sigma_v = early_stopping.best_sigma_v
                 break
 
-            # Save best model
-            net.save(os.path.join(output_dir, f"param/model_{ts}.pth"))
+        # Save best model
+        net.save(os.path.join(output_dir, f"param/model_{ts}.pth"))
 
         # --- Testing ---
         # net.eval()
@@ -1199,11 +1199,11 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True):
     # Define experiment name
-    experiment_name = "local_lstm_hq"
+    experiment_name = "local_lstm_hq_warmup10"
 
     # Create configuration
     config = Config()
-    config.warmup_epochs = 5
+    config.warmup_epochs = 10
 
     if Train:
         # Train model

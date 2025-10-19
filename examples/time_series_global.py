@@ -1,13 +1,12 @@
 import os
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 from sklearn.decomposition import PCA
 from typing import List, Optional
 import copy
 
-from examples.embedding_loader import (
-    TimeSeriesEmbeddings,
-)
+from examples.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from examples.data_loader import (
     GlobalTimeSeriesDataloader,
 )
@@ -120,7 +119,7 @@ def build_model(input_size, use_AGVI, seed=1, device="cpu"):
             Linear(40, 1),
         )
     if device == "cpu":
-        net.set_threads(1)
+        net.set_threads(8)
     elif device == "cuda":
         net.to_device("cuda")
     out_updater = OutputUpdater(net.device)
@@ -549,10 +548,33 @@ class Config:
         self.output_col: list = [0]
         self.ts_to_use: Optional[List[int]] = [i for i in range(127)]  # Use all series
 
-        # Set embedding parameters
-        self.embedding_type: Optional[str] = None
+        # 1. For standard (one-per-series) embeddings:
         self.embedding_size: Optional[int] = None
         self.embedding_initializer: str = "normal"
+
+        # 2. For mapped (shared) embeddings:
+        self.embedding_map_dir: Optional[str] = None
+        self.embedding_map_sizes = {
+            "dam_id": 3,
+            "dam_type_id": 3,
+            "sensor_type_id": 3,
+            "direction_id": 3,
+            "sensor_id": 3,
+        }
+        self.embedding_map_initializer = {
+            "dam_id": "normal",
+            "dam_type_id": "normal",
+            "sensor_type_id": "normal",
+            "direction_id": "normal",
+            "sensor_id": "normal",
+        }
+        self.embedding_map_labels = {
+            "dam_id": ["DRU", "GOU", "LGA", "LTU", "MAT", "M5"],
+            "dam_type_id": ["Run-of-River", "Reservoir"],
+            "sensor_type_id": ["PIZ", "EXT", "PEN"],
+            "direction_id": ["NA", "X", "Y", "Z"],
+            "sensor_id": [f"sensor_{i}" for i in self.ts_to_use],
+        }
 
         # Set model parameters
         self.Sigma_v_bounds: tuple = (None, None)
@@ -588,24 +610,49 @@ class Config:
         return self.Sigma_v_bounds[0] is None and self.Sigma_v_bounds[1] is None
 
     @property
+    def use_mapped_embeddings(self) -> bool:
+        """True if mapped embeddings are configured."""
+        return self.embedding_map_dir is not None
+
+    @property
+    def use_standard_embeddings(self) -> bool:
+        """True if standard (one-per-series) embeddings are configured."""
+        return (
+            not self.use_mapped_embeddings
+            and self.embedding_size is not None
+            and self.embedding_size > 0
+        )
+
+    @property
+    def total_embedding_size(self) -> int:
+        """Calculates the total embedding dimension based on configuration."""
+        if self.use_mapped_embeddings:
+            return sum(self.embedding_map_sizes.values())
+        if self.use_standard_embeddings:
+            return self.embedding_size
+        return 0  # No embeddings
+
+    @property
     def input_size(self) -> int:
-        """Calculates the input size for the model based on other params."""
+        """Calculates the total input size for the model."""
         base_size = self.num_features + self.input_seq_len - 1
-        if self.embedding_size:
-            return base_size + self.embedding_size
-        return base_size
+        return base_size + self.total_embedding_size
 
     @property
     def nb_ts(self) -> int:
         """Calculates the number of time series based on ts_to_use."""
         if self.ts_to_use is not None:
             return len(self.ts_to_use)
-        return 1  # Default value if ts_to_use is None
+        # This case should not be hit if ts_to_use is always populated
+        # Re-using dataloader's logic might be more robust
+        return 1
 
     @property
     def plot_embeddings(self) -> bool:
-        """Determines whether to plot embeddings based on embedding_size."""
-        return self.embedding_size is not None and self.embedding_size > 0
+        """
+        Determines whether to plot embeddings.
+        """
+        return self.use_standard_embeddings
 
     def display(self):
         print("\nConfiguration:")
@@ -646,6 +693,42 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         ts_to_use=config.ts_to_use,
     )
 
+    # Embeddings
+    embeddings = None  # Initialize as None
+    embedding_dir = os.path.join(output_dir, "embeddings")
+
+    if config.use_mapped_embeddings:
+        print(
+            f"Using MappedTimeSeriesEmbeddings. Total embedding size: {config.total_embedding_size}"
+        )
+        embeddings = MappedTimeSeriesEmbeddings(
+            map_file_path=config.embedding_map_dir,
+            embedding_sizes=config.embedding_map_sizes,
+            encoding_types=config.embedding_map_initializer,
+            seed=config.seed,
+        )
+        if not os.path.exists(embedding_dir):
+            os.makedirs(embedding_dir, exist_ok=True)
+        # Mapped save uses a file prefix
+        embeddings.save(os.path.join(embedding_dir, "embeddings_start"))
+
+    elif config.use_standard_embeddings:
+        print(
+            f"Using standard EmbeddingLayer. Embedding size: {config.total_embedding_size}"
+        )
+        embeddings = EmbeddingLayer(
+            (config.nb_ts, config.embedding_size),
+            encoding_type=config.embedding_initializer,
+            seed=config.seed,
+        )
+        if not os.path.exists(embedding_dir):
+            os.makedirs(embedding_dir, exist_ok=True)
+        # Standard save uses a full file name
+        embeddings.save(os.path.join(embedding_dir, "embeddings_start.npz"))
+
+    else:
+        print("No embeddings will be used.")
+
     # Build model
     net, output_updater = build_model(
         input_size=config.input_size,
@@ -654,16 +737,9 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         device=config.device,
     )
 
-    if config.embedding_size is not None:
-        embeddings = TimeSeriesEmbeddings(
-            (config.nb_ts, config.embedding_size),
-            encoding_type=config.embedding_initializer,
-            seed=config.seed,
-        )
-        if not os.path.exists(output_dir + "/embeddings"):
-            os.makedirs(output_dir + "/embeddings", exist_ok=True)
-        embeddings.save(os.path.join(output_dir, "embeddings/embeddings_start.npz"))
-        net.input_state_update = True  # Enable input state update in the model
+    # Enable input state updates only if embeddings are being used
+    if embeddings is not None:
+        net.input_state_update = True
 
     # Initalize states
     train_states = States(nb_ts=config.nb_ts, total_time_steps=train_dtl.max_len)
@@ -759,7 +835,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
                 look_back_mu=look_back_buffer.mu,
                 look_back_var=look_back_buffer.var,
                 indices=indices,
-                embeddings=embeddings if config.embedding_size is not None else None,
+                embeddings=embeddings,  # Pass the object directly
             )
 
             # Feedforward
@@ -809,9 +885,8 @@ def train_global_model(config, experiment_name: Optional[str] = None):
                 var_y=var_y,
             )
 
-            # TODO: Check if it would be better to include int in a function
-            # Update embeddings
-            if config.embedding_size is not None:
+            # Update embeddings if used
+            if embeddings is not None:
                 mu_delta, var_delta = net.get_input_states()
 
                 mu_delta = mu_delta * var_x
@@ -820,10 +895,16 @@ def train_global_model(config, experiment_name: Optional[str] = None):
                 mu_delta = mu_delta.reshape(B, -1)
                 var_delta = var_delta.reshape(B, -1)
 
+                # Get the slice corresponding to all embeddings
+                total_emb_size = config.total_embedding_size
+                mu_delta_slice = mu_delta[:, -total_emb_size:]
+                var_delta_slice = var_delta[:, -total_emb_size:]
+
+                # Update embeddings
                 embeddings.update(
                     indices,
-                    mu_delta[:, -config.embedding_size :],
-                    var_delta[:, -config.embedding_size :],
+                    mu_delta_slice,
+                    var_delta_slice,
                 )
 
             # Update LSTM states for the current batch
@@ -890,7 +971,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
                 look_back_mu=look_back_buffer.mu,
                 look_back_var=look_back_buffer.var,
                 indices=indices,
-                embeddings=embeddings if config.embedding_size is not None else None,
+                embeddings=embeddings,  # Pass the object directly
             )
 
             # Feedforward
@@ -908,8 +989,8 @@ def train_global_model(config, experiment_name: Optional[str] = None):
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            v_pred += var_y
-            s_pred = np.sqrt(v_pred)
+            v_pred_total = v_pred + var_y
+            s_pred = np.sqrt(v_pred_total)
 
             # Compute metrics
             mask = ~np.isnan(y.flatten())
@@ -936,7 +1017,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             # Update look_back buffer
             look_back_buffer.update(
                 new_mu=m_pred.reshape(B, -1)[:, -1],
-                new_var=v_pred.reshape(B, -1)[:, -1],
+                new_var=v_pred_total.reshape(B, -1)[:, -1],  # Use total variance
                 indices=indices,
             )
 
@@ -945,13 +1026,18 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         val_log_lik = np.mean(val_log_lik)
 
         # Update progress bar
+        sigma_v_str = (
+            f"{sigma_v:.4f}"
+            if not config.use_AGVI and sigma_v is not None
+            else "N/A (AGVI)"
+        )
         pbar.set_postfix(
             {
                 "Train RMSE": f"{train_mse:.4f}",
                 "Val RMSE": f"{val_mse:.4f}",
                 "Train LogLik": f"{train_log_lik:.4f}",
                 "Val LogLik": f"{val_log_lik:.4f}",
-                "Sigma_v": f"{sigma_v:.4f}" if not config.use_AGVI else "",
+                "Sigma_v": sigma_v_str,
             }
         )
 
@@ -967,7 +1053,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             train_states,
             val_states,
             sigma_v if not config.use_AGVI else None,
-            embeddings if config.embedding_size is not None else None,
+            embeddings,  # Pass the object directly
         ):
             print(f"Early stopping at epoch {epoch+1}")
             net.load_state_dict(early_stopping.best_state)
@@ -977,16 +1063,20 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             val_states = early_stopping.val_states
             if not config.use_AGVI:
                 sigma_v = early_stopping.best_sigma_v
-            if config.embedding_size is not None:
-                embeddings = early_stopping.best_embeddings
+
+            # Restore best embeddings
+            embeddings = early_stopping.best_embeddings
             break
 
-        # Save best model
-        net.save(os.path.join(output_dir, "param/model.pth"))
+    # Save best model
+    net.save(os.path.join(output_dir, "param/model.pth"))
 
-        # Save best embeddings
-        if config.embedding_size is not None:
-            embeddings.save(os.path.join(output_dir, "embeddings/embeddings_final.npz"))
+    # Save best embeddings based on type
+    if embeddings is not None:
+        if config.use_mapped_embeddings:
+            embeddings.save(os.path.join(embedding_dir, "embeddings_final"))
+        elif config.use_standard_embeddings:
+            embeddings.save(os.path.join(embedding_dir, "embeddings_final.npz"))
 
     # --- Testing ---
     # net.eval()
@@ -1034,7 +1124,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             look_back_mu=look_back_buffer.mu,
             look_back_var=look_back_buffer.var,
             indices=indices,
-            embeddings=embeddings if config.embedding_size is not None else None,
+            embeddings=embeddings,  # Pass the object directly
         )
 
         # Feedforward
@@ -1052,8 +1142,8 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             v_pred = flat_v[::2]  # even indices
             var_y = flat_m[1::2]  # odd indices var_v
 
-        v_pred += var_y
-        s_pred = np.sqrt(v_pred)
+        v_pred_total = v_pred + var_y
+        s_pred = np.sqrt(v_pred_total)
 
         # Store predictions
         test_states.update(
@@ -1066,7 +1156,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         # Update look_back buffer
         look_back_buffer.update(
             new_mu=m_pred.reshape(B, -1)[:, -1],
-            new_var=v_pred.reshape(B, -1)[:, -1],
+            new_var=v_pred_total.reshape(B, -1)[:, -1],  # Use total variance
             indices=indices,
         )
 
@@ -1109,8 +1199,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
     """Evaluates forecasts stored in the .npz format."""
 
     from pathlib import Path
-    from tqdm import tqdm
-    import pandas as pd
 
     input_dir = Path(f"out/{experiment_name}/")
 
@@ -1255,7 +1343,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
             f.write("Series_ID,RMSE,LogLik,MSE,P50,P90,MASE\n")
             for i in range(config.nb_ts):
                 f.write(
-                    f"{i},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
+                    f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
                     f"{test_mse_list[i]:.4f},{test_p50_list[i]:.4f},"
                     f"{test_p90_list[i]:.4f},{test_mase_list[i]:.4f}\n"
                 )
@@ -1265,171 +1353,430 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 f"{overall_p90:.4f},{overall_mase:.4f}\n"
             )
 
-    # Plot embeddings
-    if config.plot_embeddings:
-        start_embeddings_mu = np.load(input_dir / "embeddings/embeddings_start.npz")[
-            "mu"
-        ]
-        final_embeddings_mu = np.load(input_dir / "embeddings/embeddings_final.npz")[
-            "mu"
-        ]
-        start_embeddings_var = np.load(input_dir / "embeddings/embeddings_start.npz")[
-            "var"
-        ]
-        final_embeddings_var = np.load(input_dir / "embeddings/embeddings_final.npz")[
-            "var"
-        ]
-        plot_embeddings(
-            start_embeddings_mu,
-            config.nb_ts,
-            input_dir,
-            "embeddings/embeddings_mu_pca_start.png",
+    # Display and plot embeddings if used
+    def _cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
+        emb = np.asarray(emb, dtype=np.float32)
+        norms = np.linalg.norm(emb, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-12)
+        normalized = emb / norms
+        return normalized @ normalized.T
+
+    def _plot_similarity(
+        sim_matrix: np.ndarray,
+        out_path,
+        title: str,
+        labels: Optional[List[str]] = None,
+        *,
+        vmin: float = -1.0,
+        vmax: float = 1.0,
+    ) -> None:
+        sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
+        if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
+            raise ValueError("sim_matrix must be a square 2D array")
+
+        # Order rows/cols by aggregate similarity to highlight structure.
+        score = np.sum(sim_matrix, axis=1)
+        order = np.argsort(-score)
+        ordered = sim_matrix[order][:, order]
+
+        if labels is not None:
+            if len(labels) != sim_matrix.shape[0]:
+                raise ValueError("labels must have the same length as sim_matrix size")
+            ordered_labels = [str(labels[idx]) for idx in order]
+        else:
+            ordered_labels = [str(idx) for idx in order]
+
+        num_series = ordered.shape[0]
+        width = max(8.0, min(num_series * 0.4, 24.0))
+        height = max(6.0, min(num_series * 0.4, 24.0))
+        plt.figure(figsize=(width, height))
+        heatmap = plt.imshow(
+            ordered,
+            cmap="coolwarm",
+            vmin=vmin,
+            vmax=vmax,
+            interpolation="nearest",
         )
-        plot_embeddings(
-            final_embeddings_var,
-            config.nb_ts,
-            input_dir,
-            "embeddings/embeddings_mu_pca_final.png",
-        )
+        plt.title(f"{title} (sorted by similarity)")
+        plt.xlabel("Entity/Series Index")  # Generic label
+        plt.ylabel("Entity/Series Index")  # Generic label
 
-        def _cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
-            emb = np.asarray(emb, dtype=np.float32)
-            norms = np.linalg.norm(emb, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-12)
-            normalized = emb / norms
-            return normalized @ normalized.T
-
-        def _plot_similarity(
-            sim_matrix: np.ndarray,
-            out_path,
-            title: str,
-            *,
-            vmin: float = -1.0,
-            vmax: float = 1.0,
-        ) -> None:
-            sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
-            if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
-                raise ValueError("sim_matrix must be a square 2D array")
-
-            # Order rows/cols by aggregate similarity to highlight structure.
-            score = np.sum(sim_matrix, axis=1)
-            order = np.argsort(-score)
-            ordered = sim_matrix[order][:, order]
-
-            num_series = ordered.shape[0]
-            width = max(8.0, min(ordered.shape[0] * 0.4, 24.0))
-            height = max(6.0, min(ordered.shape[0] * 0.4, 24.0))
-            plt.figure(figsize=(width, height))
-            heatmap = plt.imshow(
-                ordered,
-                cmap="coolwarm",
-                vmin=vmin,
-                vmax=vmax,
-                interpolation="nearest",
+        if num_series > 0:
+            tick_positions = np.arange(num_series, dtype=int)
+            rotation = 45 if num_series <= 20 else 90
+            fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
+            plt.xticks(
+                tick_positions,
+                ordered_labels,
+                rotation=rotation,
+                ha="right",
+                fontsize=fontsize,
             )
-            plt.title(f"{title} (sorted by similarity)")
-            plt.xlabel("Series Index")
-            plt.ylabel("Series Index")
+            plt.yticks(tick_positions, ordered_labels, fontsize=fontsize)
 
-            if num_series > 0:
-                tick_positions = np.arange(num_series, dtype=int)
-                tick_labels = [str(order[idx]) for idx in tick_positions]
-                rotation = 45 if num_series <= 20 else 90
-                fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
-                plt.xticks(
-                    tick_positions,
-                    tick_labels,
-                    rotation=rotation,
-                    ha="right",
-                    fontsize=fontsize,
+        plt.colorbar(heatmap, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=600, bbox_inches="tight")
+        plt.close()
+
+    def _bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+        mu = np.asarray(mu, dtype=np.float32)
+        var = np.asarray(var, dtype=np.float32)
+        if mu.shape != var.shape:
+            raise ValueError("mu and var must share the same shape")
+
+        eps = np.float32(1e-12)
+        var = np.maximum(var, eps)
+
+        mu_i = mu[:, None, :]
+        mu_j = mu[None, :, :]
+        var_i = var[:, None, :]
+        var_j = var[None, :, :]
+        sigma = 0.5 * (var_i + var_j)
+        sigma = np.maximum(sigma, eps)
+
+        diff = mu_i - mu_j
+        term1 = 0.125 * np.sum(diff * diff / sigma, axis=-1)
+
+        log_sigma = np.log(sigma)
+        log_var_i = np.log(var_i)
+        log_var_j = np.log(var_j)
+        term2 = 0.5 * np.sum(log_sigma - 0.5 * (log_var_i + log_var_j), axis=-1)
+
+        dist = term1 + term2
+        np.fill_diagonal(dist, 0.0)
+        return dist
+
+    # Check if *any* embeddings were used
+    if config.total_embedding_size > 0:
+        embedding_dir = input_dir / "embeddings"
+
+        if config.use_standard_embeddings:
+            print("Plotting standard (one-per-series) embeddings...")
+            try:
+                start_data = np.load(embedding_dir / "embeddings_start.npz")
+                final_data = np.load(embedding_dir / "embeddings_final.npz")
+
+                start_embeddings_mu = start_data["mu"]
+                start_embeddings_var = start_data["var"]
+                final_embeddings_mu = final_data["mu"]
+                final_embeddings_var = final_data["var"]
+
+                # Labels for standard embeddings are the time series IDs
+                labels = [str(ts_id) for ts_id in config.ts_to_use]
+
+                plot_embeddings(
+                    start_embeddings_mu,
+                    config.nb_ts,
+                    input_dir,
+                    "embeddings/embeddings_mu_pca_start.png",
+                    labels=labels,
                 )
-                plt.yticks(tick_positions, tick_labels, fontsize=fontsize)
+                plot_embeddings(
+                    final_embeddings_mu,
+                    config.nb_ts,
+                    input_dir,
+                    "embeddings/embeddings_mu_pca_final.png",
+                    labels=labels,
+                )
 
-            plt.colorbar(heatmap, fraction=0.046, pad=0.04)
-            plt.tight_layout()
-            plt.savefig(out_path, dpi=600, bbox_inches="tight")
-            plt.close()
+                start_similarity = _cosine_similarity_matrix(start_embeddings_mu)
+                final_similarity = _cosine_similarity_matrix(final_embeddings_mu)
 
-        def _bhattacharyya_distance_matrix(
-            mu: np.ndarray, var: np.ndarray
-        ) -> np.ndarray:
-            mu = np.asarray(mu, dtype=np.float32)
-            var = np.asarray(var, dtype=np.float32)
-            if mu.shape != var.shape:
-                raise ValueError("mu and var must share the same shape")
+                _plot_similarity(
+                    start_similarity,
+                    embedding_dir / "embeddings_cosine_similarity_start.png",
+                    "Cosine Similarity (Start)",
+                )
+                _plot_similarity(
+                    final_similarity,
+                    embedding_dir / "embeddings_cosine_similarity_final.png",
+                    "Cosine Similarity (Final)",
+                )
 
-            eps = np.float32(1e-12)
-            var = np.maximum(var, eps)
+                start_bhattacharyya = _bhattacharyya_distance_matrix(
+                    start_embeddings_mu, start_embeddings_var
+                )
+                final_bhattacharyya = _bhattacharyya_distance_matrix(
+                    final_embeddings_mu, final_embeddings_var
+                )
 
-            mu_i = mu[:, None, :]
-            mu_j = mu[None, :, :]
-            var_i = var[:, None, :]
-            var_j = var[None, :, :]
-            sigma = 0.5 * (var_i + var_j)
-            sigma = np.maximum(sigma, eps)
+                bhatt_vmax = float(
+                    max(
+                        np.nanmax(start_bhattacharyya),
+                        np.nanmax(final_bhattacharyya),
+                        1e-12,
+                    )
+                )
 
-            diff = mu_i - mu_j
-            term1 = 0.125 * np.sum(diff * diff / sigma, axis=-1)
+                _plot_similarity(
+                    start_bhattacharyya,
+                    embedding_dir / "embeddings_bhattacharyya_distance_start.png",
+                    "Bhattacharyya Distance (Start)",
+                    vmin=0.0,
+                    vmax=bhatt_vmax,
+                )
+                _plot_similarity(
+                    final_bhattacharyya,
+                    embedding_dir / "embeddings_bhattacharyya_distance_final.png",
+                    "Bhattacharyya Distance (Final)",
+                    vmin=0.0,
+                    vmax=bhatt_vmax,
+                )
+            except FileNotFoundError as e:
+                print(
+                    f"Warning: Could not plot standard embeddings. File not found: {e}"
+                )
+            except Exception as e:
+                print(f"Warning: Failed to plot standard embeddings. Error: {e}")
 
-            log_sigma = np.log(sigma)
-            log_var_i = np.log(var_i)
-            log_var_j = np.log(var_j)
-            term2 = 0.5 * np.sum(log_sigma - 0.5 * (log_var_i + log_var_j), axis=-1)
+        elif config.use_mapped_embeddings:
+            print("Plotting mapped (categorical) embeddings...")
 
-            dist = term1 + term2
-            np.fill_diagonal(dist, 0.0)
-            return dist
+            # --- 1. Plot per-category embeddings ---
+            categories = sorted(list(config.embedding_map_sizes.keys()))
 
-        start_similarity = _cosine_similarity_matrix(start_embeddings_mu)
-        final_similarity = _cosine_similarity_matrix(final_embeddings_var)
+            # Store loaded embeddings to use for stitching
+            loaded_start_mus = {}
+            loaded_start_vars = {}
+            loaded_final_mus = {}
+            loaded_final_vars = {}
 
-        _plot_similarity(
-            start_similarity,
-            input_dir / "embeddings/embeddings_cosine_similarity_start.png",
-            "Cosine Similarity (Start)",
-        )
-        _plot_similarity(
-            final_similarity,
-            input_dir / "embeddings/embeddings_cosine_similarity_final.png",
-            "Cosine Similarity (Final)",
-        )
+            for category in categories:
+                print(f"  Plotting for category: {category}")
+                try:
+                    start_data = np.load(
+                        embedding_dir / f"embeddings_start_{category}.npz"
+                    )
+                    final_data = np.load(
+                        embedding_dir / f"embeddings_final_{category}.npz"
+                    )
 
-        start_bhattacharyya = _bhattacharyya_distance_matrix(
-            start_embeddings_mu, start_embeddings_var
-        )
-        final_bhattacharyya = _bhattacharyya_distance_matrix(
-            final_embeddings_mu, final_embeddings_var
-        )
+                    start_mu = start_data["mu"]
+                    start_var = start_data["var"]
+                    final_mu = final_data["mu"]
+                    final_var = final_data["var"]
 
-        bhatt_vmax = float(
-            max(np.max(start_bhattacharyya), np.max(final_bhattacharyya), 1e-12)
-        )
+                    # Store for stitching
+                    loaded_start_mus[category] = start_mu
+                    loaded_start_vars[category] = start_var
+                    loaded_final_mus[category] = final_mu
+                    loaded_final_vars[category] = final_var
 
-        _plot_similarity(
-            start_bhattacharyya,
-            input_dir / "embeddings/embeddings_bhattacharyya_distance_start.png",
-            "Bhattacharyya Distance (Start)",
-            vmin=0.0,
-            vmax=bhatt_vmax,
-        )
-        _plot_similarity(
-            final_bhattacharyya,
-            input_dir / "embeddings/embeddings_bhattacharyya_distance_final.png",
-            "Bhattacharyya Distance (Final)",
-            vmin=0.0,
-            vmax=bhatt_vmax,
-        )
+                    n_entities = start_mu.shape[0]
+                    labels = config.embedding_map_labels[category]
+
+                    # Create sub-directory
+                    category_plot_dir = embedding_dir / category
+                    category_plot_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Plot PCA
+                    plot_embeddings(
+                        start_mu,
+                        n_entities,
+                        input_dir,  # base dir
+                        f"embeddings/{category}/pca_start.png",
+                        labels=labels,
+                    )
+                    plot_embeddings(
+                        final_mu,
+                        n_entities,
+                        input_dir,  # base dir
+                        f"embeddings/{category}/pca_final.png",
+                        labels=labels,
+                    )
+
+                    # Plot Cosine Similarity
+                    start_similarity = _cosine_similarity_matrix(start_mu)
+                    final_similarity = _cosine_similarity_matrix(final_mu)
+
+                    _plot_similarity(
+                        start_similarity,
+                        category_plot_dir / "cosine_similarity_start.png",
+                        f"Cosine Similarity (Start) - {category}",
+                        labels=labels,
+                    )
+                    _plot_similarity(
+                        final_similarity,
+                        category_plot_dir / "cosine_similarity_final.png",
+                        f"Cosine Similarity (Final) - {category}",
+                        labels=labels,
+                    )
+
+                    # Plot Bhattacharyya Distance
+                    start_bhat = _bhattacharyya_distance_matrix(start_mu, start_var)
+                    final_bhat = _bhattacharyya_distance_matrix(final_mu, final_var)
+                    bhat_vmax = float(
+                        max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
+                    )
+
+                    _plot_similarity(
+                        start_bhat,
+                        category_plot_dir / "bhattacharyya_distance_start.png",
+                        f"Bhattacharyya Distance (Start) - {category}",
+                        vmin=0.0,
+                        vmax=bhat_vmax,
+                        labels=labels,
+                    )
+                    _plot_similarity(
+                        final_bhat,
+                        category_plot_dir / "bhattacharyya_distance_final.png",
+                        f"Bhattacharyya Distance (Final) - {category}",
+                        vmin=0.0,
+                        vmax=bhat_vmax,
+                        labels=labels,
+                    )
+                except FileNotFoundError as e:
+                    print(
+                        f"  Warning: Could not plot category {category}. File not found: {e}"
+                    )
+                    continue  # Skip to next category
+                except Exception as e:
+                    print(
+                        f"  Warning: Failed to plot category {category}. Error: {e}"
+                    )
+                    continue
+
+            # --- 2. Stitch Embeddings ---
+            print("Stitching full time series embeddings for plotting...")
+            try:
+                # Load and filter map to the series we used, in the correct order
+                if not os.path.exists(config.embedding_map_dir):
+                    raise FileNotFoundError(
+                        f"Map file not found: {config.embedding_map_dir}"
+                    )
+
+                map_df = pd.read_csv(config.embedding_map_dir).set_index("ts_id")
+
+                if config.ts_to_use is None:
+                    raise ValueError(
+                        "config.ts_to_use is None, cannot stitch embeddings."
+                    )
+
+                # Re-order map based on ts_to_use
+                map_df_ordered = map_df.loc[config.ts_to_use]
+
+                # Initialize stitched matrices
+                mu_stitched_start = np.zeros(
+                    (config.nb_ts, config.total_embedding_size), dtype=np.float32
+                )
+                var_stitched_start = np.zeros_like(mu_stitched_start)
+                mu_stitched_final = np.zeros_like(mu_stitched_start)
+                var_stitched_final = np.zeros_like(mu_stitched_start)
+
+                current_offset = 0
+                for category in categories:  # categories is already sorted
+                    if category not in loaded_start_mus:
+                        print(
+                            f"  Skipping category {category} in stitching (was not loaded)."
+                        )
+                        # Need to advance offset!
+                        current_offset += config.embedding_map_sizes[category]
+                        continue
+
+                    cat_size = config.embedding_map_sizes[category]
+
+                    # Get indices from the ordered map
+                    cat_indices = map_df_ordered[category].values
+
+                    # Pull embeddings using the indices
+                    mu_stitched_start[
+                        :, current_offset : current_offset + cat_size
+                    ] = loaded_start_mus[category][cat_indices]
+                    var_stitched_start[
+                        :, current_offset : current_offset + cat_size
+                    ] = loaded_start_vars[category][cat_indices]
+                    mu_stitched_final[
+                        :, current_offset : current_offset + cat_size
+                    ] = loaded_final_mus[category][cat_indices]
+                    var_stitched_final[
+                        :, current_offset : current_offset + cat_size
+                    ] = loaded_final_vars[category][cat_indices]
+
+                    current_offset += cat_size
+
+                # --- 3. Plot Stitched Embeddings ---
+                print("Plotting stitched (full) time series embeddings...")
+                labels = [str(ts_id) for ts_id in config.ts_to_use]
+
+                # Plot PCA
+                plot_embeddings(
+                    mu_stitched_start,
+                    config.nb_ts,
+                    input_dir,
+                    "embeddings/embeddings_mu_pca_start_stitched.png",
+                    labels=labels,
+                )
+                plot_embeddings(
+                    mu_stitched_final,
+                    config.nb_ts,
+                    input_dir,
+                    "embeddings/embeddings_mu_pca_final_stitched.png",
+                    labels=labels,
+                )
+
+                # Plot Cosine Similarity
+                start_similarity = _cosine_similarity_matrix(mu_stitched_start)
+                final_similarity = _cosine_similarity_matrix(mu_stitched_final)
+
+                _plot_similarity(
+                    start_similarity,
+                    embedding_dir
+                    / "embeddings_cosine_similarity_start_stitched.png",
+                    "Cosine Similarity (Start) - Stitched",
+                )
+                _plot_similarity(
+                    final_similarity,
+                    embedding_dir
+                    / "embeddings_cosine_similarity_final_stitched.png",
+                    "Cosine Similarity (Final) - Stitched",
+                )
+
+                # Plot Bhattacharyya Distance
+                start_bhat = _bhattacharyya_distance_matrix(
+                    mu_stitched_start, var_stitched_start
+                )
+                final_bhat = _bhattacharyya_distance_matrix(
+                    mu_stitched_final, var_stitched_final
+                )
+                bhat_vmax = float(
+                    max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
+                )
+
+                _plot_similarity(
+                    start_bhat,
+                    embedding_dir
+                    / "embeddings_bhattacharyya_distance_start_stitched.png",
+                    "Bhattacharyya Distance (Start) - Stitched",
+                    vmin=0.0,
+                    vmax=bhat_vmax,
+                )
+                _plot_similarity(
+                    final_bhat,
+                    embedding_dir
+                    / "embeddings_bhattacharyya_distance_final_stitched.png",
+                    "Bhattacharyya Distance (Final) - Stitched",
+                    vmin=0.0,
+                    vmax=bhat_vmax,
+                )
+
+            except Exception as e:
+                print(
+                    f"  Warning: Failed to stitch and plot full embeddings. Error: {e}"
+                )
 
 
-def main(Train=True, Eval=True):
+def main(Train=False, Eval=True):
     # Define experiment name
-    experiment_name = "global_lstm_hq_B127"
+    experiment_name = "global_lstm_hq_B16_E15_mapped"
 
     # Create configuration
     config = Config()
+    config.num_epochs = 5
+    config.batch_size = 16
 
-    # config.embedding_size = 10
-    # config.embedding_initializer = "normal"
+    config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
+    config.eval_plots = False
 
     if Train:
         # Train model
