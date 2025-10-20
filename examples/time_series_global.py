@@ -219,7 +219,87 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
     m_post = m_pred + K * (y - m_pred)  # posterior mean
     v_post = (1.0 - K) * v_pred  # posterior variance
 
-    return m_post, v_post + var_y
+    return m_post, v_post
+
+
+# Define function to update aleatoric uncertainty
+def update_aleatoric_uncertainty(
+    mu_z0: np.ndarray,
+    var_z0: np.ndarray,
+    mu_v2bar: np.ndarray,
+    var_v2bar: np.ndarray,
+    y: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    # Handle NaN values in y
+    valid_indices = ~np.isnan(y)
+
+    # Initialize posterior arrays as copies of the priors
+    mu_v2bar_posterior = np.copy(mu_v2bar)
+    var_v2bar_posterior = np.copy(var_v2bar)
+
+    # If all y values are NaN, no update is needed
+    if not np.any(valid_indices):
+        return mu_v2bar_posterior, var_v2bar_posterior
+
+    # Filter all inputs to only include the data for valid (non-NaN) indices.
+    y_valid = y[valid_indices]
+    mu_z0_valid = mu_z0[valid_indices]
+    var_z0_valid = var_z0[valid_indices]
+    mu_v2bar_valid = mu_v2bar[valid_indices]
+    var_v2bar_valid = var_v2bar[valid_indices]
+
+    # Step 1: Define Prior Moments for V, Y, H on valid data
+    mu_v = np.zeros_like(mu_v2bar_valid)
+    var_v = mu_v2bar_valid  # Prior aleatoric uncertainty
+
+    mu_y = mu_z0_valid + mu_v
+    var_y = var_z0_valid + var_v
+
+    mu_h = np.stack([mu_z0_valid, mu_v], axis=1)
+
+    cov_h = np.zeros((len(mu_z0_valid), 2, 2))
+    cov_h[:, 0, 0] = var_z0_valid
+    cov_h[:, 1, 1] = var_v
+
+    cov_hy = np.stack([var_z0_valid, var_v], axis=1)
+
+    # Step 2: Calculate Posterior Moments for H using y on valid data
+    kalman_gain_h = cov_hy / var_y[:, np.newaxis]
+    mu_h_posterior = mu_h + kalman_gain_h * (y_valid - mu_y)[:, np.newaxis]
+    cov_h_posterior = cov_h - np.einsum("bi,bj->bij", kalman_gain_h, cov_hy)
+
+    mu_v_posterior = mu_h_posterior[:, 1]
+    var_v_posterior = cov_h_posterior[:, 1, 1]
+
+    # Step 3: Calculate Posterior Moments for V^2 on valid data
+    mu_v2_posterior = mu_v_posterior**2 + var_v_posterior
+    var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
+        mu_v_posterior**2
+    )
+
+    # Step 4: Calculate Prior Moments for V^2 and Gain 'k' on valid data
+    mu_v2_prior = mu_v2bar_valid
+    var_v2_prior = 3 * var_v2bar_valid + 2 * (mu_v2bar_valid**2)
+
+    k = np.divide(
+        var_v2bar_valid,
+        var_v2_prior,
+        out=np.zeros_like(var_v2bar_valid),
+        where=var_v2_prior != 0,
+    )
+
+    # Step 5: Update V2bar to get its Posterior Moments on valid data
+    mu_v2bar_posterior_valid = mu_v2bar_valid + k * (mu_v2_posterior - mu_v2_prior)
+    var_v2bar_posterior_valid = var_v2bar_valid + k**2 * (
+        var_v2_posterior - var_v2_prior
+    )
+
+    # Place the calculated posterior values
+    mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
+    var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
+
+    return mu_v2bar_posterior, var_v2bar_posterior
 
 
 # Define a class to handle the lstm state buffers
@@ -907,13 +987,27 @@ def train_global_model(config, experiment_name: Optional[str] = None):
                     var_delta_slice,
                 )
 
+            # update aleatoric uncertainty if using AGVI
+            if config.use_AGVI:
+                (
+                    mu_v2bar_post,
+                    _,
+                ) = update_aleatoric_uncertainty(
+                    mu_z0=m_pred,
+                    var_z0=v_pred,
+                    mu_v2bar=flat_m[1::2],
+                    var_v2bar=flat_v[1::2],
+                    y=y.flatten(),
+                )
+                var_y = mu_v2bar_post  # updated aleatoric uncertainty
+
             # Update LSTM states for the current batch
             lstm_state_container.update_states_from_net(indices, net)
 
             # Update look_back buffer
             look_back_buffer.update(
                 new_mu=m_post.reshape(B, -1)[:, -1],
-                new_var=v_post.reshape(B, -1)[:, -1],
+                new_var=(v_post + var_y).reshape(B, -1)[:, -1],
                 indices=indices,
             )
 
@@ -1632,9 +1726,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                     )
                     continue  # Skip to next category
                 except Exception as e:
-                    print(
-                        f"  Warning: Failed to plot category {category}. Error: {e}"
-                    )
+                    print(f"  Warning: Failed to plot category {category}. Error: {e}")
                     continue
 
             # --- 2. Stitch Embeddings ---
@@ -1680,15 +1772,15 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                     cat_indices = map_df_ordered[category].values
 
                     # Pull embeddings using the indices
-                    mu_stitched_start[
-                        :, current_offset : current_offset + cat_size
-                    ] = loaded_start_mus[category][cat_indices]
+                    mu_stitched_start[:, current_offset : current_offset + cat_size] = (
+                        loaded_start_mus[category][cat_indices]
+                    )
                     var_stitched_start[
                         :, current_offset : current_offset + cat_size
                     ] = loaded_start_vars[category][cat_indices]
-                    mu_stitched_final[
-                        :, current_offset : current_offset + cat_size
-                    ] = loaded_final_mus[category][cat_indices]
+                    mu_stitched_final[:, current_offset : current_offset + cat_size] = (
+                        loaded_final_mus[category][cat_indices]
+                    )
                     var_stitched_final[
                         :, current_offset : current_offset + cat_size
                     ] = loaded_final_vars[category][cat_indices]
@@ -1721,14 +1813,12 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
                 _plot_similarity(
                     start_similarity,
-                    embedding_dir
-                    / "embeddings_cosine_similarity_start_stitched.png",
+                    embedding_dir / "embeddings_cosine_similarity_start_stitched.png",
                     "Cosine Similarity (Start) - Stitched",
                 )
                 _plot_similarity(
                     final_similarity,
-                    embedding_dir
-                    / "embeddings_cosine_similarity_final_stitched.png",
+                    embedding_dir / "embeddings_cosine_similarity_final_stitched.png",
                     "Cosine Similarity (Final) - Stitched",
                 )
 

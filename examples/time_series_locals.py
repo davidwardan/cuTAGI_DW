@@ -4,9 +4,6 @@ from tqdm import tqdm
 from typing import List, Optional
 import copy
 
-from examples.embedding_loader import (
-    TimeSeriesEmbeddings,
-)
 from examples.data_loader import (
     TimeSeriesDataloader,
 )
@@ -215,7 +212,86 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
     m_post = m_pred + K * (y - m_pred)  # posterior mean
     v_post = (1.0 - K) * v_pred  # posterior variance
 
-    return m_post, v_post + var_y
+    return m_post, v_post
+
+# Define function to update aleatoric uncertainty
+def update_aleatoric_uncertainty(
+    mu_z0: np.ndarray,
+    var_z0: np.ndarray,
+    mu_v2bar: np.ndarray,
+    var_v2bar: np.ndarray,
+    y: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+
+    # Handle NaN values in y
+    valid_indices = ~np.isnan(y)
+
+    # Initialize posterior arrays as copies of the priors
+    mu_v2bar_posterior = np.copy(mu_v2bar)
+    var_v2bar_posterior = np.copy(var_v2bar)
+
+    # If all y values are NaN, no update is needed
+    if not np.any(valid_indices):
+        return mu_v2bar_posterior, var_v2bar_posterior
+
+    # Filter all inputs to only include the data for valid (non-NaN) indices.
+    y_valid = y[valid_indices]
+    mu_z0_valid = mu_z0[valid_indices]
+    var_z0_valid = var_z0[valid_indices]
+    mu_v2bar_valid = mu_v2bar[valid_indices]
+    var_v2bar_valid = var_v2bar[valid_indices]
+
+    # Step 1: Define Prior Moments for V, Y, H on valid data
+    mu_v = np.zeros_like(mu_v2bar_valid)
+    var_v = mu_v2bar_valid  # Prior aleatoric uncertainty
+
+    mu_y = mu_z0_valid + mu_v
+    var_y = var_z0_valid + var_v
+
+    mu_h = np.stack([mu_z0_valid, mu_v], axis=1)
+
+    cov_h = np.zeros((len(mu_z0_valid), 2, 2))
+    cov_h[:, 0, 0] = var_z0_valid
+    cov_h[:, 1, 1] = var_v
+
+    cov_hy = np.stack([var_z0_valid, var_v], axis=1)
+
+    # Step 2: Calculate Posterior Moments for H using y on valid data
+    kalman_gain_h = cov_hy / var_y[:, np.newaxis]
+    mu_h_posterior = mu_h + kalman_gain_h * (y_valid - mu_y)[:, np.newaxis]
+    cov_h_posterior = cov_h - np.einsum("bi,bj->bij", kalman_gain_h, cov_hy)
+
+    mu_v_posterior = mu_h_posterior[:, 1]
+    var_v_posterior = cov_h_posterior[:, 1, 1]
+
+    # Step 3: Calculate Posterior Moments for V^2 on valid data
+    mu_v2_posterior = mu_v_posterior**2 + var_v_posterior
+    var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
+        mu_v_posterior**2
+    )
+
+    # Step 4: Calculate Prior Moments for V^2 and Gain 'k' on valid data
+    mu_v2_prior = mu_v2bar_valid
+    var_v2_prior = 3 * var_v2bar_valid + 2 * (mu_v2bar_valid**2)
+
+    k = np.divide(
+        var_v2bar_valid,
+        var_v2_prior,
+        out=np.zeros_like(var_v2bar_valid),
+        where=var_v2_prior != 0,
+    )
+
+    # Step 5: Update V2bar to get its Posterior Moments on valid data
+    mu_v2bar_posterior_valid = mu_v2bar_valid + k * (mu_v2_posterior - mu_v2_prior)
+    var_v2bar_posterior_valid = var_v2bar_valid + k**2 * (
+        var_v2_posterior - var_v2_prior
+    )
+
+    # Place the calculated posterior values
+    mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
+    var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
+
+    return mu_v2bar_posterior, var_v2bar_posterior
 
 
 # Define a class to handle the lstm state buffers
@@ -501,8 +577,8 @@ class Config:
         self.seed: int = 1
 
         # Set data paths
-        self.x_train = "data/hq/train_1.0/split_train_values.csv"
-        self.dates_train = "data/hq/train_1.0/split_train_datetimes.csv"
+        self.x_train = "data/hq/train_0.3/split_train_values.csv"
+        self.dates_train = "data/hq/train_0.3/split_train_datetimes.csv"
         self.x_val = "data/hq/split_val_values.csv"
         self.dates_val = "data/hq/split_val_datetimes.csv"
         self.x_test = "data/hq/split_test_values.csv"
@@ -763,13 +839,27 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                     var_y=var_y,
                 )
 
+                # update aleatoric uncertainty if using AGVI
+                if config.use_AGVI:
+                    (
+                        mu_v2bar_post,
+                        _,
+                    ) = update_aleatoric_uncertainty(
+                        mu_z0=m_pred,
+                        var_z0=v_pred,
+                        mu_v2bar=flat_m[1::2],
+                        var_v2bar=flat_v[1::2],
+                        y=y.flatten(),
+                    )
+                    var_y = mu_v2bar_post  # updated aleatoric uncertainty
+
                 # Update LSTM states for the current batch
                 lstm_state_container.update_states_from_net([0], net)
 
                 # Update look_back buffer
                 look_back_buffer.update(
                     new_mu=m_post,
-                    new_var=v_post,
+                    new_var=v_post + var_y,
                     indices=[0],
                 )
 
@@ -1199,11 +1289,11 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True):
     # Define experiment name
-    experiment_name = "local_lstm_hq_warmup10"
+    experiment_name = "local_lstm_hq_warmup5_0.3"
 
     # Create configuration
     config = Config()
-    config.warmup_epochs = 10
+    config.warmup_epochs = 5
 
     if Train:
         # Train model
