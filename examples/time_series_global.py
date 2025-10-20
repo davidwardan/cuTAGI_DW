@@ -1856,25 +1856,31 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 )
 
 
-def main(Train=False, Eval=True):
-    # Define experiment name
-    experiment_name = "global_lstm_hq_B16_E15_mapped"
+def main(Train=True, Eval=True):
+    list_of_seeds = [1, 42, 235, 1234, 2024]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
-    # Create configuration
-    config = Config()
-    config.num_epochs = 5
-    config.batch_size = 16
+    for seed in list_of_seeds:
+        for exp in list_of_experiments:
+            print(f"Running experiment: {exp} with seed {seed}")
 
-    config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
-    config.eval_plots = False
+            # Define experiment name
+            experiment_name = f"seed{seed}/{exp}/experiment01_global_model"
 
-    if Train:
-        # Train model
-        train_global_model(config, experiment_name=experiment_name)
+            # Create configuration
+            config = Config()
+            config.seed = seed
+            config.batch_size = 16
+            config.x_train = f"data/hq/{exp}/split_train_values.csv"
+            config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
-    if Eval:
-        # Evaluate model
-        eval_global_model(config, experiment_name=experiment_name)
+            if Train:
+                # Train model
+                train_global_model(config, experiment_name=experiment_name)
+
+            if Eval:
+                # Evaluate model
+                eval_global_model(config, experiment_name=experiment_name)
 
 
 if __name__ == "__main__":

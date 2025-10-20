@@ -214,6 +214,7 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
 
     return m_post, v_post
 
+
 # Define function to update aleatoric uncertainty
 def update_aleatoric_uncertainty(
     mu_z0: np.ndarray,
@@ -1288,20 +1289,31 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 
 def main(Train=True, Eval=True):
-    # Define experiment name
-    experiment_name = "local_lstm_hq_warmup5_0.3"
+    list_of_seeds = [1]
+    # list_of_seeds = [1, 42, 235, 1234, 2024]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
-    # Create configuration
-    config = Config()
-    config.warmup_epochs = 5
+    for seed in list_of_seeds:
+        for exp in list_of_experiments:
+            print(f"Running experiment: {exp} with seed {seed}")
 
-    if Train:
-        # Train model
-        train_local_models(config, experiment_name=experiment_name)
+            # Define experiment name
+            experiment_name = f"seed{seed}/{exp}/experiment01_hq_data"
 
-    if Eval:
-        # Evaluate model
-        eval_local_models(config, experiment_name=experiment_name)
+            # Create configuration
+            config = Config()
+            config.warmup_epochs = 5
+            config.seed = seed
+            config.x_train = f"data/hq/{exp}/split_train_values.csv"
+            config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+
+            if Train:
+                # Train model
+                train_local_models(config, experiment_name=experiment_name)
+
+            if Eval:
+                # Evaluate model
+                eval_local_models(config, experiment_name=experiment_name)
 
 
 if __name__ == "__main__":
