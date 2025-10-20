@@ -386,7 +386,6 @@ class LSTMStateContainer:
         packed_states = self._pack_for_net(batch_states)
         net.set_lstm_states(packed_states)
 
-
 class EarlyStopping:
     def __init__(
         self,
@@ -454,6 +453,10 @@ class EarlyStopping:
     ):
         self.epoch_count += 1
         current_score = self._as_float(current_score)
+        in_warmup = self.epoch_count <= self.warmup_epochs
+
+        if in_warmup:
+            return False  # Skip checkpointing during warmup
 
         if self.best_state is None or self._is_improvement(current_score):
             self._store_checkpoint(
@@ -467,9 +470,6 @@ class EarlyStopping:
             )
             self.counter = 0
             return False  # Not early stopping
-
-        if self.epoch_count <= self.warmup_epochs:
-            return False  # Still in warmup period
 
         self.counter += 1
         if self.counter >= self.patience:
@@ -1291,7 +1291,8 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 def main(Train=True, Eval=True):
     list_of_seeds = [1]
     # list_of_seeds = [1, 42, 235, 1234, 2024]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_experiments = ["train40"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -1302,7 +1303,8 @@ def main(Train=True, Eval=True):
 
             # Create configuration
             config = Config()
-            config.warmup_epochs = 5
+            config.warmup_epochs = 10
+            config.patience = 15
             config.seed = seed
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"

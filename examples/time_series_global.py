@@ -465,6 +465,10 @@ class EarlyStopping:
     ):
         self.epoch_count += 1
         current_score = self._as_float(current_score)
+        in_warmup = self.epoch_count <= self.warmup_epochs
+
+        if in_warmup:
+            return False  # Skip checkpointing during warmup
 
         if self.best_state is None or self._is_improvement(current_score):
             self._store_checkpoint(
@@ -479,9 +483,6 @@ class EarlyStopping:
             )
             self.counter = 0
             return False  # Not early stopping
-
-        if self.epoch_count <= self.warmup_epochs:
-            return False  # Still in warmup period
 
         self.counter += 1
         if self.counter >= self.patience:
