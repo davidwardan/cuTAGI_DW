@@ -659,7 +659,7 @@ class Config:
         # Set model parameters
         self.Sigma_v_bounds: tuple = (None, None)
         self.decaying_factor: float = 0.999
-        self.device: str = "cpu"
+        self.device: str = "cuda"
 
         # Set training parameters
         self.num_epochs: int = 100
