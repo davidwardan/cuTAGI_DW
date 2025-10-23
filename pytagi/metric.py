@@ -120,6 +120,25 @@ def rmse(prediction: np.ndarray, observation: np.ndarray) -> float:
     mse_val = mse(prediction, observation)
     return mse_val**0.5
 
+def nrmse(prediction: np.ndarray, observation: np.ndarray) -> float:
+    """Calculates the Normalized Root Mean Squared Error (NRMSE).
+
+    NRMSE is the RMSE divided by the range of the observed values.
+
+    :param prediction: The predicted values.
+    :type prediction: np.ndarray
+    :param observation: The actual (observed) values.
+    :type observation: np.ndarray
+    :return: The normalized root mean squared error.
+    :rtype: float
+    """
+    mse_val = mse(prediction, observation)
+    rmse_val = np.sqrt(mse_val)
+    obs_range = np.nanmax(observation) - np.nanmin(observation)
+    if obs_range == 0:
+        return np.nan
+    return rmse_val / obs_range
+
 
 def classification_error(prediction: np.ndarray, label: np.ndarray) -> float:
     """Computes the classification error rate.

@@ -386,6 +386,7 @@ class LSTMStateContainer:
         packed_states = self._pack_for_net(batch_states)
         net.set_lstm_states(packed_states)
 
+
 class EarlyStopping:
     def __init__(
         self,
@@ -1232,7 +1233,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
                 y_pred = ypred_test[mask_test]
                 s_pred = np.clip(spred_test[mask_test], 1e-6, None)
 
-                test_rmse = metric.rmse(y_pred, y_true)
+                test_rmse = metric.nrmse(y_pred, y_true)
                 test_log_lik = metric.log_likelihood(y_pred, y_true, s_pred)
                 test_mse = metric.mse(y_pred, y_true)
 
@@ -1274,7 +1275,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
-            f.write("Series_ID,RMSE,LogLik,MSE,P50,P90,MASE\n")
+            f.write("Series_ID,NRMSE,LogLik,MSE,P50,P90,MASE\n")
             for i in range(config.nb_ts):
                 f.write(
                     f"{i},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
@@ -1288,26 +1289,29 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             )
 
 
-def main(Train=True, Eval=True):
-    list_of_seeds = [1]
-    # list_of_seeds = [1, 42, 235, 1234, 2024]
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
-    list_of_experiments = ["train40"]
+def main(Train=False, Eval=True):
+    list_of_seeds = [1, 42, 235, 1234, 2024]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
             print(f"Running experiment: {exp} with seed {seed}")
 
+            # Create folders for storing results
+            output_base_dir = f"out/seed{seed}/{exp}"
+            if not os.path.exists(output_base_dir):
+                os.makedirs(output_base_dir)
+
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_hq_data"
+            experiment_name = f"seed{seed}/{exp}/experiment01_local_model"
 
             # Create configuration
             config = Config()
-            config.warmup_epochs = 10
-            config.patience = 15
+            config.warmup_epochs = 5
             config.seed = seed
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.eval_plots = False  # Disable plots for multiple experiments
 
             if Train:
                 # Train model

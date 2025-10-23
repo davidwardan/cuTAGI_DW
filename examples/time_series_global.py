@@ -119,7 +119,7 @@ def build_model(input_size, use_AGVI, seed=1, device="cpu"):
             Linear(40, 1),
         )
     if device == "cpu":
-        net.set_threads(8)
+        net.set_threads(1)
     elif device == "cuda":
         net.to_device("cuda")
     out_updater = OutputUpdater(net.device)
@@ -231,16 +231,27 @@ def update_aleatoric_uncertainty(
     y: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
 
+    # Promote to float64 for numerical stability; remember original dtype for output
+    out_dtype = mu_v2bar.dtype
+    mu_z0 = np.asarray(mu_z0, dtype=np.float64, order="C")
+    var_z0 = np.asarray(var_z0, dtype=np.float64, order="C")
+    mu_v2bar = np.asarray(mu_v2bar, dtype=np.float64, order="C")
+    var_v2bar = np.asarray(var_v2bar, dtype=np.float64, order="C")
+    y = np.asarray(y, dtype=np.float64, order="C")
+
     # Handle NaN values in y
     valid_indices = ~np.isnan(y)
 
     # Initialize posterior arrays as copies of the priors
-    mu_v2bar_posterior = np.copy(mu_v2bar)
-    var_v2bar_posterior = np.copy(var_v2bar)
+    mu_v2bar_posterior = mu_v2bar.copy()
+    var_v2bar_posterior = var_v2bar.copy()
 
     # If all y values are NaN, no update is needed
     if not np.any(valid_indices):
-        return mu_v2bar_posterior, var_v2bar_posterior
+        return (
+            mu_v2bar_posterior.astype(out_dtype, copy=False),
+            var_v2bar_posterior.astype(out_dtype, copy=False),
+        )
 
     # Filter all inputs to only include the data for valid (non-NaN) indices.
     y_valid = y[valid_indices]
@@ -258,35 +269,59 @@ def update_aleatoric_uncertainty(
 
     mu_h = np.stack([mu_z0_valid, mu_v], axis=1)
 
-    cov_h = np.zeros((len(mu_z0_valid), 2, 2))
+    cov_h = np.zeros((len(mu_z0_valid), 2, 2), dtype=np.float64)
     cov_h[:, 0, 0] = var_z0_valid
     cov_h[:, 1, 1] = var_v
 
     cov_hy = np.stack([var_z0_valid, var_v], axis=1)
 
     # Step 2: Calculate Posterior Moments for H using y on valid data
-    kalman_gain_h = cov_hy / var_y[:, np.newaxis]
+    stabilized_var_y = np.clip(var_y, np.finfo(np.float64).eps, None)
+    kalman_gain_h = np.divide(
+        cov_hy,
+        stabilized_var_y[:, np.newaxis],
+        out=np.zeros_like(cov_hy),
+        where=stabilized_var_y[:, np.newaxis] != 0,
+    )
     mu_h_posterior = mu_h + kalman_gain_h * (y_valid - mu_y)[:, np.newaxis]
     cov_h_posterior = cov_h - np.einsum("bi,bj->bij", kalman_gain_h, cov_hy)
 
     mu_v_posterior = mu_h_posterior[:, 1]
     var_v_posterior = cov_h_posterior[:, 1, 1]
+    var_v_posterior = np.clip(var_v_posterior, 0.0, None)
 
     # Step 3: Calculate Posterior Moments for V^2 on valid data
     mu_v2_posterior = mu_v_posterior**2 + var_v_posterior
     var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
         mu_v_posterior**2
     )
+    var_v2_posterior = np.clip(var_v2_posterior, 0.0, None)
 
     # Step 4: Calculate Prior Moments for V^2 and Gain 'k' on valid data
     mu_v2_prior = mu_v2bar_valid
-    var_v2_prior = 3 * var_v2bar_valid + 2 * (mu_v2bar_valid**2)
+    var_v2bar_valid = np.nan_to_num(
+        var_v2bar_valid,
+        nan=0.0,
+        posinf=np.finfo(np.float64).max,
+        neginf=0.0,
+    )
+    mu_v2bar_valid = np.nan_to_num(
+        mu_v2bar_valid,
+        nan=0.0,
+        posinf=np.finfo(np.float64).max,
+        neginf=0.0,
+    )
+    var_v2_prior = 3.0 * var_v2bar_valid
+    var_v2_prior += 2.0 * np.square(mu_v2bar_valid)
+    var_v2_prior = np.clip(
+        var_v2_prior, np.finfo(np.float64).eps, np.finfo(np.float64).max
+    )
 
     k = np.divide(
         var_v2bar_valid,
         var_v2_prior,
         out=np.zeros_like(var_v2bar_valid),
-        where=var_v2_prior != 0,
+        where=np.isfinite(var_v2_prior) & (var_v2_prior != 0.0),
     )
 
     # Step 5: Update V2bar to get its Posterior Moments on valid data
@@ -294,12 +329,16 @@ def update_aleatoric_uncertainty(
     var_v2bar_posterior_valid = var_v2bar_valid + k**2 * (
         var_v2_posterior - var_v2_prior
     )
+    var_v2bar_posterior_valid = np.clip(var_v2bar_posterior_valid, 0.0, None)
 
     # Place the calculated posterior values
     mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
     var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
 
-    return mu_v2bar_posterior, var_v2bar_posterior
+    return (
+        mu_v2bar_posterior.astype(out_dtype, copy=False),
+        var_v2bar_posterior.astype(out_dtype, copy=False),
+    )
 
 
 # Define a class to handle the lstm state buffers
@@ -674,6 +713,7 @@ class Config:
         self.eval_plots: bool = True
         self.eval_metrics: bool = True
         self.seansonal_period: int = 52
+        self.embed_plots: bool = True
 
     @property
     def x_file(self) -> list:
@@ -798,7 +838,8 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             f"Using standard EmbeddingLayer. Embedding size: {config.total_embedding_size}"
         )
         embeddings = EmbeddingLayer(
-            (config.nb_ts, config.embedding_size),
+            num_embeddings=config.nb_ts,
+            embedding_size=config.embedding_size,
             encoding_type=config.embedding_initializer,
             seed=config.seed,
         )
@@ -1393,7 +1434,8 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 y_pred = ypred_test[mask_test]
                 s_pred = np.clip(spred_test[mask_test], 1e-6, None)
 
-                test_rmse = metric.rmse(y_pred, y_true)
+                # normalize data
+                test_rmse = metric.nrmse(y_pred, y_true)
                 test_log_lik = metric.log_likelihood(y_pred, y_true, s_pred)
                 test_mse = metric.mse(y_pred, y_true)
 
@@ -1435,7 +1477,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
-            f.write("Series_ID,RMSE,LogLik,MSE,P50,P90,MASE\n")
+            f.write("Series_ID,NRMSE,LogLik,MSE,P50,P90,MASE\n")
             for i in range(config.nb_ts):
                 f.write(
                     f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
@@ -1543,323 +1585,327 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
         return dist
 
     # Check if *any* embeddings were used
-    if config.total_embedding_size > 0:
-        embedding_dir = input_dir / "embeddings"
+    if config.embed_plots:
+        if config.total_embedding_size > 0:
+            embedding_dir = input_dir / "embeddings"
 
-        if config.use_standard_embeddings:
-            print("Plotting standard (one-per-series) embeddings...")
-            try:
-                start_data = np.load(embedding_dir / "embeddings_start.npz")
-                final_data = np.load(embedding_dir / "embeddings_final.npz")
-
-                start_embeddings_mu = start_data["mu"]
-                start_embeddings_var = start_data["var"]
-                final_embeddings_mu = final_data["mu"]
-                final_embeddings_var = final_data["var"]
-
-                # Labels for standard embeddings are the time series IDs
-                labels = [str(ts_id) for ts_id in config.ts_to_use]
-
-                plot_embeddings(
-                    start_embeddings_mu,
-                    config.nb_ts,
-                    input_dir,
-                    "embeddings/embeddings_mu_pca_start.png",
-                    labels=labels,
-                )
-                plot_embeddings(
-                    final_embeddings_mu,
-                    config.nb_ts,
-                    input_dir,
-                    "embeddings/embeddings_mu_pca_final.png",
-                    labels=labels,
-                )
-
-                start_similarity = _cosine_similarity_matrix(start_embeddings_mu)
-                final_similarity = _cosine_similarity_matrix(final_embeddings_mu)
-
-                _plot_similarity(
-                    start_similarity,
-                    embedding_dir / "embeddings_cosine_similarity_start.png",
-                    "Cosine Similarity (Start)",
-                )
-                _plot_similarity(
-                    final_similarity,
-                    embedding_dir / "embeddings_cosine_similarity_final.png",
-                    "Cosine Similarity (Final)",
-                )
-
-                start_bhattacharyya = _bhattacharyya_distance_matrix(
-                    start_embeddings_mu, start_embeddings_var
-                )
-                final_bhattacharyya = _bhattacharyya_distance_matrix(
-                    final_embeddings_mu, final_embeddings_var
-                )
-
-                bhatt_vmax = float(
-                    max(
-                        np.nanmax(start_bhattacharyya),
-                        np.nanmax(final_bhattacharyya),
-                        1e-12,
-                    )
-                )
-
-                _plot_similarity(
-                    start_bhattacharyya,
-                    embedding_dir / "embeddings_bhattacharyya_distance_start.png",
-                    "Bhattacharyya Distance (Start)",
-                    vmin=0.0,
-                    vmax=bhatt_vmax,
-                )
-                _plot_similarity(
-                    final_bhattacharyya,
-                    embedding_dir / "embeddings_bhattacharyya_distance_final.png",
-                    "Bhattacharyya Distance (Final)",
-                    vmin=0.0,
-                    vmax=bhatt_vmax,
-                )
-            except FileNotFoundError as e:
-                print(
-                    f"Warning: Could not plot standard embeddings. File not found: {e}"
-                )
-            except Exception as e:
-                print(f"Warning: Failed to plot standard embeddings. Error: {e}")
-
-        elif config.use_mapped_embeddings:
-            print("Plotting mapped (categorical) embeddings...")
-
-            # --- 1. Plot per-category embeddings ---
-            categories = sorted(list(config.embedding_map_sizes.keys()))
-
-            # Store loaded embeddings to use for stitching
-            loaded_start_mus = {}
-            loaded_start_vars = {}
-            loaded_final_mus = {}
-            loaded_final_vars = {}
-
-            for category in categories:
-                print(f"  Plotting for category: {category}")
+            if config.use_standard_embeddings:
+                print("Plotting standard (one-per-series) embeddings...")
                 try:
-                    start_data = np.load(
-                        embedding_dir / f"embeddings_start_{category}.npz"
-                    )
-                    final_data = np.load(
-                        embedding_dir / f"embeddings_final_{category}.npz"
-                    )
+                    start_data = np.load(embedding_dir / "embeddings_start.npz")
+                    final_data = np.load(embedding_dir / "embeddings_final.npz")
 
-                    start_mu = start_data["mu"]
-                    start_var = start_data["var"]
-                    final_mu = final_data["mu"]
-                    final_var = final_data["var"]
+                    start_embeddings_mu = start_data["mu"]
+                    start_embeddings_var = start_data["var"]
+                    final_embeddings_mu = final_data["mu"]
+                    final_embeddings_var = final_data["var"]
 
-                    # Store for stitching
-                    loaded_start_mus[category] = start_mu
-                    loaded_start_vars[category] = start_var
-                    loaded_final_mus[category] = final_mu
-                    loaded_final_vars[category] = final_var
+                    # Labels for standard embeddings are the time series IDs
+                    labels = [str(ts_id) for ts_id in config.ts_to_use]
 
-                    n_entities = start_mu.shape[0]
-                    labels = config.embedding_map_labels[category]
-
-                    # Create sub-directory
-                    category_plot_dir = embedding_dir / category
-                    category_plot_dir.mkdir(parents=True, exist_ok=True)
-
-                    # Plot PCA
                     plot_embeddings(
-                        start_mu,
-                        n_entities,
-                        input_dir,  # base dir
-                        f"embeddings/{category}/pca_start.png",
+                        start_embeddings_mu,
+                        config.nb_ts,
+                        input_dir,
+                        "embeddings/embeddings_mu_pca_start.png",
                         labels=labels,
                     )
                     plot_embeddings(
-                        final_mu,
-                        n_entities,
-                        input_dir,  # base dir
-                        f"embeddings/{category}/pca_final.png",
+                        final_embeddings_mu,
+                        config.nb_ts,
+                        input_dir,
+                        "embeddings/embeddings_mu_pca_final.png",
+                        labels=labels,
+                    )
+
+                    start_similarity = _cosine_similarity_matrix(start_embeddings_mu)
+                    final_similarity = _cosine_similarity_matrix(final_embeddings_mu)
+
+                    _plot_similarity(
+                        start_similarity,
+                        embedding_dir / "embeddings_cosine_similarity_start.png",
+                        "Cosine Similarity (Start)",
+                    )
+                    _plot_similarity(
+                        final_similarity,
+                        embedding_dir / "embeddings_cosine_similarity_final.png",
+                        "Cosine Similarity (Final)",
+                    )
+
+                    start_bhattacharyya = _bhattacharyya_distance_matrix(
+                        start_embeddings_mu, start_embeddings_var
+                    )
+                    final_bhattacharyya = _bhattacharyya_distance_matrix(
+                        final_embeddings_mu, final_embeddings_var
+                    )
+
+                    bhatt_vmax = float(
+                        max(
+                            np.nanmax(start_bhattacharyya),
+                            np.nanmax(final_bhattacharyya),
+                            1e-12,
+                        )
+                    )
+
+                    _plot_similarity(
+                        start_bhattacharyya,
+                        embedding_dir / "embeddings_bhattacharyya_distance_start.png",
+                        "Bhattacharyya Distance (Start)",
+                        vmin=0.0,
+                        vmax=bhatt_vmax,
+                    )
+                    _plot_similarity(
+                        final_bhattacharyya,
+                        embedding_dir / "embeddings_bhattacharyya_distance_final.png",
+                        "Bhattacharyya Distance (Final)",
+                        vmin=0.0,
+                        vmax=bhatt_vmax,
+                    )
+                except FileNotFoundError as e:
+                    print(
+                        f"Warning: Could not plot standard embeddings. File not found: {e}"
+                    )
+                except Exception as e:
+                    print(f"Warning: Failed to plot standard embeddings. Error: {e}")
+
+            elif config.use_mapped_embeddings:
+                print("Plotting mapped (categorical) embeddings...")
+
+                # --- 1. Plot per-category embeddings ---
+                categories = sorted(list(config.embedding_map_sizes.keys()))
+
+                # Store loaded embeddings to use for stitching
+                loaded_start_mus = {}
+                loaded_start_vars = {}
+                loaded_final_mus = {}
+                loaded_final_vars = {}
+
+                for category in categories:
+                    print(f"  Plotting for category: {category}")
+                    try:
+                        start_data = np.load(
+                            embedding_dir / f"embeddings_start_{category}.npz"
+                        )
+                        final_data = np.load(
+                            embedding_dir / f"embeddings_final_{category}.npz"
+                        )
+
+                        start_mu = start_data["mu"]
+                        start_var = start_data["var"]
+                        final_mu = final_data["mu"]
+                        final_var = final_data["var"]
+
+                        # Store for stitching
+                        loaded_start_mus[category] = start_mu
+                        loaded_start_vars[category] = start_var
+                        loaded_final_mus[category] = final_mu
+                        loaded_final_vars[category] = final_var
+
+                        n_entities = start_mu.shape[0]
+                        labels = config.embedding_map_labels[category]
+
+                        # Create sub-directory
+                        category_plot_dir = embedding_dir / category
+                        category_plot_dir.mkdir(parents=True, exist_ok=True)
+
+                        # Plot PCA
+                        plot_embeddings(
+                            start_mu,
+                            n_entities,
+                            input_dir,  # base dir
+                            f"embeddings/{category}/pca_start.png",
+                            labels=labels,
+                        )
+                        plot_embeddings(
+                            final_mu,
+                            n_entities,
+                            input_dir,  # base dir
+                            f"embeddings/{category}/pca_final.png",
+                            labels=labels,
+                        )
+
+                        # Plot Cosine Similarity
+                        start_similarity = _cosine_similarity_matrix(start_mu)
+                        final_similarity = _cosine_similarity_matrix(final_mu)
+
+                        _plot_similarity(
+                            start_similarity,
+                            category_plot_dir / "cosine_similarity_start.png",
+                            f"Cosine Similarity (Start) - {category}",
+                            labels=labels,
+                        )
+                        _plot_similarity(
+                            final_similarity,
+                            category_plot_dir / "cosine_similarity_final.png",
+                            f"Cosine Similarity (Final) - {category}",
+                            labels=labels,
+                        )
+
+                        # Plot Bhattacharyya Distance
+                        start_bhat = _bhattacharyya_distance_matrix(start_mu, start_var)
+                        final_bhat = _bhattacharyya_distance_matrix(final_mu, final_var)
+                        bhat_vmax = float(
+                            max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
+                        )
+
+                        _plot_similarity(
+                            start_bhat,
+                            category_plot_dir / "bhattacharyya_distance_start.png",
+                            f"Bhattacharyya Distance (Start) - {category}",
+                            vmin=0.0,
+                            vmax=bhat_vmax,
+                            labels=labels,
+                        )
+                        _plot_similarity(
+                            final_bhat,
+                            category_plot_dir / "bhattacharyya_distance_final.png",
+                            f"Bhattacharyya Distance (Final) - {category}",
+                            vmin=0.0,
+                            vmax=bhat_vmax,
+                            labels=labels,
+                        )
+                    except FileNotFoundError as e:
+                        print(
+                            f"  Warning: Could not plot category {category}. File not found: {e}"
+                        )
+                        continue  # Skip to next category
+                    except Exception as e:
+                        print(f"  Warning: Failed to plot category {category}. Error: {e}")
+                        continue
+
+                # --- 2. Stitch Embeddings ---
+                print("Stitching full time series embeddings for plotting...")
+                try:
+                    # Load and filter map to the series we used, in the correct order
+                    if not os.path.exists(config.embedding_map_dir):
+                        raise FileNotFoundError(
+                            f"Map file not found: {config.embedding_map_dir}"
+                        )
+
+                    map_df = pd.read_csv(config.embedding_map_dir).set_index("ts_id")
+
+                    if config.ts_to_use is None:
+                        raise ValueError(
+                            "config.ts_to_use is None, cannot stitch embeddings."
+                        )
+
+                    # Re-order map based on ts_to_use
+                    map_df_ordered = map_df.loc[config.ts_to_use]
+
+                    # Initialize stitched matrices
+                    mu_stitched_start = np.zeros(
+                        (config.nb_ts, config.total_embedding_size), dtype=np.float32
+                    )
+                    var_stitched_start = np.zeros_like(mu_stitched_start)
+                    mu_stitched_final = np.zeros_like(mu_stitched_start)
+                    var_stitched_final = np.zeros_like(mu_stitched_start)
+
+                    current_offset = 0
+                    for category in categories:  # categories is already sorted
+                        if category not in loaded_start_mus:
+                            print(
+                                f"  Skipping category {category} in stitching (was not loaded)."
+                            )
+                            # Need to advance offset!
+                            current_offset += config.embedding_map_sizes[category]
+                            continue
+
+                        cat_size = config.embedding_map_sizes[category]
+
+                        # Get indices from the ordered map
+                        cat_indices = map_df_ordered[category].values
+
+                        # Pull embeddings using the indices
+                        mu_stitched_start[:, current_offset : current_offset + cat_size] = (
+                            loaded_start_mus[category][cat_indices]
+                        )
+                        var_stitched_start[
+                            :, current_offset : current_offset + cat_size
+                        ] = loaded_start_vars[category][cat_indices]
+                        mu_stitched_final[:, current_offset : current_offset + cat_size] = (
+                            loaded_final_mus[category][cat_indices]
+                        )
+                        var_stitched_final[
+                            :, current_offset : current_offset + cat_size
+                        ] = loaded_final_vars[category][cat_indices]
+
+                        current_offset += cat_size
+
+                    # --- 3. Plot Stitched Embeddings ---
+                    print("Plotting stitched (full) time series embeddings...")
+                    labels = [str(ts_id) for ts_id in config.ts_to_use]
+
+                    # Plot PCA
+                    plot_embeddings(
+                        mu_stitched_start,
+                        config.nb_ts,
+                        input_dir,
+                        "embeddings/embeddings_mu_pca_start_stitched.png",
+                        labels=labels,
+                    )
+                    plot_embeddings(
+                        mu_stitched_final,
+                        config.nb_ts,
+                        input_dir,
+                        "embeddings/embeddings_mu_pca_final_stitched.png",
                         labels=labels,
                     )
 
                     # Plot Cosine Similarity
-                    start_similarity = _cosine_similarity_matrix(start_mu)
-                    final_similarity = _cosine_similarity_matrix(final_mu)
+                    start_similarity = _cosine_similarity_matrix(mu_stitched_start)
+                    final_similarity = _cosine_similarity_matrix(mu_stitched_final)
 
                     _plot_similarity(
                         start_similarity,
-                        category_plot_dir / "cosine_similarity_start.png",
-                        f"Cosine Similarity (Start) - {category}",
-                        labels=labels,
+                        embedding_dir / "embeddings_cosine_similarity_start_stitched.png",
+                        "Cosine Similarity (Start) - Stitched",
                     )
                     _plot_similarity(
                         final_similarity,
-                        category_plot_dir / "cosine_similarity_final.png",
-                        f"Cosine Similarity (Final) - {category}",
-                        labels=labels,
+                        embedding_dir / "embeddings_cosine_similarity_final_stitched.png",
+                        "Cosine Similarity (Final) - Stitched",
                     )
 
                     # Plot Bhattacharyya Distance
-                    start_bhat = _bhattacharyya_distance_matrix(start_mu, start_var)
-                    final_bhat = _bhattacharyya_distance_matrix(final_mu, final_var)
+                    start_bhat = _bhattacharyya_distance_matrix(
+                        mu_stitched_start, var_stitched_start
+                    )
+                    final_bhat = _bhattacharyya_distance_matrix(
+                        mu_stitched_final, var_stitched_final
+                    )
                     bhat_vmax = float(
                         max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
                     )
 
                     _plot_similarity(
                         start_bhat,
-                        category_plot_dir / "bhattacharyya_distance_start.png",
-                        f"Bhattacharyya Distance (Start) - {category}",
+                        embedding_dir
+                        / "embeddings_bhattacharyya_distance_start_stitched.png",
+                        "Bhattacharyya Distance (Start) - Stitched",
                         vmin=0.0,
                         vmax=bhat_vmax,
-                        labels=labels,
                     )
                     _plot_similarity(
                         final_bhat,
-                        category_plot_dir / "bhattacharyya_distance_final.png",
-                        f"Bhattacharyya Distance (Final) - {category}",
+                        embedding_dir
+                        / "embeddings_bhattacharyya_distance_final_stitched.png",
+                        "Bhattacharyya Distance (Final) - Stitched",
                         vmin=0.0,
                         vmax=bhat_vmax,
-                        labels=labels,
                     )
-                except FileNotFoundError as e:
-                    print(
-                        f"  Warning: Could not plot category {category}. File not found: {e}"
-                    )
-                    continue  # Skip to next category
+
                 except Exception as e:
-                    print(f"  Warning: Failed to plot category {category}. Error: {e}")
-                    continue
-
-            # --- 2. Stitch Embeddings ---
-            print("Stitching full time series embeddings for plotting...")
-            try:
-                # Load and filter map to the series we used, in the correct order
-                if not os.path.exists(config.embedding_map_dir):
-                    raise FileNotFoundError(
-                        f"Map file not found: {config.embedding_map_dir}"
+                    print(
+                        f"  Warning: Failed to stitch and plot full embeddings. Error: {e}"
                     )
 
-                map_df = pd.read_csv(config.embedding_map_dir).set_index("ts_id")
 
-                if config.ts_to_use is None:
-                    raise ValueError(
-                        "config.ts_to_use is None, cannot stitch embeddings."
-                    )
+def main(Train=False, Eval=True):
+    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    # list_of_seeds = [1, 42, 235, 1234, 2024]
 
-                # Re-order map based on ts_to_use
-                map_df_ordered = map_df.loc[config.ts_to_use]
-
-                # Initialize stitched matrices
-                mu_stitched_start = np.zeros(
-                    (config.nb_ts, config.total_embedding_size), dtype=np.float32
-                )
-                var_stitched_start = np.zeros_like(mu_stitched_start)
-                mu_stitched_final = np.zeros_like(mu_stitched_start)
-                var_stitched_final = np.zeros_like(mu_stitched_start)
-
-                current_offset = 0
-                for category in categories:  # categories is already sorted
-                    if category not in loaded_start_mus:
-                        print(
-                            f"  Skipping category {category} in stitching (was not loaded)."
-                        )
-                        # Need to advance offset!
-                        current_offset += config.embedding_map_sizes[category]
-                        continue
-
-                    cat_size = config.embedding_map_sizes[category]
-
-                    # Get indices from the ordered map
-                    cat_indices = map_df_ordered[category].values
-
-                    # Pull embeddings using the indices
-                    mu_stitched_start[:, current_offset : current_offset + cat_size] = (
-                        loaded_start_mus[category][cat_indices]
-                    )
-                    var_stitched_start[
-                        :, current_offset : current_offset + cat_size
-                    ] = loaded_start_vars[category][cat_indices]
-                    mu_stitched_final[:, current_offset : current_offset + cat_size] = (
-                        loaded_final_mus[category][cat_indices]
-                    )
-                    var_stitched_final[
-                        :, current_offset : current_offset + cat_size
-                    ] = loaded_final_vars[category][cat_indices]
-
-                    current_offset += cat_size
-
-                # --- 3. Plot Stitched Embeddings ---
-                print("Plotting stitched (full) time series embeddings...")
-                labels = [str(ts_id) for ts_id in config.ts_to_use]
-
-                # Plot PCA
-                plot_embeddings(
-                    mu_stitched_start,
-                    config.nb_ts,
-                    input_dir,
-                    "embeddings/embeddings_mu_pca_start_stitched.png",
-                    labels=labels,
-                )
-                plot_embeddings(
-                    mu_stitched_final,
-                    config.nb_ts,
-                    input_dir,
-                    "embeddings/embeddings_mu_pca_final_stitched.png",
-                    labels=labels,
-                )
-
-                # Plot Cosine Similarity
-                start_similarity = _cosine_similarity_matrix(mu_stitched_start)
-                final_similarity = _cosine_similarity_matrix(mu_stitched_final)
-
-                _plot_similarity(
-                    start_similarity,
-                    embedding_dir / "embeddings_cosine_similarity_start_stitched.png",
-                    "Cosine Similarity (Start) - Stitched",
-                )
-                _plot_similarity(
-                    final_similarity,
-                    embedding_dir / "embeddings_cosine_similarity_final_stitched.png",
-                    "Cosine Similarity (Final) - Stitched",
-                )
-
-                # Plot Bhattacharyya Distance
-                start_bhat = _bhattacharyya_distance_matrix(
-                    mu_stitched_start, var_stitched_start
-                )
-                final_bhat = _bhattacharyya_distance_matrix(
-                    mu_stitched_final, var_stitched_final
-                )
-                bhat_vmax = float(
-                    max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
-                )
-
-                _plot_similarity(
-                    start_bhat,
-                    embedding_dir
-                    / "embeddings_bhattacharyya_distance_start_stitched.png",
-                    "Bhattacharyya Distance (Start) - Stitched",
-                    vmin=0.0,
-                    vmax=bhat_vmax,
-                )
-                _plot_similarity(
-                    final_bhat,
-                    embedding_dir
-                    / "embeddings_bhattacharyya_distance_final_stitched.png",
-                    "Bhattacharyya Distance (Final) - Stitched",
-                    vmin=0.0,
-                    vmax=bhat_vmax,
-                )
-
-            except Exception as e:
-                print(
-                    f"  Warning: Failed to stitch and plot full embeddings. Error: {e}"
-                )
-
-
-def main(Train=True, Eval=True):
-    list_of_seeds = [1, 42, 235, 1234, 2024]
     list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [1]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -1871,9 +1917,15 @@ def main(Train=True, Eval=True):
             # Create configuration
             config = Config()
             config.seed = seed
-            config.batch_size = 16
+            config.device = "cpu"
+            config.batch_size = 1
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.eval_plots = True
+            config.embed_plots = False
+            config.shuffle_train_windows = True
+            # config.embedding_size = 15
+            # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
 
             if Train:
                 # Train model
