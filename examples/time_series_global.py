@@ -398,22 +398,44 @@ class LSTMStateContainer:
             )
         return packed
 
-    def update_states_from_net(self, indices: np.ndarray, net):
+    def update_states_from_net(self, indices: np.ndarray, net, mask: np.ndarray):
         """
-        Gets the latest states from the network for the given indices and
-        updates the internal storage using vectorized assignment.
+        Gets the latest states from the network and updates the internal
+        storage only for the *active* (non-padded) time series.
+
+        Args:
+            indices (np.ndarray): The global TS indices for the *entire batch*. Shape (B,).
+            net: The network object.
+            mask (np.ndarray): A boolean mask. Shape (B,). True for active, False for padded.
         """
         net_states = net.get_lstm_states()
-        batch_size = len(indices)
+        batch_size = len(indices)  # This is B
 
+        # Unpack states for the full batch
         unpacked_states = self._unpack_net_states(net_states, batch_size)
+
+        # Get the global indices of *only* the active time series
+        active_indices = indices[mask]
+
+        # If the entire batch was padded, there's nothing to update
+        if active_indices.size == 0:
+            return
 
         # Vectorized update using advanced indexing
         for layer_idx, components in unpacked_states.items():
-            self.states[layer_idx]["mu_h"][indices] = components["mu_h"]
-            self.states[layer_idx]["var_h"][indices] = components["var_h"]
-            self.states[layer_idx]["mu_c"][indices] = components["mu_c"]
-            self.states[layer_idx]["var_c"][indices] = components["var_c"]
+            # components["mu_h"] has shape (B, state_dim)
+            # Filter it using the mask to get shape (num_active, state_dim)
+            active_mu_h = components["mu_h"][mask]
+            active_var_h = components["var_h"][mask]
+            active_mu_c = components["mu_c"][mask]
+            active_var_c = components["var_c"][mask]
+
+            # Now assign the (num_active, state_dim) data to the
+            # correct (num_active,) global indices in our persistent storage
+            self.states[layer_idx]["mu_h"][active_indices] = active_mu_h
+            self.states[layer_idx]["var_h"][active_indices] = active_var_h
+            self.states[layer_idx]["mu_c"][active_indices] = active_mu_c
+            self.states[layer_idx]["var_c"][active_indices] = active_var_c
 
     def set_states_on_net(self, indices: np.ndarray, net):
         """
@@ -924,12 +946,13 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         if not config.use_AGVI:
             sigma_v = decaying_sigma_v[epoch]
 
-        for x, y, ts_id, w_id in train_batch_iter:
+        for x, y, ts_id, w_id, active_mask in train_batch_iter:
 
             # get current batch size and indices
             B = x.shape[0]
             indices = ts_id
             time_steps = w_id
+            active_indices = indices[active_mask]
 
             # set LSTM states for the current batch
             lstm_state_container.set_states_on_net(indices, net)
@@ -1044,13 +1067,15 @@ def train_global_model(config, experiment_name: Optional[str] = None):
                 var_y = mu_v2bar_post  # updated aleatoric uncertainty
 
             # Update LSTM states for the current batch
-            lstm_state_container.update_states_from_net(indices, net)
+            lstm_state_container.update_states_from_net(indices, net, active_mask)
 
             # Update look_back buffer
+            m_post_active = m_post.reshape(B, -1)[:, -1][active_mask]
+            var_post_total_active = (v_post + var_y).reshape(B, -1)[:, -1][active_mask]
             look_back_buffer.update(
-                new_mu=m_post.reshape(B, -1)[:, -1],
-                new_var=(v_post + var_y).reshape(B, -1)[:, -1],
-                indices=indices,
+                new_mu=m_post_active,
+                new_var=var_post_total_active,
+                indices=active_indices,
             )
 
         # End of epoch
@@ -1074,12 +1099,13 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             include_ids=True,
         )
 
-        for x, y, ts_id, w_id in val_batch_iter:
+        for x, y, ts_id, w_id, active_mask in val_batch_iter:
 
             # get current batch size and indices
             B = x.shape[0]
             indices = ts_id
             time_steps = w_id
+            active_indices = indices[active_mask]
 
             # set LSTM states for the current batch
             lstm_state_container.set_states_on_net(indices, net)
@@ -1114,7 +1140,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             m_pred, v_pred = net(x, var_x)
 
             # Update LSTM states for the current batch
-            lstm_state_container.update_states_from_net(indices, net)
+            lstm_state_container.update_states_from_net(indices, net, active_mask)
 
             # Specific to AGVI
             if config.use_AGVI:
@@ -1151,10 +1177,12 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             )
 
             # Update look_back buffer
+            m_pred_active = m_pred.reshape(B, -1)[:, -1][active_mask]
+            v_pred_total_active = v_pred_total.reshape(B, -1)[:, -1][active_mask]
             look_back_buffer.update(
-                new_mu=m_pred.reshape(B, -1)[:, -1],
-                new_var=v_pred_total.reshape(B, -1)[:, -1],  # Use total variance
-                indices=indices,
+                new_mu=m_pred_active,
+                new_var=v_pred_total_active,
+                indices=active_indices,
             )
 
         # End of epoch
@@ -1229,12 +1257,13 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         include_ids=True,
     )
 
-    for x, y, ts_id, w_id in test_batch_iter:
+    for x, y, ts_id, w_id, active_mask in test_batch_iter:
 
         # get current batch size and indices
         B = x.shape[0]
         indices = ts_id.tolist()
         time_steps = w_id.tolist()
+        active_indices = indices[active_mask]
 
         # set LSTM states for the current batch
         lstm_state_container.set_states_on_net(indices, net)
@@ -1267,7 +1296,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         m_pred, v_pred = net(x, var_x)
 
         # Update LSTM states for the current batch
-        lstm_state_container.update_states_from_net(indices, net)
+        lstm_state_container.update_states_from_net(indices, net, active_mask)
 
         # Specific to AGVI
         if config.use_AGVI:
@@ -1290,10 +1319,12 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         )
 
         # Update look_back buffer
+        m_pred_active = m_pred.reshape(B, -1)[:, -1][active_mask]
+        v_pred_total_active = v_pred_total.reshape(B, -1)[:, -1][active_mask]
         look_back_buffer.update(
-            new_mu=m_pred.reshape(B, -1)[:, -1],
-            new_var=v_pred_total.reshape(B, -1)[:, -1],  # Use total variance
-            indices=indices,
+            new_mu=m_pred_active,
+            new_var=v_pred_total_active,
+            indices=active_indices,
         )
 
     # End of epoch
@@ -1770,7 +1801,9 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         )
                         continue  # Skip to next category
                     except Exception as e:
-                        print(f"  Warning: Failed to plot category {category}. Error: {e}")
+                        print(
+                            f"  Warning: Failed to plot category {category}. Error: {e}"
+                        )
                         continue
 
                 # --- 2. Stitch Embeddings ---
@@ -1816,15 +1849,15 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         cat_indices = map_df_ordered[category].values
 
                         # Pull embeddings using the indices
-                        mu_stitched_start[:, current_offset : current_offset + cat_size] = (
-                            loaded_start_mus[category][cat_indices]
-                        )
+                        mu_stitched_start[
+                            :, current_offset : current_offset + cat_size
+                        ] = loaded_start_mus[category][cat_indices]
                         var_stitched_start[
                             :, current_offset : current_offset + cat_size
                         ] = loaded_start_vars[category][cat_indices]
-                        mu_stitched_final[:, current_offset : current_offset + cat_size] = (
-                            loaded_final_mus[category][cat_indices]
-                        )
+                        mu_stitched_final[
+                            :, current_offset : current_offset + cat_size
+                        ] = loaded_final_mus[category][cat_indices]
                         var_stitched_final[
                             :, current_offset : current_offset + cat_size
                         ] = loaded_final_vars[category][cat_indices]
@@ -1857,12 +1890,14 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
                     _plot_similarity(
                         start_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_start_stitched.png",
+                        embedding_dir
+                        / "embeddings_cosine_similarity_start_stitched.png",
                         "Cosine Similarity (Start) - Stitched",
                     )
                     _plot_similarity(
                         final_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_final_stitched.png",
+                        embedding_dir
+                        / "embeddings_cosine_similarity_final_stitched.png",
                         "Cosine Similarity (Final) - Stitched",
                     )
 

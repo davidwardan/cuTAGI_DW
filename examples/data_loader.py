@@ -550,6 +550,11 @@ class TimeSeriesDataloader:
 #         return self.batch_generator(*self.dataset["value"], batch_size, shuffle)
 
 
+import numpy as np
+import pandas as pd
+from typing import List, Optional, Dict, Tuple, Generator
+
+
 class GlobalTimeSeriesDataloader:
     """
     Multi-TS dataloader with configurable ordering of (x, y) windows.
@@ -560,6 +565,7 @@ class GlobalTimeSeriesDataloader:
     order_mode:
         - "by_window": Take window #0 from ts0, ts1, ..., tsN-1; then window #1 from ts0, ts1, ..., tsN-1; etc.
                        (Preserves CSV series order; this is the default.)
+                       **This mode now pads with NaNs and provides an 'is_active' mask.**
         - "by_series": All windows of ts0, then all windows of ts1, ..., tsN-1.
     """
 
@@ -642,6 +648,7 @@ class GlobalTimeSeriesDataloader:
         x_rolled, y_rolled = self.dataset["value"]
         series_id = self.dataset.get("series_id", None)
         window_id = self.dataset.get("window_id", None)
+        is_active = self.dataset.get("is_active", None)  # Get the new mask
 
         # Prepare sampling indices
         n = x_rolled.shape[0]
@@ -723,10 +730,15 @@ class GlobalTimeSeriesDataloader:
                     sl = segment[start : start + batch_size]
                     Xb = x_rolled[sl].reshape(len(sl), -1)
                     Yb = y_rolled[sl].reshape(len(sl), -1)
-                    if include_ids and (series_id is not None):
+                    if (
+                        include_ids
+                        and (series_id is not None)
+                        and (is_active is not None)
+                    ):
                         Sb = series_id[sl]
                         Kb = window_id[sl]
-                        yield Xb, Yb, Sb, Kb
+                        Ab = is_active[sl]  # Get the mask slice
+                        yield Xb, Yb, Sb, Kb, Ab  # Yield it
                     else:
                         yield Xb, Yb
             return
@@ -739,10 +751,16 @@ class GlobalTimeSeriesDataloader:
                 continue
             Xb = x_rolled[sl].reshape(len(sl), -1)
             Yb = y_rolled[sl].reshape(len(sl), -1)
-            if include_ids and (series_id is not None) and (window_id is not None):
+            if (
+                include_ids
+                and (series_id is not None)
+                and (window_id is not None)
+                and (is_active is not None)
+            ):
                 Sb = series_id[sl]
                 Kb = window_id[sl]
-                yield Xb, Yb, Sb, Kb
+                Ab = is_active[sl]  # Get the mask slice
+                yield Xb, Yb, Sb, Kb, Ab  # Yield it
             else:
                 yield Xb, Yb
 
@@ -775,10 +793,9 @@ class GlobalTimeSeriesDataloader:
 
         for j in range(N):
             xj, dtj = X_all[:, j], DT_all[:, j]
-            # TODO: debug this
-            xj, dtj = self._trim_trailing_nans(
-                xj, dtj
-            )  # needed for some series that are shorter than T
+
+            #  Trim trailing NaNs
+            xj, dtj = self._trim_trailing_nans(xj, dtj)
 
             # Build [target, covs...]
             covs = self._time_covariates_from_datetime_column(dtj)
@@ -885,11 +902,13 @@ class GlobalTimeSeriesDataloader:
 
         # ordering of windows (effective if shuffle=False)
         if self.order_mode == "by_window":
-            X, Y, W, S, K = self._order_by_window_index(
+            X, Y, W, S, K, A = self._order_by_window_index(  # Catch A
                 rolled_per_ts, scale_is_per_window
             )
         elif self.order_mode == "by_series":
-            X, Y, W, S, K = self._order_by_series(rolled_per_ts, scale_is_per_window)
+            X, Y, W, S, K, A = self._order_by_series(  # Catch A
+                rolled_per_ts, scale_is_per_window
+            )
         else:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
 
@@ -897,6 +916,7 @@ class GlobalTimeSeriesDataloader:
             "value": (X, Y),
             "series_id": S,
             "window_id": K,
+            "is_active": A,  # Store the active mask
         }
         if W is not None:
             dataset["weights"] = W
@@ -977,17 +997,31 @@ class GlobalTimeSeriesDataloader:
         """
         T, F = X.shape
         min_len = input_seq_len + output_seq_len
-        if T < min_len:
+
+        # Find first valid index (if any NaNs at the start)
+        first_valid_idx = 0
+        if np.isnan(X[:, 0]).any():
+            valid_indices = np.where(~np.isnan(X[:, 0]))[0]
+            if len(valid_indices) == 0:
+                # All NaNs, return empty
+                return np.empty((0, input_seq_len * F), dtype=np.float32), np.empty(
+                    (0, output_seq_len), dtype=np.float32
+                )
+            first_valid_idx = valid_indices[0]
+
+        # Adjust T to be the effective length from the first valid point
+        T_effective = T - first_valid_idx
+        if T_effective < min_len:
             return np.empty((0, input_seq_len * F), dtype=np.float32), np.empty(
                 (0, output_seq_len), dtype=np.float32
             )
 
-        n_win = 1 + (T - min_len) // stride
+        n_win = 1 + (T_effective - min_len) // stride
         xw = np.zeros((n_win, input_seq_len * F), dtype=np.float32)
         yw = np.zeros((n_win, output_seq_len), dtype=np.float32)
 
         for i in range(n_win):
-            s = i * stride
+            s = first_valid_idx + i * stride
             x_slice = X[s : s + input_seq_len, :]  # (L, F)
             y_slice = X[
                 s + input_seq_len : s + input_seq_len + output_seq_len, 0
@@ -1006,6 +1040,9 @@ class GlobalTimeSeriesDataloader:
         Nw = xw.shape[0]
         L = self.input_seq_len
         F = feat_count
+        if F <= 1:  # No covariates to keep
+            return xw[:, np.arange(0, L * F, F)]  # Just return targets
+
         out = np.zeros((Nw, L + (F - 1)), dtype=np.float32)
         # indices of target over the window
         tgt_idx = np.arange(0, L * F, F)
@@ -1021,28 +1058,56 @@ class GlobalTimeSeriesDataloader:
     def _order_by_window_index(
         rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
         per_ts_deepar_weights: List[Optional[np.ndarray]],
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray]:
+    ) -> Tuple[
+        np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray, np.ndarray
+    ]:
         n_ts = len(rolled_per_ts)
         counts = [len(yw) for (_, yw) in rolled_per_ts]
-        if max(counts, default=0) == 0:
+        max_k = max(counts, default=0)
+        total = n_ts * max_k
+
+        if total == 0:
             return (
                 np.empty((0, 0), dtype=np.float32),
                 np.empty((0, 0), dtype=np.float32),
                 None,
                 np.empty((0,), dtype=np.int32),
                 np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=bool),  # Add active mask
             )
 
+        # Find sample shapes
         sample_x = next((x for (x, y) in rolled_per_ts if len(y) > 0), None)
         sample_y = next((y for (x, y) in rolled_per_ts if len(y) > 0), None)
-        feat_x = sample_x.shape[1]
-        feat_y = sample_y.shape[1]
 
-        total = sum(counts)
+        # Handle case where all series might be empty
+        if sample_x is None or sample_y is None:
+            try:
+                # Try to get shape from empty arrays if possible
+                sample_x_shape = rolled_per_ts[0][0].shape[1]
+                sample_y_shape = rolled_per_ts[0][1].shape[1]
+            except (IndexError, AttributeError):
+                # Cannot determine shape, return empty
+                return (
+                    np.empty((0, 0), dtype=np.float32),
+                    np.empty((0, 0), dtype=np.float32),
+                    None,
+                    np.empty((0,), dtype=np.int32),
+                    np.empty((0,), dtype=np.int32),
+                    np.empty((0,), dtype=bool),
+                )
+            feat_x = 0 if sample_x_shape == 0 else rolled_per_ts[0][0].shape[1]
+            feat_y = 0 if sample_y_shape == 0 else rolled_per_ts[0][1].shape[1]
+        else:
+            feat_x = sample_x.shape[1]
+            feat_y = sample_y.shape[1]
+
+        # Initialize full arrays
         X = np.zeros((total, feat_x), dtype=np.float32)
         Y = np.zeros((total, feat_y), dtype=np.float32)
         S = np.zeros((total,), dtype=np.int32)
         K = np.zeros((total,), dtype=np.int32)
+        A = np.zeros((total,), dtype=bool)  # The new active mask
         W = (
             np.zeros((total,), dtype=np.float32)
             if any(w is not None for w in per_ts_deepar_weights)
@@ -1050,29 +1115,40 @@ class GlobalTimeSeriesDataloader:
         )
 
         write = 0
-        max_k = max(counts)
         for k in range(max_k):
             for j in range(n_ts):
-                xj, yj = rolled_per_ts[j]
-                if k < len(yj):
+                S[write] = j
+                K[write] = k
+
+                if k < counts[j]:
+                    # This is a real window
+                    xj, yj = rolled_per_ts[j]
                     X[write] = xj[k]
                     Y[write] = yj[k]
-                    S[write] = j
-                    K[write] = k
+                    A[write] = True  # Mark as active
                     if W is not None and per_ts_deepar_weights[j] is not None:
                         W[write] = per_ts_deepar_weights[j][k]
-                    write += 1
+                else:
+                    # This is a padded window
+                    X[write].fill(np.nan)
+                    Y[write].fill(np.nan)
+                    A[write] = False  # Mark as inactive
+                    if W is not None:
+                        W[write] = 0.0  # or np.nan
 
-        S, K = S[:write], K[:write]
+                write += 1
+
         if W is not None:
-            return X[:write], Y[:write], W[:write], S, K
-        return X[:write], Y[:write], None, S, K
+            return X, Y, W, S, K, A
+        return X, Y, None, S, K, A
 
     @staticmethod
     def _order_by_series(
         rolled_per_ts: List[Tuple[np.ndarray, np.ndarray]],
         per_ts_deepar_weights: List[Optional[np.ndarray]],
-    ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray]:
+    ) -> Tuple[
+        np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray, np.ndarray
+    ]:  # Added np.ndarray
         xs, ys, ws = [], [], []
         S_parts, K_parts = [], []
         for j, (xj, yj) in enumerate(rolled_per_ts):
@@ -1093,6 +1169,7 @@ class GlobalTimeSeriesDataloader:
                 None,
                 np.empty((0,), dtype=np.int32),
                 np.empty((0,), dtype=np.int32),
+                np.empty((0,), dtype=bool),  # Add active mask
             )
 
         X = np.concatenate(xs, axis=0).astype(np.float32)
@@ -1101,4 +1178,7 @@ class GlobalTimeSeriesDataloader:
         K = np.concatenate(K_parts, axis=0)
         W = np.concatenate(ws, axis=0).astype(np.float32) if ws else None
 
-        return X, Y, W, S, K
+        # All windows are real in this mode
+        A = np.ones(X.shape[0], dtype=bool)  # The new active mask
+
+        return X, Y, W, S, K, A
