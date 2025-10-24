@@ -120,6 +120,7 @@ def rmse(prediction: np.ndarray, observation: np.ndarray) -> float:
     mse_val = mse(prediction, observation)
     return mse_val**0.5
 
+
 def nrmse(prediction: np.ndarray, observation: np.ndarray) -> float:
     """Calculates the Normalized Root Mean Squared Error (NRMSE).
 
@@ -159,6 +160,7 @@ def classification_error(prediction: np.ndarray, label: np.ndarray) -> float:
             count += 1
     return count / len(prediction)
 
+
 def mase(y, y_pred, y_train, seasonality: int = 1):
     """Computes the Mean Absolute Scaled Error (MASE) for a single time series.
 
@@ -185,7 +187,8 @@ def mase(y, y_pred, y_train, seasonality: int = 1):
     mae = np.mean(np.abs(y - y_pred))
     return mae / scale
 
-def p50(y, ypred):
+
+def Np50(y, ypred):
     """Computes the normalized median absolute error.
 
     :param y: Observed target values.
@@ -199,7 +202,8 @@ def p50(y, ypred):
     e = y - ypred_50q
     return np.sum(np.abs(e)) / np.sum(np.abs(y))
 
-def p90(y, ypred, spred):
+
+def Np90(y, ypred, spred):
     """Computes the normalized tilted loss for the 90th percentile.
 
     :param y: Observed target values.
@@ -217,7 +221,57 @@ def p90(y, ypred, spred):
     e = y - ypred_90q
     return np.sum(2 * e * (0.9 * Iq - 0.1 * Iq_)) / np.sum(np.abs(y))
 
-def computeCRPS(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
+
+def p50(y: np.ndarray, ypred: np.ndarray) -> float:
+    """Computes the (non-normalized) median absolute error.
+
+    :param y: Observed target values.
+    :type y: np.ndarray
+    :param ypred: Predicted mean values.
+    :type ypred: np.ndarray
+    :return: Sum of absolute deviations between targets and predictions.
+    :rtype: float
+    """
+    e = y - ypred
+    return np.sum(np.abs(e))
+
+
+def p90(y: np.ndarray, ypred: np.ndarray, spred: np.ndarray) -> float:
+    """Computes the (non-normalized) tilted loss for the 90th percentile.
+
+    :param y: Observed target values.
+    :type y: np.ndarray
+    :param ypred: Predicted mean values.
+    :type ypred: np.ndarray
+    :param spred: Predicted standard deviations.
+    :type spred: np.ndarray
+    :return: 90th percentile tilted loss aggregated over targets.
+    :rtype: float
+    """
+    ypred_90q = ypred + 1.282 * spred  # 1.282 is the z-score for the 90th percentile
+    Iq = y > ypred_90q
+    Iq_ = y <= ypred_90q
+    e = y - ypred_90q
+    return np.sum(2 * e * (0.9 * Iq - 0.1 * Iq_))
+
+
+def mae(prediction: np.ndarray, observation: np.ndarray) -> float:
+    """Calculates the Mean Absolute Error (MAE).
+
+    MAE measures the average magnitude of the errors in a set of predictions,
+    without considering their direction.
+
+    :param prediction: The predicted values.
+    :type prediction: np.ndarray
+    :param observation: The actual (observed) values.
+    :type observation: np.ndarray
+    :return: The mean absolute error.
+    :rtype: float
+    """
+    return np.nanmean(np.abs(prediction - observation))
+
+
+def CRPS(y: np.ndarray, mu: np.ndarray, sigma: np.ndarray) -> float:
     """Computes the CRPS for Gaussian predictive distributions.
 
     :param y: Observed target values of shape ``(n_samples,)``.

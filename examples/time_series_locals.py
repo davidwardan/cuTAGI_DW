@@ -1179,10 +1179,9 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
     # create placehoders for metrics per series
     test_rmse_list = []
     test_log_lik_list = []
-    test_mse_list = []
+    test_mae_list = []
     test_p50_list = []
     test_p90_list = []
-    test_mase_list = []
 
     # Iterate over each time series and calculate metrics
     for i in tqdm(range(config.nb_ts), desc="Evaluating series"):
@@ -1228,14 +1227,23 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
                 np.isfinite(yt_test) & np.isfinite(ypred_test) & np.isfinite(spred_test)
             )
 
-            if np.any(mask_test):
-                y_true = yt_test[mask_test]
-                y_pred = ypred_test[mask_test]
-                s_pred = np.clip(spred_test[mask_test], 1e-6, None)
+            # Standardize test with training mean and std
+            train_mean = np.nanmean(yt_train)
+            train_std = np.nanstd(yt_train)
 
-                test_rmse = metric.nrmse(y_pred, y_true)
+            stand_yt_test = normalizer.standardize(yt_test, train_mean, train_std)
+            stand_ypred_test = normalizer.standardize(ypred_test, train_mean, train_std)
+            stand_spred_test = spred_test / (train_std + 1e-6)
+
+            if np.any(mask_test):
+                y_true = stand_yt_test[mask_test]
+                y_pred = stand_ypred_test[mask_test]
+                s_pred = np.clip(stand_spred_test[mask_test], 1e-6, None)
+
+                # normalize data
+                test_rmse = metric.rmse(y_pred, y_true)
                 test_log_lik = metric.log_likelihood(y_pred, y_true, s_pred)
-                test_mse = metric.mse(y_pred, y_true)
+                test_mae = metric.mae(y_pred, y_true)
 
                 denom = np.sum(np.abs(y_true))
                 if denom == 0:
@@ -1245,47 +1253,41 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
                     test_p50 = metric.p50(y_true, y_pred)
                     test_p90 = metric.p90(y_true, y_pred, s_pred)
 
-                test_mase = metric.mase(
-                    y_true, y_pred, yt_train, config.seansonal_period
-                )
             else:
                 test_rmse = np.nan
                 test_log_lik = np.nan
-                test_mse = np.nan
+                test_mae = np.nan
                 test_p50 = np.nan
                 test_p90 = np.nan
-                test_mase = np.nan
 
             # Append to lists
             test_rmse_list.append(test_rmse)
             test_log_lik_list.append(test_log_lik)
-            test_mse_list.append(test_mse)
+            test_mae_list.append(test_mae)
             test_p50_list.append(test_p50)
             test_p90_list.append(test_p90)
-            test_mase_list.append(test_mase)
 
     # Calculate overall metrics
     if config.eval_metrics:
         overall_rmse = np.nanmean(test_rmse_list)
         overall_log_lik = np.nanmean(test_log_lik_list)
-        overall_mse = np.nanmean(test_mse_list)
+        overall_mae = np.nanmean(test_mae_list)
         overall_p50 = np.nanmean(test_p50_list)
         overall_p90 = np.nanmean(test_p90_list)
-        overall_mase = np.nanmean(test_mase_list)
 
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
-            f.write("Series_ID,NRMSE,LogLik,MSE,P50,P90,MASE\n")
+            f.write("Series_ID,RMSE,LogLik,MAE,P50,P90\n")
             for i in range(config.nb_ts):
                 f.write(
-                    f"{i},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
-                    f"{test_mse_list[i]:.4f},{test_p50_list[i]:.4f},"
-                    f"{test_p90_list[i]:.4f},{test_mase_list[i]:.4f}\n"
+                    f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
+                    f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
+                    f"{test_p90_list[i]:.4f},\n"
                 )
             f.write(
                 f"Overall,{overall_rmse:.4f},{overall_log_lik:.4f},"
-                f"{overall_mse:.4f},{overall_p50:.4f},"
-                f"{overall_p90:.4f},{overall_mase:.4f}\n"
+                f"{overall_mae:.4f},{overall_p50:.4f},"
+                f"{overall_p90:.4f}\n"
             )
 
 
