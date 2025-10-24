@@ -121,7 +121,7 @@ def rmse(prediction: np.ndarray, observation: np.ndarray) -> float:
     return mse_val**0.5
 
 
-def nrmse(prediction: np.ndarray, observation: np.ndarray) -> float:
+def Nrmse(prediction: np.ndarray, observation: np.ndarray) -> float:
     """Calculates the Normalized Root Mean Squared Error (NRMSE).
 
     NRMSE is the RMSE divided by the range of the observed values.
