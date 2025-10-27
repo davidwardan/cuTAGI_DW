@@ -7,7 +7,7 @@ from pytagi import Normalizer
 import warnings
 
 
-class GlobalTimeSeriesDataloader:
+class TimeSeriesDataBuilder:
     def __init__(
         self,
         x_file: str,
@@ -334,7 +334,8 @@ class GlobalTimeSeriesDataloader:
         else:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
 
-    # --- Data Loader Functions ---
+
+class GlobalBatchLoader:
     @staticmethod
     def _loader_by_window(
         X: np.ndarray,

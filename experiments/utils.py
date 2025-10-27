@@ -5,7 +5,7 @@ from typing import Optional
 import copy
 
 from experiments.data_loader import (
-    GlobalTimeSeriesDataloader,
+    TimeSeriesDataBuilder,
 )
 
 # Plotting defaults
@@ -25,7 +25,7 @@ def prepare_dtls(
     order_mode,
     ts_to_use,
 ):
-    train_dtl = GlobalTimeSeriesDataloader(
+    train_data = TimeSeriesDataBuilder(
         x_file=x_file[0],
         date_time_file=date_file[0],
         input_seq_len=input_seq_len,
@@ -37,7 +37,7 @@ def prepare_dtls(
         ts_to_use=ts_to_use,
     )
 
-    val_dtl = GlobalTimeSeriesDataloader(
+    val_data = TimeSeriesDataBuilder(
         x_file=x_file[1],
         date_time_file=date_file[1],
         input_seq_len=input_seq_len,
@@ -45,12 +45,12 @@ def prepare_dtls(
         stride=1,
         time_covariates=time_covariates,
         scale_method=scale_method,
-        x_mean=train_dtl.x_mean,
-        x_std=train_dtl.x_std,
+        x_mean=train_data.x_mean,
+        x_std=train_data.x_std,
         order_mode=order_mode,
         ts_to_use=ts_to_use,
     )
-    test_dtl = GlobalTimeSeriesDataloader(
+    test_data = TimeSeriesDataBuilder(
         x_file=x_file[2],
         date_time_file=date_file[2],
         input_seq_len=input_seq_len,
@@ -58,13 +58,13 @@ def prepare_dtls(
         stride=1,
         time_covariates=time_covariates,
         scale_method=scale_method,
-        x_mean=train_dtl.x_mean,
-        x_std=train_dtl.x_std,
+        x_mean=train_data.x_mean,
+        x_std=train_data.x_std,
         order_mode=order_mode,
         ts_to_use=ts_to_use,
     )
 
-    return train_dtl, val_dtl, test_dtl
+    return train_data, val_data, test_data
 
 
 # Define model

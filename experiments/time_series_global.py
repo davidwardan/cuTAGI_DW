@@ -5,9 +5,7 @@ from tqdm import tqdm
 from typing import List, Optional
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
-from experiments.data_loader import (
-    GlobalTimeSeriesDataloader,
-)
+from experiments.data_loader import GlobalBatchLoader
 from experiments.utils import (
     prepare_dtls,
     build_model,
@@ -105,7 +103,7 @@ class Config:
         self.patience: int = 10
         self.min_delta: float = 1e-4
         self.warmup_epochs: int = 0
-        self.shuffle_train_windows: bool = False
+        self.shuffle: bool = False
 
         # Set evaluation parameters
         self.eval_plots: bool = True
@@ -200,7 +198,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
     config.save(os.path.join(output_dir, "config.txt"))
 
     # Prepare data loaders
-    train_dtl, val_dtl, test_dtl = prepare_dtls(
+    train_data, val_data, test_data = prepare_dtls(
         x_file=config.x_file,
         date_file=config.date_file,
         input_seq_len=config.input_seq_len,
@@ -260,9 +258,9 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         net.input_state_update = True
 
     # Initalize states
-    train_states = States(nb_ts=config.nb_ts, total_time_steps=train_dtl.max_len)
-    val_states = States(nb_ts=config.nb_ts, total_time_steps=val_dtl.max_len)
-    test_states = States(nb_ts=config.nb_ts, total_time_steps=test_dtl.max_len)
+    train_states = States(nb_ts=config.nb_ts, total_time_steps=train_data.max_len)
+    val_states = States(nb_ts=config.nb_ts, total_time_steps=val_data.max_len)
+    test_states = States(nb_ts=config.nb_ts, total_time_steps=test_data.max_len)
 
     # Create progress bar
     pbar = tqdm(range(config.num_epochs), desc="Epochs")
@@ -301,11 +299,11 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         train_mse = []
         train_log_lik = []
 
-        train_batch_iter = GlobalTimeSeriesDataloader.create_data_loader(
-            dataset=train_dtl.dataset,
+        train_batch_iter = GlobalBatchLoader.create_data_loader(
+            dataset=train_data.dataset,
             order_mode=config.order_mode,
             batch_size=config.batch_size,
-            shuffle=False,
+            shuffle=config.shuffle,
         )
 
         # Initialize look-back buffer and LSTM state container
@@ -464,8 +462,8 @@ def train_global_model(config, experiment_name: Optional[str] = None):
         # reset look-back buffer
         look_back_buffer.needs_initialization = [True for _ in range(config.nb_ts)]
 
-        val_batch_iter = GlobalTimeSeriesDataloader.create_data_loader(
-            dataset=val_dtl.dataset,
+        val_batch_iter = GlobalBatchLoader.create_data_loader(
+            dataset=val_data.dataset,
             order_mode=config.order_mode,
             batch_size=config.batch_size,
             shuffle=False,
@@ -620,8 +618,8 @@ def train_global_model(config, experiment_name: Optional[str] = None):
     # reset look-back buffer
     look_back_buffer.needs_initialization = [True for _ in range(config.nb_ts)]
 
-    test_batch_iter = GlobalTimeSeriesDataloader.create_data_loader(
-        dataset=test_dtl.dataset,
+    test_batch_iter = GlobalBatchLoader.create_data_loader(
+        dataset=test_data.dataset,
         order_mode=config.order_mode,
         batch_size=config.batch_size,
         shuffle=False,
@@ -700,8 +698,8 @@ def train_global_model(config, experiment_name: Optional[str] = None):
     # Run over each time series and re_scale it
     for i in range(config.nb_ts):
         # get mean and std
-        mean = train_dtl.x_mean[i][0]
-        std = train_dtl.x_std[i][0]
+        mean = train_data.x_mean[i][0]
+        std = train_data.x_std[i][0]
 
         # re-scale
         train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
