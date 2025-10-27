@@ -1238,7 +1238,11 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             if np.any(mask_test):
                 y_true = stand_yt_test[mask_test]
                 y_pred = stand_ypred_test[mask_test]
-                s_pred = np.clip(stand_spred_test[mask_test], 1e-6, None)
+                s_pred = stand_spred_test[mask_test]
+                max_std = 3.0 * np.std(y_true - y_pred)
+                s_pred = np.where(
+                    s_pred > max_std, np.nan, np.clip(s_pred, 1e-6, max_std)
+                )
 
                 # normalize data
                 test_rmse = metric.rmse(y_pred, y_true)
@@ -1282,7 +1286,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
                 f.write(
                     f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
                     f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
-                    f"{test_p90_list[i]:.4f},\n"
+                    f"{test_p90_list[i]:.4f}\n"
                 )
             f.write(
                 f"Overall,{overall_rmse:.4f},{overall_log_lik:.4f},"

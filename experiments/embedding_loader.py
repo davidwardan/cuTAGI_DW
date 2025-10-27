@@ -71,10 +71,16 @@ class EmbeddingLayer:
         """
         return self.mu[idx], self.var[idx]
 
-    def update(self, idx: int, mu_delta: np.ndarray, var_delta: np.ndarray):
+    def update(self, idx: np.array, mu_delta: np.ndarray, var_delta: np.ndarray):
         """
         Applies a delta update to a single embedding vector.
         """
+        # Check for negative indexes
+        active_mask = idx >= 0
+        idx = idx[active_mask]
+        mu_delta = mu_delta[active_mask]
+        var_delta = var_delta[active_mask]
+
         self.mu[idx] = self.mu[idx] + mu_delta
         self.var[idx] = self.var[idx] + var_delta
 
