@@ -18,7 +18,7 @@ from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 
 
 # --- Helper functions ---
-def prepare_dtls(
+def prepare_data(
     x_file,
     date_file,
     input_seq_len,
@@ -134,6 +134,10 @@ def prepare_input(
 
 # Define function to calculate updates
 def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None):
+    """
+    Calculates the posterior mean and variance (Kalman update) for the
+    output predictions.
+    """
     # calculate updates
     if use_AGVI:
         # Update output layer
@@ -156,26 +160,72 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
     net.backward()
     net.step()
 
+    # --- Kalman Update Section ---
+
+    # STABILITY: Use a safe epsilon for clipping, not machine epsilon.
+    eps = 1e-8
+
     # manually update states on python API
     nan_indices = np.isnan(y)
     has_nan = bool(np.any(nan_indices))
     if has_nan:
+        # Make copies to avoid modifying the original arrays
         y = np.array(y, copy=True)
         var_y = np.array(var_y, copy=True)
+
+        # Where y is NaN, we treat the prediction as the observation.
         np.copyto(y, m_pred, where=nan_indices)
+
+        # Set variance of missing observations to 0 (or a small eps)
+        # This effectively tells the Kalman filter to trust the prediction
+        # for these points.
         np.copyto(var_y, 0.0, where=nan_indices)
 
-    # kalman update
-    K = v_pred / (v_pred + var_y)  # Kalman gain
-    m_post = m_pred + K * (y - m_pred)  # posterior mean
-    v_post = (1.0 - K) * v_pred  # posterior variance
+    # STABILITY: Clean all inputs to the Kalman filter BEFORE using them.
+    # This prevents pre-existing NaNs or Infs from propagating.
+    safe_m_pred = np.nan_to_num(m_pred, nan=0.0)
+    safe_v_pred = np.nan_to_num(v_pred, nan=0.0)
+    safe_y = np.nan_to_num(y, nan=0.0)
+    safe_var_y = np.nan_to_num(var_y, nan=0.0)
+
+    # STABILITY: Clip the observation variance away from zero.
+    # Use a larger max value (e.g., 5.0) just in case.
+    stablized_var_y = np.clip(safe_var_y, eps, 5.0)
+
+    # STABILITY: Clip the *denominator* of the gain calculation.
+    kalman_denominator = safe_v_pred + stablized_var_y
+    stablized_denominator = np.clip(kalman_denominator, a_min=eps, a_max=None)
+
+    # Kalman gain
+    K = safe_v_pred / stablized_denominator
+
+    # STABILITY: Clean the gain just in case 0/0 or inf/inf occurred.
+    K = np.nan_to_num(K, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # STABILITY: Clip gain to [0, 1] range to ensure variance reduction.
+    K = np.clip(K, 0.0, 1.0)
+
+    # Posterior mean
+    m_post = safe_m_pred + K * (safe_y - safe_m_pred)
+
+    # Posterior variance
+    v_post = (1.0 - K) * safe_v_pred
+
+    # STABILITY: Ensure posterior variance is always positive.
+    v_post = np.clip(v_post, a_min=eps, a_max=None)
+
     if has_nan:
-        np.copyto(v_post, v_pred, where=nan_indices)
+        # For entries where y was originally NaN, we didn't actually
+        # perform an update, so we reset the posterior variance to the prior.
+        np.copyto(v_post, safe_v_pred, where=nan_indices)
+
+    # STABILITY: Final check to ensure no NaNs are returned.
+    m_post = np.nan_to_num(m_post)
+    v_post = np.nan_to_num(v_post)
 
     return m_post, v_post
 
 
-# Define function to update aleatoric uncertainty
 def update_aleatoric_uncertainty(
     mu_z0: np.ndarray,
     var_z0: np.ndarray,
@@ -183,18 +233,35 @@ def update_aleatoric_uncertainty(
     var_v2bar: np.ndarray,
     y: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Updates the aleatoric uncertainty (v2bar) using a Kalman filter
+    on the moments of the output distribution.
+    """
 
-    # define epsilon for numerical stability
-    eps = np.finfo(np.float32).eps
+    # STABILITY: Use a safe, small epsilon. np.finfo is too small.
+    eps = 1e-8
+    # STABILITY: Define a large value to cap overflows
+    max_val = 1e6  # Cap values at 1 million
+    max_val_sq = 1e12  # Cap squared values
 
-    # Handle NaN values in y
+    # STABILITY: Clean ALL inputs *before* doing anything else.
+    # This prevents NaNs at valid indices from poisoning the calculation.
+    # We now also cap posinf/neginf to prevent overflows.
+    mu_z0 = np.nan_to_num(mu_z0, posinf=max_val, neginf=-max_val)
+    var_z0 = np.nan_to_num(var_z0, nan=eps, posinf=max_val)  # Use eps for variance
+    mu_v2bar = np.nan_to_num(mu_v2bar, posinf=max_val, neginf=-max_val)
+    var_v2bar = np.nan_to_num(
+        var_v2bar, nan=eps, posinf=max_val
+    )  # Use eps for variance
+
+    # Note: We don't clean 'y' here because np.isnan(y) is our control flow.
     valid_indices = ~np.isnan(y)
 
     # Initialize posterior arrays as copies of the priors
     mu_v2bar_posterior = mu_v2bar.copy()
     var_v2bar_posterior = var_v2bar.copy()
 
-    # If all y values are NaN, no update is needed
+    # If all y values are NaN, no update is possible.
     if not np.any(valid_indices):
         return (
             mu_v2bar_posterior,
@@ -202,67 +269,128 @@ def update_aleatoric_uncertainty(
         )
 
     # Filter all inputs to only include the data for valid (non-NaN) indices.
+    # These are now guaranteed to be clean *because* we cleaned the inputs above.
     y_valid = y[valid_indices]
+    # STABILITY: Clean y_valid *after* filtering NaNs to handle Infs
+    y_valid = np.nan_to_num(y_valid, posinf=max_val, neginf=-max_val)
+
     mu_z0_valid = mu_z0[valid_indices]
     var_z0_valid = var_z0[valid_indices]
     mu_v2bar_valid = mu_v2bar[valid_indices]
     var_v2bar_valid = var_v2bar[valid_indices]
 
+    # --- Kalman Filter on H ---
+
     # Define Prior Moments for V, Y, H on valid data
     mu_v = np.zeros_like(mu_v2bar_valid)
-    var_v = mu_v2bar_valid  # Prior aleatoric uncertainty
+
+    # STABILITY: Clip prior variance to be positive
+    var_v = np.clip(
+        mu_v2bar_valid, a_min=eps, a_max=None
+    )  # Prior aleatoric uncertainty
 
     mu_y = mu_z0_valid + mu_v
-    var_y = var_z0_valid + var_v
+
+    # STABILITY: Clip prior variance components to be positive
+    var_z0_valid_clipped = np.clip(var_z0_valid, a_min=eps, a_max=None)
+    var_v_clipped = np.clip(var_v, a_min=eps, a_max=None)
+    var_y = var_z0_valid_clipped + var_v_clipped
 
     mu_h = np.stack([mu_z0_valid, mu_v], axis=1)
 
     cov_h = np.zeros((len(mu_z0_valid), 2, 2), dtype=np.float64)
-    cov_h[:, 0, 0] = var_z0_valid
-    cov_h[:, 1, 1] = var_v
+    cov_h[:, 0, 0] = var_z0_valid_clipped
+    cov_h[:, 1, 1] = var_v_clipped
 
-    cov_hy = np.stack([var_z0_valid, var_v], axis=1)
+    cov_hy = np.stack([var_z0_valid_clipped, var_v_clipped], axis=1)
 
-    # Calculate Posterior Moments for H using y on valid data # Correct!
-    stabilized_var_y = np.clip(var_y, np.finfo(np.float64).eps, None)
+    # Calculate Posterior Moments for H using y on valid data
+
+    # STABILITY: Clip denominator for Kalman gain
+    stabilized_var_y = np.clip(var_y, eps, 5.0)  # Using 5.0 as a reasonable max
+
     kalman_gain_h = np.divide(
         cov_hy,
         stabilized_var_y[:, np.newaxis],
         out=np.zeros_like(cov_hy),
-        where=stabilized_var_y[:, np.newaxis] != 0,
+        where=stabilized_var_y[:, np.newaxis] > eps,  # Use > eps
     )
+
+    # STABILITY: Clean gain just in case (e.g., if cov_hy was 0 and var_y was 0)
+    kalman_gain_h = np.nan_to_num(kalman_gain_h, nan=0.0, posinf=0.0, neginf=0.0)
+
     mu_h_posterior = mu_h + kalman_gain_h * (y_valid - mu_y)[:, np.newaxis]
     cov_h_posterior = cov_h - np.einsum("bi,bj->bij", kalman_gain_h, cov_hy)
 
-    mu_v_posterior = mu_h_posterior[:, 1]
-    var_v_posterior = cov_h_posterior[:, 1, 1]
-    var_v_posterior = np.clip(var_v_posterior, eps, None)
+    # STABILITY: Enforce symmetry
+    cov_h_posterior_transposed = np.transpose(cov_h_posterior, (0, 2, 1))
+    cov_h_posterior = 0.5 * (cov_h_posterior + cov_h_posterior_transposed)
 
-    # Calculate Posterior Moments for V^2 on valid data # Correct!
+    # STABILITY: Add diagonal jitter to ensure positive definiteness
+    num_hidden = cov_h_posterior.shape[1]
+    jitter = 1e-6
+    cov_h_posterior = cov_h_posterior + jitter * np.eye(num_hidden)[np.newaxis, :, :]
+
+    # --- Moment Matching for V^2 ---
+
+    mu_v_posterior = mu_h_posterior[:, 1]
+    # STABILITY: Clip mu_v_posterior to prevent overflow when squared
+    mu_v_posterior = np.clip(mu_v_posterior, -max_val, max_val)
+
+    var_v_posterior = cov_h_posterior[:, 1, 1]
+
+    # STABILITY: Clip posterior variance to be positive and prevent overflow
+    var_v_posterior = np.clip(var_v_posterior, eps, max_val_sq)
+
+    # Calculate Posterior Moments for V^2 on valid data
     mu_v2_posterior = mu_v_posterior**2 + var_v_posterior
     var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
         mu_v_posterior**2
     )
-    var_v2_posterior = np.clip(var_v2_posterior, eps, None)
+    # STABILITY: Clip resulting variance
+    var_v2_posterior = np.clip(var_v2_posterior, eps, max_val_sq)
 
     # Calculate Prior Moments for V^2 and Gain 'k' on valid data
     mu_v2_prior = mu_v2bar_valid
-    var_v2_prior = 3.0 * var_v2bar_valid + 2.0 * (mu_v2bar_valid**2)
-    var_v2_prior = np.clip(var_v2_prior, eps, None)
+    var_v2_prior_unclipped = 3.0 * var_v2bar_valid + 2.0 * (mu_v2bar_valid**2)
 
-    k = var_v2bar_valid / var_v2_prior
-    k = np.clip(k, eps, 1.0)
+    # STABILITY: Clip prior variance (with max)
+    var_v2_prior = np.clip(var_v2_prior_unclipped, eps, max_val_sq)
+
+    # STABILITY: Use the "clean, stabilize, operate" pattern for gain 'k'
+
+    # 1. Clean inputs (though they should be clean from the top, this is safer)
+    safe_var_v2bar_valid = np.nan_to_num(var_v2bar_valid, nan=eps, posinf=max_val)
+    safe_var_v2_prior = np.nan_to_num(var_v2_prior, nan=eps, posinf=max_val_sq)
+
+    # 2. Stabilize denominator
+    stabilized_var_v2_prior = np.clip(safe_var_v2_prior, a_min=eps, a_max=None)
+
+    # 3. This division is now safe
+    k = safe_var_v2bar_valid / stabilized_var_v2_prior
+
+    # STABILITY: Clean and clip gain k
+    k = np.nan_to_num(k, nan=0.0, posinf=0.0, neginf=0.0)
+    k = np.clip(k, 0.0, 1.0)  # Gain should be between 0 and 1
 
     # Update V2bar to get its Posterior Moments on valid data
     mu_v2bar_posterior_valid = mu_v2bar_valid + k * (mu_v2_posterior - mu_v2_prior)
     var_v2bar_posterior_valid = var_v2bar_valid + k**2 * (
         var_v2_posterior - var_v2_prior
     )
-    var_v2bar_posterior_valid = np.clip(var_v2bar_posterior_valid, eps, None)
+
+    # STABILITY: Clip final posterior variance
+    var_v2bar_posterior_valid = np.clip(var_v2bar_posterior_valid, eps, max_val_sq)
 
     # Place the calculated posterior values
     mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
     var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
+
+    # STABILITY: Final paranoid check
+    mu_v2bar_posterior = np.nan_to_num(
+        mu_v2bar_posterior, posinf=max_val, neginf=-max_val
+    )
+    var_v2bar_posterior = np.nan_to_num(var_v2bar_posterior, nan=eps, posinf=max_val_sq)
 
     return (
         mu_v2bar_posterior,
