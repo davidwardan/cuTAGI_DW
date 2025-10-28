@@ -7,7 +7,7 @@ from typing import List, Optional
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from experiments.data_loader import GlobalBatchLoader
 from experiments.utils import (
-    prepare_dtls,
+    prepare_data,
     build_model,
     prepare_input,
     plot_series,
@@ -109,7 +109,7 @@ class Config:
         self.shuffle: bool = False
 
         # Set evaluation parameters
-        self.eval_plots: bool = False
+        self.eval_plots: bool = True
         self.eval_metrics: bool = True
         self.seansonal_period: int = 52
         self.embed_plots: bool = False
@@ -201,7 +201,7 @@ def train_global_model(config, experiment_name: Optional[str] = None):
     config.save(os.path.join(output_dir, "config.txt"))
 
     # Prepare data loaders
-    train_data, val_data, test_data = prepare_dtls(
+    train_data, val_data, test_data = prepare_data(
         x_file=config.x_file,
         date_file=config.date_file,
         input_seq_len=config.input_seq_len,
@@ -1231,6 +1231,8 @@ def main(Train=True, Eval=True):
             # Create configuration
             config = Config()
             config.seed = seed
+            config.num_epochs = 2
+            config.batch_size = 16
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             # config.embedding_size = 5
