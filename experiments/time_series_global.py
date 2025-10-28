@@ -12,6 +12,9 @@ from experiments.utils import (
     prepare_input,
     plot_series,
     plot_embeddings,
+    bhattacharyya_distance_matrix,
+    cosine_similarity_matrix,
+    plot_similarity,
     calculate_updates,
     update_aleatoric_uncertainty,
     States,
@@ -60,7 +63,7 @@ class Config:
         self.scale_method: str = "standard"
         self.order_mode: str = "by_window"
         self.input_seq_len: int = 52
-        self.batch_size: int = 127
+        self.batch_size: int = 16
         self.output_col: list = [0]
         self.ts_to_use: Optional[List[int]] = [i for i in range(127)]  # Use all series
 
@@ -94,7 +97,7 @@ class Config:
 
         # Set model parameters
         self.Sigma_v_bounds: tuple = (None, None)
-        self.decaying_factor: float = 0.999
+        self.decaying_factor: float = 0.99
         self.device: str = "cuda"
 
         # Set training parameters
@@ -106,10 +109,10 @@ class Config:
         self.shuffle: bool = False
 
         # Set evaluation parameters
-        self.eval_plots: bool = True
+        self.eval_plots: bool = False
         self.eval_metrics: bool = True
         self.seansonal_period: int = 52
-        self.embed_plots: bool = True
+        self.embed_plots: bool = False
 
     @property
     def x_file(self) -> list:
@@ -891,100 +894,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 f"{overall_p90:.4f}\n"
             )
 
-    # Display and plot embeddings if used
-    def _cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
-        emb = np.asarray(emb, dtype=np.float32)
-        norms = np.linalg.norm(emb, axis=1, keepdims=True)
-        norms = np.maximum(norms, 1e-12)
-        normalized = emb / norms
-        return normalized @ normalized.T
-
-    def _plot_similarity(
-        sim_matrix: np.ndarray,
-        out_path,
-        title: str,
-        labels: Optional[List[str]] = None,
-        *,
-        vmin: float = -1.0,
-        vmax: float = 1.0,
-    ) -> None:
-        sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
-        if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
-            raise ValueError("sim_matrix must be a square 2D array")
-
-        # Order rows/cols by aggregate similarity to highlight structure.
-        score = np.sum(sim_matrix, axis=1)
-        order = np.argsort(-score)
-        ordered = sim_matrix[order][:, order]
-
-        if labels is not None:
-            if len(labels) != sim_matrix.shape[0]:
-                raise ValueError("labels must have the same length as sim_matrix size")
-            ordered_labels = [str(labels[idx]) for idx in order]
-        else:
-            ordered_labels = [str(idx) for idx in order]
-
-        num_series = ordered.shape[0]
-        width = max(8.0, min(num_series * 0.4, 24.0))
-        height = max(6.0, min(num_series * 0.4, 24.0))
-        plt.figure(figsize=(width, height))
-        heatmap = plt.imshow(
-            ordered,
-            cmap="coolwarm",
-            vmin=vmin,
-            vmax=vmax,
-            interpolation="nearest",
-        )
-        plt.title(f"{title} (sorted by similarity)")
-        plt.xlabel("Entity/Series Index")  # Generic label
-        plt.ylabel("Entity/Series Index")  # Generic label
-
-        if num_series > 0:
-            tick_positions = np.arange(num_series, dtype=int)
-            rotation = 45 if num_series <= 20 else 90
-            fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
-            plt.xticks(
-                tick_positions,
-                ordered_labels,
-                rotation=rotation,
-                ha="right",
-                fontsize=fontsize,
-            )
-            plt.yticks(tick_positions, ordered_labels, fontsize=fontsize)
-
-        plt.colorbar(heatmap, fraction=0.046, pad=0.04)
-        plt.tight_layout()
-        plt.savefig(out_path, dpi=600, bbox_inches="tight")
-        plt.close()
-
-    def _bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
-        mu = np.asarray(mu, dtype=np.float32)
-        var = np.asarray(var, dtype=np.float32)
-        if mu.shape != var.shape:
-            raise ValueError("mu and var must share the same shape")
-
-        eps = np.float32(1e-12)
-        var = np.maximum(var, eps)
-
-        mu_i = mu[:, None, :]
-        mu_j = mu[None, :, :]
-        var_i = var[:, None, :]
-        var_j = var[None, :, :]
-        sigma = 0.5 * (var_i + var_j)
-        sigma = np.maximum(sigma, eps)
-
-        diff = mu_i - mu_j
-        term1 = 0.125 * np.sum(diff * diff / sigma, axis=-1)
-
-        log_sigma = np.log(sigma)
-        log_var_i = np.log(var_i)
-        log_var_j = np.log(var_j)
-        term2 = 0.5 * np.sum(log_sigma - 0.5 * (log_var_i + log_var_j), axis=-1)
-
-        dist = term1 + term2
-        np.fill_diagonal(dist, 0.0)
-        return dist
-
     # Check if *any* embeddings were used
     if config.embed_plots:
         if config.total_embedding_size > 0:
@@ -1019,24 +928,24 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         labels=labels,
                     )
 
-                    start_similarity = _cosine_similarity_matrix(start_embeddings_mu)
-                    final_similarity = _cosine_similarity_matrix(final_embeddings_mu)
+                    start_similarity = cosine_similarity_matrix(start_embeddings_mu)
+                    final_similarity = cosine_similarity_matrix(final_embeddings_mu)
 
-                    _plot_similarity(
+                    plot_similarity(
                         start_similarity,
                         embedding_dir / "embeddings_cosine_similarity_start.png",
                         "Cosine Similarity (Start)",
                     )
-                    _plot_similarity(
+                    plot_similarity(
                         final_similarity,
                         embedding_dir / "embeddings_cosine_similarity_final.png",
                         "Cosine Similarity (Final)",
                     )
 
-                    start_bhattacharyya = _bhattacharyya_distance_matrix(
+                    start_bhattacharyya = bhattacharyya_distance_matrix(
                         start_embeddings_mu, start_embeddings_var
                     )
-                    final_bhattacharyya = _bhattacharyya_distance_matrix(
+                    final_bhattacharyya = bhattacharyya_distance_matrix(
                         final_embeddings_mu, final_embeddings_var
                     )
 
@@ -1048,14 +957,14 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         )
                     )
 
-                    _plot_similarity(
+                    plot_similarity(
                         start_bhattacharyya,
                         embedding_dir / "embeddings_bhattacharyya_distance_start.png",
                         "Bhattacharyya Distance (Start)",
                         vmin=0.0,
                         vmax=bhatt_vmax,
                     )
-                    _plot_similarity(
+                    plot_similarity(
                         final_bhattacharyya,
                         embedding_dir / "embeddings_bhattacharyya_distance_final.png",
                         "Bhattacharyya Distance (Final)",
@@ -1126,16 +1035,16 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         )
 
                         # Plot Cosine Similarity
-                        start_similarity = _cosine_similarity_matrix(start_mu)
-                        final_similarity = _cosine_similarity_matrix(final_mu)
+                        start_similarity = cosine_similarity_matrix(start_mu)
+                        final_similarity = cosine_similarity_matrix(final_mu)
 
-                        _plot_similarity(
+                        plot_similarity(
                             start_similarity,
                             category_plot_dir / "cosine_similarity_start.png",
                             f"Cosine Similarity (Start) - {category}",
                             labels=labels,
                         )
-                        _plot_similarity(
+                        plot_similarity(
                             final_similarity,
                             category_plot_dir / "cosine_similarity_final.png",
                             f"Cosine Similarity (Final) - {category}",
@@ -1143,13 +1052,13 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         )
 
                         # Plot Bhattacharyya Distance
-                        start_bhat = _bhattacharyya_distance_matrix(start_mu, start_var)
-                        final_bhat = _bhattacharyya_distance_matrix(final_mu, final_var)
+                        start_bhat = bhattacharyya_distance_matrix(start_mu, start_var)
+                        final_bhat = bhattacharyya_distance_matrix(final_mu, final_var)
                         bhat_vmax = float(
                             max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
                         )
 
-                        _plot_similarity(
+                        plot_similarity(
                             start_bhat,
                             category_plot_dir / "bhattacharyya_distance_start.png",
                             f"Bhattacharyya Distance (Start) - {category}",
@@ -1157,7 +1066,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                             vmax=bhat_vmax,
                             labels=labels,
                         )
-                        _plot_similarity(
+                        plot_similarity(
                             final_bhat,
                             category_plot_dir / "bhattacharyya_distance_final.png",
                             f"Bhattacharyya Distance (Final) - {category}",
@@ -1255,16 +1164,16 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                     )
 
                     # Plot Cosine Similarity
-                    start_similarity = _cosine_similarity_matrix(mu_stitched_start)
-                    final_similarity = _cosine_similarity_matrix(mu_stitched_final)
+                    start_similarity = cosine_similarity_matrix(mu_stitched_start)
+                    final_similarity = cosine_similarity_matrix(mu_stitched_final)
 
-                    _plot_similarity(
+                    plot_similarity(
                         start_similarity,
                         embedding_dir
                         / "embeddings_cosine_similarity_start_stitched.png",
                         "Cosine Similarity (Start) - Stitched",
                     )
-                    _plot_similarity(
+                    plot_similarity(
                         final_similarity,
                         embedding_dir
                         / "embeddings_cosine_similarity_final_stitched.png",
@@ -1272,17 +1181,17 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                     )
 
                     # Plot Bhattacharyya Distance
-                    start_bhat = _bhattacharyya_distance_matrix(
+                    start_bhat = bhattacharyya_distance_matrix(
                         mu_stitched_start, var_stitched_start
                     )
-                    final_bhat = _bhattacharyya_distance_matrix(
+                    final_bhat = bhattacharyya_distance_matrix(
                         mu_stitched_final, var_stitched_final
                     )
                     bhat_vmax = float(
                         max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
                     )
 
-                    _plot_similarity(
+                    plot_similarity(
                         start_bhat,
                         embedding_dir
                         / "embeddings_bhattacharyya_distance_start_stitched.png",
@@ -1290,7 +1199,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         vmin=0.0,
                         vmax=bhat_vmax,
                     )
-                    _plot_similarity(
+                    plot_similarity(
                         final_bhat,
                         embedding_dir
                         / "embeddings_bhattacharyya_distance_final_stitched.png",
@@ -1317,20 +1226,14 @@ def main(Train=True, Eval=True):
             print(f"Running experiment: {exp} with seed {seed}")
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_global-embed_model"
+            experiment_name = f"seed{seed}/{exp}/experiment01_global_model"
 
             # Create configuration
             config = Config()
             config.seed = seed
-            config.device = "cpu"
-            config.batch_size = 16
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.eval_plots = True
-            config.embed_plots = True
-            # config.ts_to_use = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-            # config.shuffle_train_windows = True
-            config.embedding_size = 5
+            # config.embedding_size = 5
             # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
 
             if Train:

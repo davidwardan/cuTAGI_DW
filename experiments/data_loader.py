@@ -336,6 +336,7 @@ class TimeSeriesDataBuilder:
 
 
 class GlobalBatchLoader:
+    # -- Data Loader Generators ---
     @staticmethod
     def _loader_by_window(
         X: np.ndarray,
@@ -475,12 +476,8 @@ class GlobalBatchLoader:
 
         # Call the other static methods using the class name
         if order_mode == "by_series":
-            yield from GlobalTimeSeriesDataloader._loader_by_series(
-                X, Y, S, K, batch_size, shuffle
-            )
+            yield from GlobalBatchLoader._loader_by_series(X, Y, S, K, batch_size, shuffle)
         elif order_mode == "by_window":
-            yield from GlobalTimeSeriesDataloader._loader_by_window(
-                X, Y, S, K, batch_size, shuffle
-            )
+            yield from GlobalBatchLoader._loader_by_window(X, Y, S, K, batch_size, shuffle)
         else:
             raise ValueError(f"Unknown order_mode: {order_mode}")

@@ -8,6 +8,8 @@ from experiments.data_loader import (
     TimeSeriesDataBuilder,
 )
 
+from typing import List
+
 # Plotting defaults
 import matplotlib.pyplot as plt
 
@@ -290,6 +292,103 @@ def update_aleatoric_uncertainty(
         mu_v2bar_posterior.astype(out_dtype, copy=False),
         var_v2bar_posterior.astype(out_dtype, copy=False),
     )
+
+
+# Display and plot embeddings if used
+def cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
+    emb = np.asarray(emb, dtype=np.float32)
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    normalized = emb / norms
+    return normalized @ normalized.T
+
+
+def plot_similarity(
+    sim_matrix: np.ndarray,
+    out_path,
+    title: str,
+    labels: Optional[List[str]] = None,
+    *,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+) -> None:
+    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
+    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
+        raise ValueError("sim_matrix must be a square 2D array")
+
+    # Order rows/cols by aggregate similarity to highlight structure.
+    score = np.sum(sim_matrix, axis=1)
+    order = np.argsort(-score)
+    ordered = sim_matrix[order][:, order]
+
+    if labels is not None:
+        if len(labels) != sim_matrix.shape[0]:
+            raise ValueError("labels must have the same length as sim_matrix size")
+        ordered_labels = [str(labels[idx]) for idx in order]
+    else:
+        ordered_labels = [str(idx) for idx in order]
+
+    num_series = ordered.shape[0]
+    width = max(8.0, min(num_series * 0.4, 24.0))
+    height = max(6.0, min(num_series * 0.4, 24.0))
+    plt.figure(figsize=(width, height))
+    heatmap = plt.imshow(
+        ordered,
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    plt.title(f"{title} (sorted by similarity)")
+    plt.xlabel("Entity/Series Index")  # Generic label
+    plt.ylabel("Entity/Series Index")  # Generic label
+
+    if num_series > 0:
+        tick_positions = np.arange(num_series, dtype=int)
+        rotation = 45 if num_series <= 20 else 90
+        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
+        plt.xticks(
+            tick_positions,
+            ordered_labels,
+            rotation=rotation,
+            ha="right",
+            fontsize=fontsize,
+        )
+        plt.yticks(tick_positions, ordered_labels, fontsize=fontsize)
+
+    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.close()
+
+
+def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+    mu = np.asarray(mu, dtype=np.float32)
+    var = np.asarray(var, dtype=np.float32)
+    if mu.shape != var.shape:
+        raise ValueError("mu and var must share the same shape")
+
+    eps = np.float32(1e-12)
+    var = np.maximum(var, eps)
+
+    mu_i = mu[:, None, :]
+    mu_j = mu[None, :, :]
+    var_i = var[:, None, :]
+    var_j = var[None, :, :]
+    sigma = 0.5 * (var_i + var_j)
+    sigma = np.maximum(sigma, eps)
+
+    diff = mu_i - mu_j
+    term1 = 0.125 * np.sum(diff * diff / sigma, axis=-1)
+
+    log_sigma = np.log(sigma)
+    log_var_i = np.log(var_i)
+    log_var_j = np.log(var_j)
+    term2 = 0.5 * np.sum(log_sigma - 0.5 * (log_var_i + log_var_j), axis=-1)
+
+    dist = term1 + term2
+    np.fill_diagonal(dist, 0.0)
+    return dist
 
 
 # Define a class to store the look_back_buffers
