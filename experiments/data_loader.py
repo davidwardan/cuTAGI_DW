@@ -200,8 +200,7 @@ class TimeSeriesDataBuilder:
             if self.scale_method == "standard":
                 if self.x_mean is None or self.x_std is None:
                     # Calculate and store stats
-                    mu = np.nanmean(Xj, axis=0)
-                    std = np.nanstd(Xj, axis=0)
+                    mu, std = Normalizer.compute_mean_std(Xj)
                     scaling_info_per_ts.append((mu, std))
                 else:
                     # Use provided stats
