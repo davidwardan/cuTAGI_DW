@@ -184,13 +184,8 @@ def update_aleatoric_uncertainty(
     y: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
 
-    # Promote to float64 for numerical stability; remember original dtype for output
-    out_dtype = mu_v2bar.dtype
-    mu_z0 = np.asarray(mu_z0, dtype=np.float64, order="C")
-    var_z0 = np.asarray(var_z0, dtype=np.float64, order="C")
-    mu_v2bar = np.asarray(mu_v2bar, dtype=np.float64, order="C")
-    var_v2bar = np.asarray(var_v2bar, dtype=np.float64, order="C")
-    y = np.asarray(y, dtype=np.float64, order="C")
+    # define epsilon for numerical stability
+    eps = np.finfo(np.float32).eps
 
     # Handle NaN values in y
     valid_indices = ~np.isnan(y)
@@ -202,8 +197,8 @@ def update_aleatoric_uncertainty(
     # If all y values are NaN, no update is needed
     if not np.any(valid_indices):
         return (
-            mu_v2bar_posterior.astype(out_dtype, copy=False),
-            var_v2bar_posterior.astype(out_dtype, copy=False),
+            mu_v2bar_posterior,
+            var_v2bar_posterior,
         )
 
     # Filter all inputs to only include the data for valid (non-NaN) indices.
@@ -213,7 +208,7 @@ def update_aleatoric_uncertainty(
     mu_v2bar_valid = mu_v2bar[valid_indices]
     var_v2bar_valid = var_v2bar[valid_indices]
 
-    # Step 1: Define Prior Moments for V, Y, H on valid data
+    # Define Prior Moments for V, Y, H on valid data
     mu_v = np.zeros_like(mu_v2bar_valid)
     var_v = mu_v2bar_valid  # Prior aleatoric uncertainty
 
@@ -228,7 +223,7 @@ def update_aleatoric_uncertainty(
 
     cov_hy = np.stack([var_z0_valid, var_v], axis=1)
 
-    # Step 2: Calculate Posterior Moments for H using y on valid data
+    # Calculate Posterior Moments for H using y on valid data # Correct!
     stabilized_var_y = np.clip(var_y, np.finfo(np.float64).eps, None)
     kalman_gain_h = np.divide(
         cov_hy,
@@ -241,56 +236,37 @@ def update_aleatoric_uncertainty(
 
     mu_v_posterior = mu_h_posterior[:, 1]
     var_v_posterior = cov_h_posterior[:, 1, 1]
-    var_v_posterior = np.clip(var_v_posterior, 0.0, None)
+    var_v_posterior = np.clip(var_v_posterior, eps, None)
 
-    # Step 3: Calculate Posterior Moments for V^2 on valid data
+    # Calculate Posterior Moments for V^2 on valid data # Correct!
     mu_v2_posterior = mu_v_posterior**2 + var_v_posterior
     var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
         mu_v_posterior**2
     )
-    var_v2_posterior = np.clip(var_v2_posterior, 0.0, None)
+    var_v2_posterior = np.clip(var_v2_posterior, eps, None)
 
-    # Step 4: Calculate Prior Moments for V^2 and Gain 'k' on valid data
+    # Calculate Prior Moments for V^2 and Gain 'k' on valid data
     mu_v2_prior = mu_v2bar_valid
-    var_v2bar_valid = np.nan_to_num(
-        var_v2bar_valid,
-        nan=0.0,
-        posinf=np.finfo(np.float64).max,
-        neginf=0.0,
-    )
-    mu_v2bar_valid = np.nan_to_num(
-        mu_v2bar_valid,
-        nan=0.0,
-        posinf=np.finfo(np.float64).max,
-        neginf=0.0,
-    )
-    var_v2_prior = 3.0 * var_v2bar_valid
-    var_v2_prior += 2.0 * np.square(mu_v2bar_valid)
-    var_v2_prior = np.clip(
-        var_v2_prior, np.finfo(np.float64).eps, np.finfo(np.float64).max
-    )
+    var_v2_prior = 3.0 * var_v2bar_valid + 2.0 * (mu_v2bar_valid**2)
+    var_v2_prior = np.clip(var_v2_prior, eps, None)
 
-    k = np.divide(
-        var_v2bar_valid,
-        var_v2_prior,
-        out=np.zeros_like(var_v2bar_valid),
-        where=np.isfinite(var_v2_prior) & (var_v2_prior != 0.0),
-    )
+    k = var_v2bar_valid / var_v2_prior
+    k = np.clip(k, eps, 1.0)
 
-    # Step 5: Update V2bar to get its Posterior Moments on valid data
+    # Update V2bar to get its Posterior Moments on valid data
     mu_v2bar_posterior_valid = mu_v2bar_valid + k * (mu_v2_posterior - mu_v2_prior)
     var_v2bar_posterior_valid = var_v2bar_valid + k**2 * (
         var_v2_posterior - var_v2_prior
     )
-    var_v2bar_posterior_valid = np.clip(var_v2bar_posterior_valid, 0.0, None)
+    var_v2bar_posterior_valid = np.clip(var_v2bar_posterior_valid, eps, None)
 
     # Place the calculated posterior values
     mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
     var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
 
     return (
-        mu_v2bar_posterior.astype(out_dtype, copy=False),
-        var_v2bar_posterior.astype(out_dtype, copy=False),
+        mu_v2bar_posterior,
+        var_v2bar_posterior,
     )
 
 
