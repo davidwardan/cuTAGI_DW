@@ -29,7 +29,6 @@ from pytagi import Normalizer as normalizer
 import pytagi.metric as metric
 
 # Plotting defaults
-import matplotlib.pyplot as plt
 import matplotlib as mpl
 
 # Update matplotlib parameters in a single dictionary
@@ -99,7 +98,7 @@ class Config:
         # Set model parameters
         self.Sigma_v_bounds: tuple = (None, None)
         self.decaying_factor: float = 0.99
-        self.device: str = "cpu"
+        self.device: str = "cuda"
 
         # Set training parameters
         self.num_epochs: int = 100
@@ -1198,7 +1197,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
                         current_offset += cat_size
 
-                    # --- 3. Plot Stitched Embeddings ---
+                    # Plot Stitched Embeddings
                     print("Plotting stitched (full) time series embeddings...")
                     labels = [str(ts_id) for ts_id in config.ts_to_use]
 
@@ -1271,8 +1270,8 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True):
 
-    list_of_experiments = ["train100"]
-    list_of_seeds = [1]
+    list_of_seeds = [1, 42, 235, 1234, 2024]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1280,26 +1279,25 @@ def main(Train=True, Eval=True):
             print(f"Running experiment: {exp} with seed {seed}")
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_global-B64_model"
+            experiment_name = f"seed{seed}/{exp}/experiment01_global_model"
 
             # Create configuration
             config = Config()
             config.seed = seed
-            config.num_epochs = 100
             config.batch_size = 64
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
-            # 1. Convert config object to a dictionary for W&B
+            # Convert config object to a dictionary for W&B
             config_dict = {
                 k: getattr(config, k)
                 for k in dir(config)
                 if not k.startswith("_") and not callable(getattr(config, k))
             }
 
-            # 2. Initialize W&B run
+            # Initialize W&B run
             run = wandb.init(
-                project="Experiment I Global Modelling",
+                project="Forecasting_SHM",
                 name=experiment_name,
                 config=config_dict,
                 reinit=True,  # Allows re-initializing in a loop
@@ -1316,7 +1314,7 @@ def main(Train=True, Eval=True):
                 # Evaluate model
                 eval_global_model(config, experiment_name=experiment_name)
 
-            # 3. Finish the W&B run
+            # Finish the W&B run
             run.finish()
 
 
