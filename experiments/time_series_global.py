@@ -4,6 +4,7 @@ import pandas as pd
 from tqdm import tqdm
 from typing import List, Optional
 import wandb
+import torch
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from experiments.data_loader import GlobalBatchLoader
@@ -197,7 +198,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         os.makedirs(output_dir)
 
     # Display and save configuration
-    config.display()
     config.save(os.path.join(output_dir, "config.txt"))
 
     # Prepare data loaders
@@ -444,7 +444,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             lstm_state_container.update_states_from_net(indices, net)
 
             var_post_total = v_post + var_y
-            var_post_total = np.clip(var_post_total, a_min=1e-6, a_max=3.0)
+            var_post_total = np.clip(var_post_total, a_min=1e-6, a_max=2.0)
 
             # Update look_back buffer
             look_back_buffer.update(
@@ -1268,9 +1268,9 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                     )
 
 
-def main(Train=True, Eval=True):
+def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [1, 42, 235, 1234, 2024]
+    list_of_seeds = [2, 42, 235, 1234, 2024]
     list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     # Iterate over experiments and seeds
@@ -1285,6 +1285,8 @@ def main(Train=True, Eval=True):
             config = Config()
             config.seed = seed
             config.batch_size = 64
+            config.device = "cuda" if torch.cuda.is_available() else "cpu"
+            # config.device = "cpu"
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
@@ -1295,14 +1297,17 @@ def main(Train=True, Eval=True):
                 if not k.startswith("_") and not callable(getattr(config, k))
             }
 
-            # Initialize W&B run
-            run = wandb.init(
-                project="Forecasting_SHM",
-                name=experiment_name,
-                config=config_dict,
-                reinit=True,  # Allows re-initializing in a loop
-                save_code=True,  # Saves the main script
-            )
+            if log_wandb:
+                # Initialize W&B run
+                run = wandb.init(
+                    project="Forecasting_SHM",
+                    name=experiment_name,
+                    config=config_dict,
+                    reinit=True,  # Allows re-initializing in a loop
+                    save_code=True,  # Saves the main script
+                )
+            else:
+                run = None
 
             if Train:
                 # Train model
@@ -1315,8 +1320,9 @@ def main(Train=True, Eval=True):
                 eval_global_model(config, experiment_name=experiment_name)
 
             # Finish the W&B run
-            run.finish()
+            if log_wandb:
+                run.finish()
 
 
 if __name__ == "__main__":
-    main(True, True)
+    main(True, True, True)

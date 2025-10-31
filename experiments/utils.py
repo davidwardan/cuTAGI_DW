@@ -70,7 +70,7 @@ def prepare_data(
 
 
 # Define model
-def build_model(input_size, use_AGVI, seed=1, device="cpu"):
+def build_model(input_size, use_AGVI, seed, device):
     manual_seed(seed)
     if use_AGVI:
         net = Sequential(
