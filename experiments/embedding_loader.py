@@ -73,16 +73,45 @@ class EmbeddingLayer:
 
     def update(self, idx: np.array, mu_delta: np.ndarray, var_delta: np.ndarray):
         """
-        Applies a delta update to a single embedding vector.
+        Applies a delta update to embedding vectors.
+        Handles batches and sums updates for repeated indices using np.add.at.
         """
+        # Ensure idx is an array for consistent processing
+        idx = np.atleast_1d(idx)
+
+        # Ensure deltas are at least 2D if they are 1D and idx is scalar
+        if idx.ndim == 1 and idx.size == 1 and mu_delta.ndim == 1:
+            mu_delta = mu_delta.reshape(1, -1)
+        if idx.ndim == 1 and idx.size == 1 and var_delta.ndim == 1:
+            var_delta = var_delta.reshape(1, -1)
+
+        # Check dimensions match
+        if idx.shape[0] != mu_delta.shape[0] or idx.shape[0] != var_delta.shape[0]:
+            raise ValueError(
+                f"Shape mismatch: idx shape {idx.shape} does not match delta shapes "
+                f"{mu_delta.shape} or {var_delta.shape}"
+            )
+
         # Check for negative indexes
         active_mask = idx >= 0
-        idx = idx[active_mask]
-        mu_delta = mu_delta[active_mask]
-        var_delta = var_delta[active_mask]
 
-        self.mu[idx] = self.mu[idx] + mu_delta
-        self.var[idx] = self.var[idx] + var_delta
+        # Filter indices and deltas
+        idx_filtered = idx[active_mask]
+
+        # Check if any valid indices remain
+        if idx_filtered.size == 0:
+            return
+
+        mu_delta_filtered = mu_delta[active_mask]
+        var_delta_filtered = var_delta[active_mask]
+
+        # Check if any valid deltas remain after masking
+        if idx_filtered.size == 0:
+            return
+
+        # Use np.add.at to correctly sum updates for repeated indices
+        np.add.at(self.mu, idx_filtered, mu_delta_filtered)
+        np.add.at(self.var, idx_filtered, var_delta_filtered)
 
     def save(self, out_file: str):
         """Saves embeddings to a .npz file."""
@@ -143,6 +172,10 @@ class MappedTimeSeriesEmbeddings:
                     f"Please provide it in the embedding_sizes dictionary."
                 )
 
+        # self.embedding_categories.sort()
+        # The category order is now preserved from the CSV file columns.
+        print(f"Using category order from CSV: {self.embedding_categories}")
+
         # Initialize an EmbeddingLayer for each category
         for category in self.embedding_categories:
             num_embeddings = self.ts_map_info[category]["num_embeddings"]
@@ -166,6 +199,14 @@ class MappedTimeSeriesEmbeddings:
         if "ts_id" not in map_df.columns:
             raise ValueError("Map file must contain a 'ts_id' column.")
 
+        # Ensure ts_id is integer before setting as index
+        try:
+            map_df["ts_id"] = map_df["ts_id"].astype(int)
+        except ValueError:
+            print(
+                f"Warning: Could not cast 'ts_id' column in {map_file_path} to integer. This may cause lookup errors."
+            )
+
         # Set ts_id as index for fast lookups
         self.ts_map = map_df.set_index("ts_id")
 
@@ -174,8 +215,7 @@ class MappedTimeSeriesEmbeddings:
             col for col in self.ts_map.columns if col != "ts_id"
         ]
 
-        # Sort to ensure a consistent concatenation order
-        self.embedding_categories.sort()
+        # Note: Sorting is now handled in __init__ or by set_category_order
 
         self.ts_map_info = {}
         for category in self.embedding_categories:
@@ -189,6 +229,7 @@ class MappedTimeSeriesEmbeddings:
     def __call__(self, ts_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Constructs the combined embeddings for a batch of time series IDs.
+        Concatenation order is determined by self.embedding_categories.
 
         Args:
             ts_ids (np.ndarray): A 1D array of time series IDs.
@@ -200,17 +241,23 @@ class MappedTimeSeriesEmbeddings:
         """
         ts_ids = np.atleast_1d(ts_ids)
 
+        # Ensure ts_ids are int for lookup
+        ts_ids_int = ts_ids.astype(int)
+
         # Get the categorical indices for all ts_ids in the batch
         try:
-            batch_map = self.ts_map.loc[ts_ids]
+            batch_map = self.ts_map.loc[ts_ids_int]
         except KeyError as e:
             print(f"Error: One or more ts_ids not found in the map: {e}")
+            print(f"Attempted to find: {ts_ids_int}")
+            print(f"Available map index: {self.ts_map.index.values}")
             raise
 
         mus = []
         vars_ = []
 
         # Fetch and collect embeddings for each category
+        # The order of this loop determines the concatenation order
         for category in self.embedding_categories:
             cat_indices = batch_map[category].values
             cat_mu, cat_var = self.embeddings[category](cat_indices)
@@ -223,6 +270,93 @@ class MappedTimeSeriesEmbeddings:
 
         return mu_combined, var_combined
 
+    def set_category_order(self, category_order: list):
+        """
+        Updates the concatenation order of the embedding categories.
+
+        The new order MUST contain the exact same categories as the original map.
+
+        Args:
+            category_order (list): A list of category name strings in the
+                                   desired new order.
+        """
+        print(f"Attempting to set new category order: {category_order}")
+
+        # Validate that the new order contains the same categories
+        original_categories = set(self.embeddings.keys())
+        new_categories = set(category_order)
+
+        if new_categories != original_categories:
+            raise ValueError(
+                f"New category order {new_categories} does not match "
+                f"original categories {original_categories}"
+            )
+
+        # All checks passed, update the order
+        self.embedding_categories = category_order
+        print(f"Successfully set category order to: {self.embedding_categories}")
+
+    def update_map(self, new_map_file_path: str):
+        """
+        Updates the internal ts_id-to-category mapping from a new CSV file.
+
+        This is intended for scenarios (like testing) where the ts_id-to-category
+        relationship might change, but the underlying categorical embeddings
+        (e.g., 'wave', 'amplitude') are the same and have already been trained.
+
+        The new map MUST be compatible:
+        1. It must contain the exact same category columns as the original map.
+        2. The maximum ID for each category in the new map must be LESS THAN
+           the 'num_embeddings' the class was initialized with (i.e., no
+           out-of-bounds indices).
+
+        Args:
+            new_map_file_path (str): Path to the new mapping CSV file.
+        """
+        print(f"Attempting to update map from: {new_map_file_path}")
+        if not os.path.exists(new_map_file_path):
+            raise FileNotFoundError(f"New map file not found at: {new_map_file_path}")
+
+        map_df = pd.read_csv(new_map_file_path)
+
+        # --- Validation Check 1: 'ts_id' column ---
+        if "ts_id" not in map_df.columns:
+            raise ValueError("New map file must contain a 'ts_id' column.")
+
+        # --- Validation Check 2: Category columns ---
+        # Note: This checks against the *active* order, which is fine.
+        # A more robust check might be against self.embeddings.keys()
+        new_categories = [col for col in map_df.columns if col != "ts_id"]
+        if set(new_categories) != set(self.embedding_categories):
+            raise ValueError(
+                f"New map categories {set(new_categories)} do not match "
+                f"original categories {set(self.embedding_categories)}"
+            )
+
+        # --- Validation Check 3: Max IDs (Index Bounds) ---
+        for category in self.embedding_categories:
+            new_max_id = map_df[category].max()
+            original_num_embeddings = self.ts_map_info[category]["num_embeddings"]
+
+            # new_max_id must be < original_num_embeddings (since num_embeddings = max_id + 1)
+            if new_max_id >= original_num_embeddings:
+                raise ValueError(
+                    f"Category '{category}': new max_id ({new_max_id}) is "
+                    f"out of bounds for original num_embeddings ({original_num_embeddings})."
+                )
+
+        # All checks passed, update the map
+        try:
+            map_df["ts_id"] = map_df["ts_id"].astype(int)
+        except ValueError:
+            print(
+                f"Warning: Could not cast 'ts_id' column in new map to integer. "
+                "This may cause lookup errors."
+            )
+
+        self.ts_map = map_df.set_index("ts_id")
+        print(f"Successfully updated ts_map from {new_map_file_path}")
+
     def update(
         self,
         ts_ids: np.ndarray,
@@ -230,24 +364,45 @@ class MappedTimeSeriesEmbeddings:
         var_deltas_combined: np.ndarray,
     ):
         """
-        Applies batch updates, summing deltas for shared embeddings.
+        Applies batch updates, delegating summation for shared embeddings
+        to the EmbeddingLayer's update method (which uses np.add.at).
+        This method respects the order set in self.embedding_categories.
 
         Args:
             ts_ids (np.ndarray): 1D array of ts_ids in the batch.
+                Shape: (batch_size,)
             mu_deltas_combined (np.ndarray): Deltas for the combined mu vectors.
                 Shape: (batch_size, total_embedding_dim)
             var_deltas_combined (np.ndarray): Deltas for the combined var vectors.
                 Shape: (batch_size, total_embedding_dim)
         """
         ts_ids = np.atleast_1d(ts_ids)
-        batch_map = self.ts_map.loc[ts_ids]
+
+        # Ensure ts_ids are int for lookup
+        ts_ids_int = ts_ids.astype(int)
+
+        # Get the categorical indices for all ts_ids in the batch
+        try:
+            batch_map = self.ts_map.loc[ts_ids_int]
+        except KeyError as e:
+            print(f"Error: One or more ts_ids not found in the map: {e}")
+            print(f"Attempted to find: {ts_ids_int}")
+            print(f"Available map index: {self.ts_map.index.values}")
+            raise
+        except pd.errors.InvalidIndexError as e:
+            # This can happen if ts_ids has duplicates and is not sorted
+            # .loc is faster but can be picky. Fallback to reindex.
+            print(f"Warning: ts_ids index error ({e}). Falling back to reindex.")
+            batch_map = self.ts_map.reindex(ts_ids_int)
 
         current_offset = 0
+        # The order of this loop is critical and matches __call__
         for category in self.embedding_categories:
             embedding_layer = self.embeddings[category]
             embedding_size = embedding_layer.embedding_dim[1]
 
             # 1. Slice the deltas for the current category
+            # Shape: (batch_size, embedding_size)
             mu_delta_cat = mu_deltas_combined[
                 :, current_offset : current_offset + embedding_size
             ]
@@ -257,21 +412,13 @@ class MappedTimeSeriesEmbeddings:
             current_offset += embedding_size
 
             # 2. Get the corresponding embedding indices for the batch
+            # Shape: (batch_size,)
             cat_indices = batch_map[category].values
 
-            # 3. Use pandas to group deltas by index and sum them
-            # This efficiently handles the "sum updates for the same embedding"
-            df_mu_deltas = pd.DataFrame(mu_delta_cat, index=cat_indices)
-            df_var_deltas = pd.DataFrame(var_delta_cat, index=cat_indices)
-
-            summed_mu_deltas = df_mu_deltas.groupby(df_mu_deltas.index).sum()
-            summed_var_deltas = df_var_deltas.groupby(df_var_deltas.index).sum()
-
-            # 4. Apply the summed updates
-            for idx, mu_delta_row in summed_mu_deltas.iterrows():
-                mu_d = mu_delta_row.values
-                var_d = summed_var_deltas.loc[idx].values
-                embedding_layer.update(idx, mu_d, var_d)
+            # 3. Apply the updates directly.
+            # EmbeddingLayer.update is responsible for summing deltas
+            # for repeated indices using np.add.at.
+            embedding_layer.update(cat_indices, mu_delta_cat, var_delta_cat)
 
     def save(self, out_dir_prefix: str):
         """

@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from typing import List, Optional
+import wandb
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from experiments.data_loader import GlobalBatchLoader
@@ -189,7 +190,7 @@ class Config:
                     f.write(f"{name}: {getattr(self, name)}\n")
 
 
-def train_global_model(config, experiment_name: Optional[str] = None):
+def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
     output_dir = f"out/{experiment_name}/"
@@ -443,10 +444,13 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             # Update LSTM states for the current batch
             lstm_state_container.update_states_from_net(indices, net)
 
+            var_post_total = v_post + var_y
+            var_post_total = np.clip(var_post_total, a_min=1e-6, a_max=3.0)
+
             # Update look_back buffer
             look_back_buffer.update(
                 new_mu=m_post.reshape(B, -1)[:, -1],
-                new_var=(v_post + var_y).reshape(B, -1),
+                new_var=var_post_total.reshape(B, -1),
                 indices=indices,
             )
 
@@ -575,6 +579,51 @@ def train_global_model(config, experiment_name: Optional[str] = None):
             }
         )
 
+        if wandb_run:
+            # Log metrics
+            log_payload = {
+                "epoch": epoch,
+                "train_rmse": train_mse,
+                "train_log_lik": train_log_lik,
+                "val_rmse": val_mse,
+                "val_log_lik": val_log_lik,
+            }
+            if not config.use_AGVI:
+                log_payload["sigma_v"] = sigma_v
+
+            # Log parameter histograms
+            log_param_freq = 2  # logs each n epochs
+            if (epoch % log_param_freq == 0) or (epoch == config.num_epochs - 1):
+                try:
+                    state_dict = net.state_dict()
+                    for layer_name, params in state_dict.items():
+                        is_lstm = "lstm" in layer_name.lower()
+                        gate_names = ("forget", "input", "cell", "output")
+                        param_labels = ("mu_w", "var_w", "mu_b", "var_b")
+                        for param, label in zip(params, param_labels):
+                            if param is None:
+                                continue
+                            values = np.asarray(param)
+                            if is_lstm:
+                                flat_values = values.reshape(-1)
+                                gate_size = flat_values.size // 4
+                                if gate_size > 0 and flat_values.size % 4 == 0:
+                                    for idx, gate in enumerate(gate_names):
+                                        start = idx * gate_size
+                                        end = start + gate_size
+                                        log_payload[
+                                            f"params/{layer_name}/{label}_{gate}"
+                                        ] = wandb.Histogram(flat_values[start:end])
+                                    continue
+                            log_payload[f"params/{layer_name}/{label}"] = (
+                                wandb.Histogram(values)
+                            )
+                except Exception as e:
+                    print(f"Warning: Could not log model parameters to W&B. Error: {e}")
+
+            # Send all logs for this epoch
+            wandb.log(log_payload)
+
         # Check for early stopping
         val_score = (
             val_log_lik if config.early_stopping_criteria == "log_lik" else val_mse
@@ -600,6 +649,12 @@ def train_global_model(config, experiment_name: Optional[str] = None):
 
             # Restore best embeddings
             embeddings = early_stopping.best_embeddings
+
+            # Log the best score to W&B summary
+            if wandb_run:
+                best_metric_name = f"best_val_{config.early_stopping_criteria}"
+                wandb.summary[best_metric_name] = early_stopping.best_score
+
             break
 
     # Save best model
@@ -809,7 +864,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
         # Store split indices
         val_test_indices = (len(yt_train), len(yt_train) + len(yt_val))
 
-        # --- Plotting ---
+        # Forecast Plotting
         if config.eval_plots:
             plot_series(
                 ts_idx=i,
@@ -821,7 +876,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 std_factor=1,
             )
 
-        # --- Metrics ---
+        # Metrics
         if config.eval_metrics:
             mask_test = (
                 np.isfinite(yt_test) & np.isfinite(ypred_test) & np.isfinite(spred_test)
@@ -854,8 +909,8 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                     test_p50 = np.nan
                     test_p90 = np.nan
                 else:
-                    test_p50 = metric.p50(y_true, y_pred)
-                    test_p90 = metric.p90(y_true, y_pred, s_pred)
+                    test_p50 = metric.Np50(y_true, y_pred)
+                    test_p90 = metric.Np90(y_true, y_pred, s_pred)
 
             else:
                 test_rmse = np.nan
@@ -894,7 +949,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 f"{overall_p90:.4f}\n"
             )
 
-    # Check if *any* embeddings were used
+    # Embedding plots
     if config.embed_plots:
         if config.total_embedding_size > 0:
             embedding_dir = input_dir / "embeddings"
@@ -981,7 +1036,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
             elif config.use_mapped_embeddings:
                 print("Plotting mapped (categorical) embeddings...")
 
-                # --- 1. Plot per-category embeddings ---
+                # Plot per-category embeddings
                 categories = sorted(list(config.embedding_map_sizes.keys()))
 
                 # Store loaded embeddings to use for stitching
@@ -1085,7 +1140,7 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         )
                         continue
 
-                # --- 2. Stitch Embeddings ---
+                # Stitch Embeddings
                 print("Stitching full time series embeddings for plotting...")
                 try:
                     # Load and filter map to the series we used, in the correct order
@@ -1215,37 +1270,55 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
 
 def main(Train=True, Eval=True):
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
-    # list_of_seeds = [1, 42, 235, 1234, 2024]
 
     list_of_experiments = ["train100"]
     list_of_seeds = [1]
 
+    # Iterate over experiments and seeds
     for seed in list_of_seeds:
         for exp in list_of_experiments:
             print(f"Running experiment: {exp} with seed {seed}")
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_global_model"
+            experiment_name = f"seed{seed}/{exp}/experiment01_global-B64_model"
 
             # Create configuration
             config = Config()
             config.seed = seed
-            config.num_epochs = 2
-            config.batch_size = 16
+            config.num_epochs = 100
+            config.batch_size = 64
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            # config.embedding_size = 5
-            # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
+
+            # 1. Convert config object to a dictionary for W&B
+            config_dict = {
+                k: getattr(config, k)
+                for k in dir(config)
+                if not k.startswith("_") and not callable(getattr(config, k))
+            }
+
+            # 2. Initialize W&B run
+            run = wandb.init(
+                project="Experiment I Global Modelling",
+                name=experiment_name,
+                config=config_dict,
+                reinit=True,  # Allows re-initializing in a loop
+                save_code=True,  # Saves the main script
+            )
 
             if Train:
                 # Train model
-                train_global_model(config, experiment_name=experiment_name)
+                train_global_model(
+                    config, experiment_name=experiment_name, wandb_run=run
+                )
 
             if Eval:
                 # Evaluate model
                 eval_global_model(config, experiment_name=experiment_name)
 
+            # 3. Finish the W&B run
+            run.finish()
+
 
 if __name__ == "__main__":
-    main()
+    main(True, True)

@@ -1,157 +1,179 @@
-import pandas as pd
-import numpy as np
 import os
+import numpy as np
+import pandas as pd
 from scipy import signal
 
-print("Starting time series generation (variable lengths)...")
+# ----------------------------
+# 1) GENERATION PARAMETERS
+# ----------------------------
+N_SERIES = 8
+MAX_DAYS = 60
+MIN_DAYS_FRAC = 0.5  # Series will be 50% to 100% of MAX_DAYS
+PERIOD = 24
 
-# --- 1. Define Parameters ---
+# Percentage-based splits
+TRAIN_FRAC = 0.7
+VAL_FRAC = 0.15
+# TEST_FRAC will be the remaining ~0.15
 
-N_SERIES = 100  # Total number of time series
-LOOKBACK = 24  # Overlap window for val/test sets
-START_DATE = "2020-01-01"
+START_DATETIME = np.datetime64("2020-01-01T00:00:00")
 
-# Define the MIN and MAX possible lengths for any given time series
-MIN_SERIES_DAYS = 10
-MAX_SERIES_DAYS = 40
-MIN_SERIES_LENGTH = 24 * MIN_SERIES_DAYS
-MAX_SERIES_LENGTH = 24 * MAX_SERIES_DAYS
+# Use the same categories as before
+WAVES = ["sin", "cos", "square", "triangle"]
+AMPLITUDES = [2.0, 1.0]
+CATEGORY_DEFINITIONS = tuple(
+    {"wave": w, "amplitude": a} for w in WAVES for a in AMPLITUDES
+)
 
+print(f"Generating {N_SERIES} series with individual splits...")
 
-def _generate_series_noise(num_steps: int, base_std: float) -> np.ndarray:
-    """Create heteroscedastic, temporally correlated noise with rare spikes."""
-    if num_steps <= 0:
-        return np.empty(0, dtype=float)
+# ----------------------------
+# 2) GENERATE & SPLIT SERIES INDIVIDUALLY
+# ----------------------------
 
-    # Use an AR(1) filter for short-term correlation
-    white_for_ar = np.random.normal(scale=base_std, size=num_steps + 4)
-    correlated = signal.lfilter([1.0], [1.0, -0.65], white_for_ar)[-num_steps:]
+# Dictionaries to hold the separate data chunks
+train_chunks = {}
+val_chunks = {}
+test_chunks = {}
+train_date_chunks = {}
+val_date_chunks = {}
+test_date_chunks = {}
 
-    # Low-frequency drift component stabilised around zero
-    drift = np.cumsum(np.random.normal(scale=base_std * 0.12, size=num_steps))
-    drift -= drift.mean()
+# We'll also collect metadata as we go
+metadata_rows = []
 
-    # Occasional spikes emulate real measurement glitches
-    spike_mask = np.random.rand(num_steps) < 0.03
-    spikes = np.zeros(num_steps)
-    if spike_mask.any():
-        spikes[spike_mask] = np.random.normal(
-            scale=base_std * 2.5, size=spike_mask.sum()
-        )
-
-    return correlated + drift + spikes
+np.random.seed(42)  # For reproducible random lengths
 
 
-# --- 2. Generate Individual Time Series of Varying Lengths ---
+def gen_wave(wave: str, amplitude: float, arg: np.ndarray) -> np.ndarray:
+    if wave == "sin":
+        return amplitude * np.sin(arg)
+    if wave == "cos":
+        return amplitude * np.cos(arg)
+    if wave == "triangle":
+        return amplitude * signal.sawtooth(arg, width=0.5)
+    return amplitude * signal.square(arg)
 
-print(f"Generating {N_SERIES} series with random lengths...")
 
-all_series_values = []
 for i in range(N_SERIES):
-    # Determine a random length for the current series
-    current_length = np.random.randint(MIN_SERIES_LENGTH, MAX_SERIES_LENGTH + 1)
-    time_vector = np.arange(current_length)
+    series_id = f"ts_{i}"
+    category = CATEGORY_DEFINITIONS[i % len(CATEGORY_DEFINITIONS)]
 
-    # Base properties
-    mean_offset = np.random.uniform(-5, 5)
-    noise_std = np.random.uniform(0.1, 0.4)
+    # --- A. Generate one full series of variable length ---
+    current_days = np.random.randint(int(MAX_DAYS * MIN_DAYS_FRAC), MAX_DAYS + 1)
+    current_len = current_days * 24
 
-    # Start with base mean
-    series = np.full(current_length, mean_offset)
+    t = np.arange(current_len)
+    arg = 2 * np.pi * t / PERIOD
 
-    # Add 1 to 3 different wave components
-    num_waves = np.random.randint(1, 4)
-    for _ in range(num_waves):
-        amplitude = np.random.uniform(2.0, 15.0)
-        period = np.random.choice([6, 12, 24])
-        phase_shift = np.random.uniform(0, 2 * np.pi)
-        wave_type = np.random.choice(["sin", "cos", "triangle", "square"])
-        wave_arg = 2 * np.pi * time_vector / period + phase_shift
+    y_full = gen_wave(category["wave"], category["amplitude"], arg)
+    dates_full = START_DATETIME + np.arange(current_len) * np.timedelta64(1, "h")
 
-        if wave_type == "sin":
-            series += amplitude * np.sin(wave_arg)
-        elif wave_type == "cos":
-            series += amplitude * np.cos(wave_arg)
-        elif wave_type == "triangle":
-            series += amplitude * signal.sawtooth(wave_arg, width=0.5)
-        elif wave_type == "square":
-            series += amplitude * signal.square(wave_arg)
+    # --- B. Calculate split points *for this specific series* ---
+    train_end = int(current_len * TRAIN_FRAC)
+    val_end = int(current_len * (TRAIN_FRAC + VAL_FRAC))
 
-    # Add complex noise and append to our list
-    series += _generate_series_noise(current_length, noise_std)
-    all_series_values.append(series)
+    # --- C. Slice the series into its chunks ---
+    y_train = y_full[:train_end]
+    y_val = y_full[train_end:val_end]
+    y_test = y_full[val_end:]
+    train_dates = dates_full[:train_end]
+    val_dates = dates_full[train_end:val_end]
+    test_dates = dates_full[val_end:]
 
-# --- 3. Pad Series and Create Master DataFrames ---
+    # --- D. Add the chunks to their respective dictionaries ---
+    train_chunks[series_id] = y_train
+    val_chunks[series_id] = y_val
+    test_chunks[series_id] = y_test
+    train_date_chunks[series_id] = train_dates
+    val_date_chunks[series_id] = val_dates
+    test_date_chunks[series_id] = test_dates
 
-# Find the length of the longest series, which will be our canvas size
-max_length = max(len(s) for s in all_series_values)
-print(f"Padding all series to the maximum length of {max_length} steps.")
+    # --- E. Save metadata ---
+    metadata_rows.append(
+        {
+            "series_id": series_id,
+            "wave": category["wave"],
+            "amplitude": category["amplitude"],
+            "total_length": current_len,
+            "train_length": len(y_train),
+            "val_length": len(y_val),
+            "test_length": len(y_test),
+        }
+    )
 
-padded_series_map = {}
-for i, series in enumerate(all_series_values):
-    padding_size = max_length - len(series)
-    # Pad with np.nan for the values
-    padding = np.full(padding_size, np.nan)
-    padded_series_map[f"ts_{i}"] = np.concatenate([series, padding])
+print("Generation and in-memory splitting complete.")
 
-# Create the master values DataFrame
-values_df = pd.DataFrame(padded_series_map)
+# ----------------------------
+# 3) CREATE DATAFRAMES (THE AUTOMATIC PADDING)
+# ----------------------------
 
-# Create the master dates DataFrame, using the full date range for all columns
-master_dates = pd.date_range(start=START_DATE, periods=max_length, freq="h")
-dates_df = pd.DataFrame({f"ts_{i}": master_dates for i in range(N_SERIES)})
+def to_padded_dataframe(chunks: dict[str, np.ndarray], dtype=None, fill_value=None) -> pd.DataFrame:
+    if not chunks:
+        return pd.DataFrame()
 
+    columns = list(chunks.keys())
+    max_len = max(len(values) for values in chunks.values())
+    if max_len == 0:
+        return pd.DataFrame(columns=columns)
 
-# --- 4. Split Data into Train, Validation, and Test ---
+    if dtype is None:
+        sample_values = next(iter(chunks.values()))
+        dtype = np.asarray(sample_values).dtype
 
-# Define split points proportionally based on the max_length
-split_train_idx = int(max_length * 0.7)
-split_val_idx = int(max_length * 0.85)
+    np_dtype = np.dtype(dtype)
 
-# --- Train Set ---
-train_values = values_df.iloc[:split_train_idx]
-train_dates = dates_df.iloc[:split_train_idx]
+    if fill_value is None:
+        if np.issubdtype(np_dtype, np.floating):
+            fill_value = np.nan
+        elif np.issubdtype(np_dtype, np.datetime64):
+            fill_value = np.datetime64("NaT")
+        else:
+            fill_value = None
+            np_dtype = np.dtype(object)
 
-# --- Validation Set ---
-val_start_idx = split_train_idx - LOOKBACK
-val_values = values_df.iloc[val_start_idx:split_val_idx]
-val_dates = dates_df.iloc[val_start_idx:split_val_idx]
+    data = np.full((max_len, len(columns)), fill_value, dtype=np_dtype)
+    for idx, column in enumerate(columns):
+        values = np.asarray(chunks[column], dtype=np_dtype)
+        length = values.shape[0]
+        if length:
+            data[:length, idx] = values
 
-# --- Test Set ---
-test_start_idx = split_val_idx - LOOKBACK
-test_values = values_df.iloc[test_start_idx:]
-test_dates = dates_df.iloc[test_start_idx:]
+    return pd.DataFrame(data, columns=columns)
 
-# --- 5. Save to CSV Files ---
+print("Creating DataFrames... pandas will now add NaN padding.")
 
-output_dir = "data/toy_example_global"
-os.makedirs(output_dir, exist_ok=True)
-print(f"Ensured output directory exists: {output_dir}")
+train_values_df = to_padded_dataframe(train_chunks, dtype=np.float64, fill_value=np.nan)
+val_values_df = to_padded_dataframe(val_chunks, dtype=np.float64, fill_value=np.nan)
+test_values_df = to_padded_dataframe(test_chunks, dtype=np.float64, fill_value=np.nan)
+train_dates_df = to_padded_dataframe(train_date_chunks, dtype="datetime64[ns]")
+val_dates_df = to_padded_dataframe(val_date_chunks, dtype="datetime64[ns]")
+test_dates_df = to_padded_dataframe(test_date_chunks, dtype="datetime64[ns]")
 
-files_to_save = {
-    f"{output_dir}/toy_ts_train_values.csv": train_values,
-    f"{output_dir}/toy_ts_train_dates.csv": train_dates,
-    f"{output_dir}/toy_ts_val_values.csv": val_values,
-    f"{output_dir}/toy_ts_val_dates.csv": val_dates,
-    f"{output_dir}/toy_ts_test_values.csv": test_values,
-    f"{output_dir}/toy_ts_test_dates.csv": test_dates,
+metadata_df = pd.DataFrame(metadata_rows)
+
+# ----------------------------
+# 4) SAVE TO CSV
+# ----------------------------
+out_dir = "data/toy_example_individual_splits"
+os.makedirs(out_dir, exist_ok=True)
+
+to_save = {
+    f"{out_dir}/toy_ts_train_values.csv": train_values_df,
+    f"{out_dir}/toy_ts_train_dates.csv": train_dates_df,
+    f"{out_dir}/toy_ts_val_values.csv": val_values_df,
+    f"{out_dir}/toy_ts_val_dates.csv": val_dates_df,
+    f"{out_dir}/toy_ts_test_values.csv": test_values_df,
+    f"{out_dir}/toy_ts_test_dates.csv": test_dates_df,
+    f"{out_dir}/toy_ts_metadata.csv": metadata_df,
 }
 
-# Save all files
-for filename, df in files_to_save.items():
-    df.to_csv(filename, index=False)
-    print(f"Saved {filename} with shape {df.shape}")
+for fn, df in to_save.items():
+    df.to_csv(fn, index=False)
+    print(f"Saved {fn}  shape={df.shape}")
 
-print("\n--- Summary ---")
-print(
-    f"Series lengths generated between {MIN_SERIES_LENGTH} and {MAX_SERIES_LENGTH} steps."
-)
-print(f"All DataFrames padded to max length: {max_length}")
-print(f"Lookback window: {LOOKBACK}\n")
-
-print(f"Train set shape: {train_values.shape}")
-print(f"Validation set shape: {val_values.shape}")
-print(f"Test set shape: {test_values.shape}")
-
-print("\nAll files generated successfully.")
- 
+# ----------------------------
+# 5) SUMMARY
+# ----------------------------
+print("\n--- Summary (from metadata) ---")
+print(metadata_df.to_string(index=False))

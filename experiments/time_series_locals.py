@@ -1254,8 +1254,8 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
                     test_p50 = np.nan
                     test_p90 = np.nan
                 else:
-                    test_p50 = metric.p50(y_true, y_pred)
-                    test_p90 = metric.p90(y_true, y_pred, s_pred)
+                    test_p50 = metric.Np50(y_true, y_pred)
+                    test_p90 = metric.Np90(y_true, y_pred, s_pred)
 
             else:
                 test_rmse = np.nan
