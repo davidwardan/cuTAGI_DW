@@ -2,18 +2,24 @@ import os
 import numpy as np
 from tqdm import tqdm
 from typing import List, Optional
-import copy
+import wandb
 
 from examples.data_loader import (
     TimeSeriesDataloader,
 )
-from pytagi import manual_seed
 from pytagi import Normalizer as normalizer
 import pytagi.metric as metric
-from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
+
+from experiments.utils import (
+    build_model,
+    plot_series,
+    EarlyStopping,
+    update_aleatoric_uncertainty,
+    calculate_updates,
+    adjust_params,
+)
 
 # Plotting defaults
-import matplotlib.pyplot as plt
 import matplotlib as mpl
 
 # Update matplotlib parameters in a single dictionary
@@ -81,30 +87,6 @@ def prepare_dtls(
     )
 
     return train_dtl, val_dtl, test_dtl
-
-
-# Define model
-def build_model(input_size, use_AGVI, seed=1, device="cpu"):
-    manual_seed(seed)
-    if use_AGVI:
-        net = Sequential(
-            LSTM(input_size, 40, 1),
-            LSTM(40, 40, 1),
-            Linear(40, 2),
-            EvenExp(),
-        )
-    else:
-        net = Sequential(
-            LSTM(input_size, 40, 1),
-            LSTM(40, 40, 1),
-            Linear(40, 1),
-        )
-    if device == "cpu":
-        net.set_threads(1)
-    elif device == "cuda":
-        net.to_device("cuda")
-    out_updater = OutputUpdater(net.device)
-    return net, out_updater
 
 
 def prepare_input(
@@ -178,306 +160,6 @@ class LookBackBuffer:
         return self.mu[indices], self.var[indices]
 
 
-# Define function to calculate updates
-def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None):
-    # calculate updates
-    if use_AGVI:
-        # Update output layer
-        out_updater.update_heteros(
-            output_states=net.output_z_buffer,
-            mu_obs=y,
-            delta_states=net.input_delta_z_buffer,
-        )
-    elif not use_AGVI and var_y is not None:
-        out_updater.update(
-            output_states=net.output_z_buffer,
-            mu_obs=y,
-            var_obs=var_y,
-            delta_states=net.input_delta_z_buffer,
-        )
-    else:
-        raise ValueError("var_y must be provided when not using AGVI")
-
-    # Backward + step
-    net.backward()
-    net.step()
-
-    # manually update states on python API
-    nan_indices = np.isnan(y)  # get the indices where y is nan
-    y = np.where(nan_indices, m_pred, y)
-    var_y = np.where(nan_indices, 0.0, var_y)
-
-    # kalman update
-    K = v_pred / (v_pred + var_y)  # Kalman gain
-    m_post = m_pred + K * (y - m_pred)  # posterior mean
-    v_post = (1.0 - K) * v_pred  # posterior variance
-
-    return m_post, v_post
-
-
-# Define function to update aleatoric uncertainty
-def update_aleatoric_uncertainty(
-    mu_z0: np.ndarray,
-    var_z0: np.ndarray,
-    mu_v2bar: np.ndarray,
-    var_v2bar: np.ndarray,
-    y: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-
-    # Handle NaN values in y
-    valid_indices = ~np.isnan(y)
-
-    # Initialize posterior arrays as copies of the priors
-    mu_v2bar_posterior = np.copy(mu_v2bar)
-    var_v2bar_posterior = np.copy(var_v2bar)
-
-    # If all y values are NaN, no update is needed
-    if not np.any(valid_indices):
-        return mu_v2bar_posterior, var_v2bar_posterior
-
-    # Filter all inputs to only include the data for valid (non-NaN) indices.
-    y_valid = y[valid_indices]
-    mu_z0_valid = mu_z0[valid_indices]
-    var_z0_valid = var_z0[valid_indices]
-    mu_v2bar_valid = mu_v2bar[valid_indices]
-    var_v2bar_valid = var_v2bar[valid_indices]
-
-    # Step 1: Define Prior Moments for V, Y, H on valid data
-    mu_v = np.zeros_like(mu_v2bar_valid)
-    var_v = mu_v2bar_valid  # Prior aleatoric uncertainty
-
-    mu_y = mu_z0_valid + mu_v
-    var_y = var_z0_valid + var_v
-
-    mu_h = np.stack([mu_z0_valid, mu_v], axis=1)
-
-    cov_h = np.zeros((len(mu_z0_valid), 2, 2))
-    cov_h[:, 0, 0] = var_z0_valid
-    cov_h[:, 1, 1] = var_v
-
-    cov_hy = np.stack([var_z0_valid, var_v], axis=1)
-
-    # Step 2: Calculate Posterior Moments for H using y on valid data
-    kalman_gain_h = cov_hy / var_y[:, np.newaxis]
-    mu_h_posterior = mu_h + kalman_gain_h * (y_valid - mu_y)[:, np.newaxis]
-    cov_h_posterior = cov_h - np.einsum("bi,bj->bij", kalman_gain_h, cov_hy)
-
-    mu_v_posterior = mu_h_posterior[:, 1]
-    var_v_posterior = cov_h_posterior[:, 1, 1]
-
-    # Step 3: Calculate Posterior Moments for V^2 on valid data
-    mu_v2_posterior = mu_v_posterior**2 + var_v_posterior
-    var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
-        mu_v_posterior**2
-    )
-
-    # Step 4: Calculate Prior Moments for V^2 and Gain 'k' on valid data
-    mu_v2_prior = mu_v2bar_valid
-    var_v2_prior = 3 * var_v2bar_valid + 2 * (mu_v2bar_valid**2)
-
-    k = np.divide(
-        var_v2bar_valid,
-        var_v2_prior,
-        out=np.zeros_like(var_v2bar_valid),
-        where=var_v2_prior != 0,
-    )
-
-    # Step 5: Update V2bar to get its Posterior Moments on valid data
-    mu_v2bar_posterior_valid = mu_v2bar_valid + k * (mu_v2_posterior - mu_v2_prior)
-    var_v2bar_posterior_valid = var_v2bar_valid + k**2 * (
-        var_v2_posterior - var_v2_prior
-    )
-
-    # Place the calculated posterior values
-    mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
-    var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
-
-    return mu_v2bar_posterior, var_v2bar_posterior
-
-
-# Define a class to handle the lstm state buffers
-class LSTMStateContainer:
-    """
-    An optimized container for managing LSTM states using pre-allocated NumPy arrays.
-
-    This container stores the hidden and cell states (mean and variance) for all
-    time series across all LSTM layers in contiguous NumPy arrays. This avoids the
-    overhead of creating and managing dictionaries or lists for each series and
-    leverages vectorized operations for updating and retrieving batch states.
-
-    Args:
-        num_series (int): The total number of time series.
-        layer_state_shapes (dict): A dictionary mapping layer index to the shape
-                                   of its hidden state (e.g., {0: 40, 1: 40}).
-    """
-
-    def __init__(self, num_series: int, layer_state_shapes: dict):
-        self.num_series = num_series
-        self.layer_state_shapes = layer_state_shapes
-        self.states = {}
-
-        # Initialize NumPy arrays for each layer and state component
-        for layer_idx, state_dim in layer_state_shapes.items():
-            # Shape: (num_series, state_dim)
-            self.states[layer_idx] = {
-                "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
-                "var_h": np.zeros((num_series, state_dim), dtype=np.float32),
-                "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
-                "var_c": np.zeros((num_series, state_dim), dtype=np.float32),
-            }
-
-    def _unpack_net_states(self, net_states: dict, batch_size: int):
-        """Helper to unpack the flat state arrays from the network into a structured dict."""
-        unpacked = {}
-        for layer_idx, (mu_h, var_h, mu_c, var_c) in net_states.items():
-            state_dim = self.layer_state_shapes[layer_idx]
-            # Reshape from flat array to (batch_size, state_dim)
-            unpacked[layer_idx] = {
-                "mu_h": np.asarray(mu_h).reshape(batch_size, state_dim),
-                "var_h": np.asarray(var_h).reshape(batch_size, state_dim),
-                "mu_c": np.asarray(mu_c).reshape(batch_size, state_dim),
-                "var_c": np.asarray(var_c).reshape(batch_size, state_dim),
-            }
-        return unpacked
-
-    def _pack_for_net(self, batch_states: dict):
-        """Helper to pack a structured dict of states into the flat tuple format for the network."""
-        packed = {}
-        for layer_idx, states in batch_states.items():
-            packed[layer_idx] = (
-                states["mu_h"].flatten(),
-                states["var_h"].flatten(),
-                states["mu_c"].flatten(),
-                states["var_c"].flatten(),
-            )
-        return packed
-
-    def update_states_from_net(self, indices: np.ndarray, net):
-        """
-        Gets the latest states from the network for the given indices and
-        updates the internal storage using vectorized assignment.
-        """
-        net_states = net.get_lstm_states()
-        batch_size = len(indices)
-
-        unpacked_states = self._unpack_net_states(net_states, batch_size)
-
-        # Vectorized update using advanced indexing
-        for layer_idx, components in unpacked_states.items():
-            self.states[layer_idx]["mu_h"][indices] = components["mu_h"]
-            self.states[layer_idx]["var_h"][indices] = components["var_h"]
-            self.states[layer_idx]["mu_c"][indices] = components["mu_c"]
-            self.states[layer_idx]["var_c"][indices] = components["var_c"]
-
-    def set_states_on_net(self, indices: np.ndarray, net):
-        """
-        Retrieves the stored states for the given indices and sets them on the network.
-        """
-        batch_states = {}
-        # Vectorized retrieval using advanced indexing
-        for layer_idx, components in self.states.items():
-            batch_states[layer_idx] = {
-                "mu_h": components["mu_h"][indices],
-                "var_h": components["var_h"][indices],
-                "mu_c": components["mu_c"][indices],
-                "var_c": components["var_c"][indices],
-            }
-
-        packed_states = self._pack_for_net(batch_states)
-        net.set_lstm_states(packed_states)
-
-
-class EarlyStopping:
-    def __init__(
-        self,
-        criteria="log_lik",
-        patience=10,
-        min_delta=1e-4,
-        warmup_epochs=0,
-    ):
-        self.criteria = criteria
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_score = -np.inf if criteria == "log_lik" else np.inf
-        self.counter = 0
-        self.best_state = None
-        self.best_look_back_buffer = None
-        self.best_lstm_state_container = None
-        self.train_states = None
-        self.val_states = None
-        self.best_sigma_v = None
-        self.warmup_epochs = max(0, warmup_epochs)
-        self.epoch_count = 0
-
-    def _as_float(self, score):
-        score_array = np.asarray(score)
-        if score_array.size != 1:
-            raise ValueError(
-                f"Expected scalar score for early stopping, got shape {score_array.shape}"
-            )
-        return float(score_array.item())
-
-    def _is_improvement(self, current_score):
-        if not np.isfinite(current_score):
-            return False
-        if self.criteria == "log_lik":
-            return current_score > self.best_score + self.min_delta
-        return current_score < self.best_score - self.min_delta
-
-    def _store_checkpoint(
-        self,
-        current_score,
-        model,
-        look_back_buffer,
-        lstm_state_container,
-        train_states,
-        val_states,
-        sigma_v,
-    ):
-        self.best_score = current_score
-        self.best_state = copy.deepcopy(model.state_dict())
-        self.best_look_back_buffer = copy.deepcopy(look_back_buffer)
-        self.best_lstm_state_container = copy.deepcopy(lstm_state_container)
-        self.train_states = copy.deepcopy(train_states)
-        self.val_states = copy.deepcopy(val_states)
-        self.best_sigma_v = sigma_v
-
-    def __call__(
-        self,
-        current_score,
-        model,
-        look_back_buffer,
-        lstm_state_container,
-        train_states,
-        val_states,
-        sigma_v,
-    ):
-        self.epoch_count += 1
-        current_score = self._as_float(current_score)
-        in_warmup = self.epoch_count <= self.warmup_epochs
-
-        if in_warmup:
-            return False  # Skip checkpointing during warmup
-
-        if self.best_state is None or self._is_improvement(current_score):
-            self._store_checkpoint(
-                current_score,
-                model,
-                look_back_buffer,
-                lstm_state_container,
-                train_states,
-                val_states,
-                sigma_v,
-            )
-            self.counter = 0
-            return False  # Not early stopping
-
-        self.counter += 1
-        if self.counter >= self.patience:
-            return True  # Early stopping
-        return False  # Not early stopping
-
-
 # Define class for storing predictions over all time steps
 class States:
     def __init__(self, nb_ts, total_time_steps):
@@ -508,71 +190,6 @@ class States:
         self.mu[idx], self.std[idx] = value
 
 
-# --- Eval Helper Functions ---
-def plot_series(
-    ts_idx, y_true, y_pred, s_pred, out_dir, val_test_indices, std_factor=1
-):
-    """Plot truth, prediction, and std_factor band for a single series."""
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    yt = y_true
-    yp = y_pred if y_pred is not None else None
-    sp = s_pred if s_pred is not None else None
-    x = np.arange(len(yt))
-
-    plt.figure(figsize=(10, 3))
-    plt.plot(x, yt, label=r"$y_{true}$", color="red")
-    if yp is not None:
-        plt.plot(x, yp, label=r"$\mathbb{E}[Y']$", color="blue")
-    if sp is not None and yp is not None:
-        lower = yp - std_factor * sp
-        upper = yp + std_factor * sp
-        plt.fill_between(
-            x,
-            lower,
-            upper,
-            color="blue",
-            alpha=0.3,
-            label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(std_factor),
-        )
-
-    # Shade validation and test regions
-    if val_test_indices is not None:
-        val_start, test_start = val_test_indices
-        end_time = len(yt)
-        if val_start < test_start:
-            plt.axvspan(
-                val_start,
-                test_start - 1,
-                color="green",
-                alpha=0.15,
-                label="Validation",
-                linewidth=0,
-            )
-        if test_start < end_time:
-            plt.axvspan(
-                test_start,
-                end_time,
-                color="purple",
-                alpha=0.15,
-                label="Test",
-                linewidth=0,
-            )
-
-    plt.xlabel("Time Index")
-    plt.ylabel("Value")
-    plt.legend(
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.15),
-        ncol=5,
-        frameon=False,
-    )
-    out_path = out_dir / f"series_{ts_idx:03d}.png"
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
-    plt.close()
-
-
 class Config:
     def __init__(self):
         # Seed for reproducibility
@@ -598,6 +215,10 @@ class Config:
         self.Sigma_v_bounds: tuple = (None, None)
         self.decaying_factor: float = 0.999
         self.device: str = "cpu"
+        self.init_params: Optional[str] = None
+        self.variance_inject: float = 0.0
+        self.variance_threshold: float = 1
+        self.variance_action: str = "add"
 
         # Set training parameters
         self.num_epochs: int = 100
@@ -654,7 +275,7 @@ class Config:
                     f.write(f"{name}: {getattr(self, name)}\n")
 
 
-def train_local_models(config, experiment_name: Optional[str] = None):
+def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
     output_dir = f"out/{experiment_name}/"
@@ -662,7 +283,6 @@ def train_local_models(config, experiment_name: Optional[str] = None):
         os.makedirs(output_dir)
 
     # Display and save configuration
-    config.display()
     config.save(os.path.join(output_dir, "config.txt"))
 
     # Initalize states
@@ -697,7 +317,17 @@ def train_local_models(config, experiment_name: Optional[str] = None):
             use_AGVI=config.use_AGVI,
             seed=config.seed,
             device=config.device,
+            init_params=config.init_params,
         )
+
+        # Add plasticity
+        if config.init_params and config.variance_inject != 0.0:
+            adjust_params(
+                net,
+                mode=config.variance_action,
+                value=config.variance_inject,
+                threshold=config.variance_threshold,
+            )
 
         # Create progress bar
         pbar = tqdm(range(config.num_epochs), desc=f"Epochs (TS {ts+1}/{config.nb_ts})")
@@ -751,9 +381,6 @@ def train_local_models(config, experiment_name: Optional[str] = None):
             look_back_buffer = LookBackBuffer(
                 input_seq_len=config.input_seq_len, nb_ts=1
             )
-            lstm_state_container = LSTMStateContainer(
-                num_series=1, layer_state_shapes={0: 40, 1: 40}
-            )
 
             # get current sigma_v if not using AGVI
             if not config.use_AGVI:
@@ -766,7 +393,8 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                 B = config.batch_size
 
                 # set LSTM states for the current batch
-                lstm_state_container.set_states_on_net([0], net)
+                if epoch != 0:
+                    net.set_lstm_states(lstm_states)
 
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
@@ -856,12 +484,15 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                     var_y = mu_v2bar_post  # updated aleatoric uncertainty
 
                 # Update LSTM states for the current batch
-                lstm_state_container.update_states_from_net([0], net)
+                lstm_states = net.get_lstm_states()
+
+                var_post_total = v_post + var_y
+                var_post_total = np.clip(var_post_total, a_min=1e-6, a_max=2.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
                     new_mu=m_post,
-                    new_var=v_post + var_y,
+                    new_var=var_post_total,
                     indices=[0],
                 )
 
@@ -892,7 +523,7 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                 B = config.batch_size
 
                 # set LSTM states for the current batch
-                lstm_state_container.set_states_on_net([0], net)
+                net.set_lstm_states(lstm_states)
 
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
@@ -923,7 +554,7 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                 m_pred, v_pred = net(x, var_x)
 
                 # Update LSTM states for the current batch
-                lstm_state_container.update_states_from_net([0], net)
+                lstm_states = net.get_lstm_states()
 
                 # Specific to AGVI
                 if config.use_AGVI:
@@ -982,6 +613,53 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                 }
             )
 
+            if wandb_run:
+                # Log metrics
+                log_payload = {
+                    "epoch": epoch,
+                    "train_rmse": train_mse,
+                    "train_log_lik": train_log_lik,
+                    "val_rmse": val_mse,
+                    "val_log_lik": val_log_lik,
+                }
+                if not config.use_AGVI:
+                    log_payload["sigma_v"] = sigma_v
+
+                # Log parameter histograms
+                log_param_freq = 1  # logs each n epochs
+                if (epoch % log_param_freq == 0) or (epoch == config.num_epochs - 1):
+                    try:
+                        state_dict = net.state_dict()
+                        for layer_name, params in state_dict.items():
+                            is_lstm = "lstm" in layer_name.lower()
+                            gate_names = ("forget", "input", "candidate", "output")
+                            param_labels = ("mu_w", "var_w", "mu_b", "var_b")
+                            for param, label in zip(params, param_labels):
+                                if param is None:
+                                    continue
+                                values = np.asarray(param)
+                                if is_lstm:
+                                    flat_values = values.reshape(-1)
+                                    gate_size = flat_values.size // 4
+                                    if gate_size > 0 and flat_values.size % 4 == 0:
+                                        for idx, gate in enumerate(gate_names):
+                                            start = idx * gate_size
+                                            end = start + gate_size
+                                            log_payload[
+                                                f"params/{layer_name}/{label}_{gate}"
+                                            ] = wandb.Histogram(flat_values[start:end])
+                                        continue
+                                log_payload[f"params/{layer_name}/{label}"] = (
+                                    wandb.Histogram(values)
+                                )
+                    except Exception as e:
+                        print(
+                            f"Warning: Could not log model parameters to W&B. Error: {e}"
+                        )
+
+            # Send all logs for this epoch
+            wandb.log(log_payload)
+
             # Check for early stopping
             val_score = (
                 val_log_lik if config.early_stopping_criteria == "log_lik" else val_mse
@@ -990,15 +668,16 @@ def train_local_models(config, experiment_name: Optional[str] = None):
                 val_score,
                 net,
                 look_back_buffer,
-                lstm_state_container,
+                lstm_states,
                 train_states,
                 val_states,
                 sigma_v if not config.use_AGVI else None,
+                embeddings=None,
             ):
                 print(f"Early stopping at epoch {epoch+1}")
                 net.load_state_dict(early_stopping.best_state)
                 look_back_buffer = early_stopping.best_look_back_buffer
-                lstm_state_container = early_stopping.best_lstm_state_container
+                lstm_states = early_stopping.best_lstm_state_container
                 train_states = early_stopping.train_states
                 val_states = early_stopping.val_states
                 if not config.use_AGVI:
@@ -1032,7 +711,7 @@ def train_local_models(config, experiment_name: Optional[str] = None):
             B = config.batch_size
 
             # set LSTM states for the current batch
-            lstm_state_container.set_states_on_net([0], net)
+            net.set_lstm_states(lstm_states)
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -1063,7 +742,7 @@ def train_local_models(config, experiment_name: Optional[str] = None):
             m_pred, v_pred = net(x, var_x)
 
             # Update LSTM states for the current batch
-            lstm_state_container.update_states_from_net([0], net)
+            lstm_states = net.get_lstm_states()
 
             # Specific to AGVI
             if config.use_AGVI:
@@ -1295,9 +974,12 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             )
 
 
-def main(Train=False, Eval=True):
-    list_of_seeds = [1, 42, 235, 1234, 2024]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+def main(Train=True, Eval=True, log_wandb=True):
+    # list_of_seeds = [1, 42, 235, 1234, 2024]
+    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+
+    list_of_seeds = [75]
+    list_of_experiments = ["train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -1317,16 +999,43 @@ def main(Train=False, Eval=True):
             config.seed = seed
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.eval_plots = False  # Disable plots for multiple experiments
+            config.eval_plots = False
+            config.ts_to_use = [0]
+
+            # Convert config object to a dictionary for W&B
+            config_dict = {
+                k: getattr(config, k)
+                for k in dir(config)
+                if not k.startswith("_") and not callable(getattr(config, k))
+            }
+
+            if log_wandb:
+                # Initialize W&B run
+                run = wandb.init(
+                    project="Local_Model_Run",
+                    group="Time_Series_Local_Models",
+                    name=f"{exp}_Seed{seed}",
+                    config=config_dict,
+                    reinit=True,  # Allows re-initializing in a loop
+                    save_code=True,  # Saves the main script
+                )
+            else:
+                run = None
 
             if Train:
                 # Train model
-                train_local_models(config, experiment_name=experiment_name)
+                train_local_models(
+                    config, experiment_name=experiment_name, wandb_run=run
+                )
 
             if Eval:
                 # Evaluate model
                 eval_local_models(config, experiment_name=experiment_name)
 
+            # Finish the W&B run
+            if log_wandb:
+                run.finish()
+
 
 if __name__ == "__main__":
-    main()
+    main(True, False, True)

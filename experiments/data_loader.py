@@ -5,6 +5,7 @@ import pandas as pd
 from pytagi import Normalizer
 
 import warnings
+from matplotlib import pyplot as plt
 
 
 class TimeSeriesDataBuilder:
@@ -175,6 +176,7 @@ class TimeSeriesDataBuilder:
         rolled_per_ts = []
         scaling_info_per_ts = []  # To store calculated (mu, sd) tuples
 
+        X_all_norm = np.full_like(X_all, np.nan, dtype=np.float32)
         for j in range(N):
             xj, dtj = X_all[:, j], DT_all[:, j]
             xj, dtj = self._trim_trailing_nans(xj, dtj)
@@ -222,6 +224,8 @@ class TimeSeriesDataBuilder:
             elif self.scale_method is not None:
                 raise ValueError(f"Unknown scale_method: {self.scale_method}")
 
+            X_all_norm[: Xj.shape[0], j] = Xj[:, 0]
+
             x_rolled, y_rolled, window_ids = self._create_rolling_windows(
                 Xj,
                 input_seq_len=self.input_seq_len,
@@ -249,6 +253,31 @@ class TimeSeriesDataBuilder:
             means, stds = zip(*scaling_info_per_ts)
             self.x_mean = list(means)
             self.x_std = list(stds)
+
+        # Plot distribution for each time Series
+        pdf_name = self.x_file.split("/")[-1].replace(".csv", "")
+
+        all_means = np.nanmean(X_all_norm, axis=0)
+        all_stds = np.nanstd(X_all_norm, axis=0)
+        plt.figure(figsize=(min(8, len(all_means) * 0.1), 3))
+        plt.errorbar(
+            x=np.arange(len(all_means)),
+            y=all_means,
+            yerr=all_stds,
+            fmt="o",
+            markersize=3,
+            ecolor="r",
+            capsize=3,
+        )
+        plt.xlabel("Time Series Index")
+        plt.ylabel("Value")
+        plt.title(f"{pdf_name}")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.xlim(-1, len(all_means))
+        plt.ylim(-5, 5)
+        plt.savefig(f"out/dist_{pdf_name}.svg")
+        plt.close()
 
         # --- Concatenation Logic ---
         if self.order_mode == "by_series":
@@ -475,8 +504,12 @@ class GlobalBatchLoader:
 
         # Call the other static methods using the class name
         if order_mode == "by_series":
-            yield from GlobalBatchLoader._loader_by_series(X, Y, S, K, batch_size, shuffle)
+            yield from GlobalBatchLoader._loader_by_series(
+                X, Y, S, K, batch_size, shuffle
+            )
         elif order_mode == "by_window":
-            yield from GlobalBatchLoader._loader_by_window(X, Y, S, K, batch_size, shuffle)
+            yield from GlobalBatchLoader._loader_by_window(
+                X, Y, S, K, batch_size, shuffle
+            )
         else:
             raise ValueError(f"Unknown order_mode: {order_mode}")

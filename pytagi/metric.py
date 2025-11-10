@@ -187,7 +187,6 @@ def mase(y, y_pred, y_train, seasonality: int = 1):
     mae = np.mean(np.abs(y - y_pred))
     return mae / scale
 
-
 def Np50(y, ypred):
     """Computes the normalized median absolute error.
 
@@ -198,10 +197,18 @@ def Np50(y, ypred):
     :return: Median absolute error normalized by the sum of the absolute targets.
     :rtype: float
     """
-    ypred_50q = ypred
-    e = y - ypred_50q
-    return np.sum(np.abs(e)) / np.sum(np.abs(y))
-
+    y = np.asarray(y)
+    ypred = np.asarray(ypred)
+    mask = np.isfinite(y) & np.isfinite(ypred)
+    if not np.any(mask):
+        return np.nan
+    y = y[mask]
+    ypred = ypred[mask]
+    denom = np.sum(np.abs(y))
+    if denom == 0.0:
+        return np.nan
+    e = y - ypred
+    return np.sum(np.abs(e)) / denom
 
 def Np90(y, ypred, spred):
     """Computes the normalized tilted loss for the 90th percentile.
@@ -215,11 +222,23 @@ def Np90(y, ypred, spred):
     :return: 90th percentile tilted loss normalized by the sum of absolute targets.
     :rtype: float
     """
+    y = np.asarray(y)
+    ypred = np.asarray(ypred)
+    spred = np.asarray(spred)
+    mask = np.isfinite(y) & np.isfinite(ypred) & np.isfinite(spred)
+    if not np.any(mask):
+        return np.nan
+    y = y[mask]
+    ypred = ypred[mask]
+    spred = spred[mask]
+    denom = np.sum(np.abs(y))
+    if denom == 0.0:
+        return np.nan
     ypred_90q = ypred + 1.282 * spred  # 1.282 is the z-score for the 90th percentile
     Iq = y > ypred_90q
-    Iq_ = y <= ypred_90q
+    Iq_ = ~Iq
     e = y - ypred_90q
-    return np.sum(2 * e * (0.9 * Iq - 0.1 * Iq_)) / np.sum(np.abs(y))
+    return np.sum(2 * e * (0.9 * Iq - 0.1 * Iq_)) / denom
 
 
 def p50(y: np.ndarray, ypred: np.ndarray) -> float:
@@ -232,7 +251,12 @@ def p50(y: np.ndarray, ypred: np.ndarray) -> float:
     :return: Sum of absolute deviations between targets and predictions.
     :rtype: float
     """
-    e = y - ypred
+    y = np.asarray(y)
+    ypred = np.asarray(ypred)
+    mask = np.isfinite(y) & np.isfinite(ypred)
+    if not np.any(mask):
+        return np.nan
+    e = y[mask] - ypred[mask]
     return np.sum(np.abs(e))
 
 
@@ -248,9 +272,18 @@ def p90(y: np.ndarray, ypred: np.ndarray, spred: np.ndarray) -> float:
     :return: 90th percentile tilted loss aggregated over targets.
     :rtype: float
     """
+    y = np.asarray(y)
+    ypred = np.asarray(ypred)
+    spred = np.asarray(spred)
+    mask = np.isfinite(y) & np.isfinite(ypred) & np.isfinite(spred)
+    if not np.any(mask):
+        return np.nan
+    y = y[mask]
+    ypred = ypred[mask]
+    spred = spred[mask]
     ypred_90q = ypred + 1.282 * spred  # 1.282 is the z-score for the 90th percentile
     Iq = y > ypred_90q
-    Iq_ = y <= ypred_90q
+    Iq_ = ~Iq
     e = y - ypred_90q
     return np.sum(2 * e * (0.9 * Iq - 0.1 * Iq_))
 

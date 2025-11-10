@@ -113,6 +113,10 @@ class EmbeddingLayer:
         np.add.at(self.mu, idx_filtered, mu_delta_filtered)
         np.add.at(self.var, idx_filtered, var_delta_filtered)
 
+        np.maximum(
+            self.var, 1e-5, out=self.var
+        )  # prevent variances from going negative
+
     def save(self, out_file: str):
         """Saves embeddings to a .npz file."""
         np.savez(

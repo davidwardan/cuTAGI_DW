@@ -70,21 +70,24 @@ def prepare_data(
 
 
 # Define model
-def build_model(input_size, use_AGVI, seed, device):
+def build_model(input_size, use_AGVI, seed, device, init_params=None):
     manual_seed(seed)
     if use_AGVI:
         net = Sequential(
-            LSTM(input_size, 40, 1),
-            LSTM(40, 40, 1),
-            Linear(40, 2),
+            LSTM(input_size, 40, 1, gain_bias=0.1),
+            LSTM(40, 40, 1, gain_bias=0.1),
+            Linear(40, 2, gain_bias=0.1),
             EvenExp(),
         )
     else:
         net = Sequential(
-            LSTM(input_size, 40, 1),
-            LSTM(40, 40, 1),
-            Linear(40, 1),
+            LSTM(input_size, 40, 1, gain_bias=0.1),
+            LSTM(40, 40, 1, gain_bias=0.1),
+            Linear(40, 1, gain_bias=0.1),
         )
+
+    if init_params is not None:
+        net.load(init_params)
     if device == "cpu":
         net.set_threads(1)
     elif device == "cuda":
@@ -633,8 +636,12 @@ class LSTMStateContainer:
         """
 
         batch_size = len(indices)
-        valid_mask = indices != -1
-        valid_indices_to_read = indices[valid_mask]
+        if batch_size != 1:
+            valid_mask = indices != -1
+            valid_indices_to_read = indices[valid_mask]
+        else:
+            valid_mask = np.array([True], dtype=bool)
+            valid_indices_to_read = indices
 
         batch_states = {}
         for layer_idx, components in self.states.items():
@@ -668,6 +675,9 @@ class LSTMStateContainer:
 
         packed_states = self._pack_for_net(batch_states)
         net.set_lstm_states(packed_states)
+
+    def __call__(self, *args, **kwds):
+        pass
 
 
 class EarlyStopping:
@@ -886,3 +896,35 @@ def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
     emb_plot_path = in_dir / out_path
     plt.savefig(emb_plot_path, dpi=600, bbox_inches="tight")
     plt.close()
+
+
+# --- Uncertainty Injection Function ---
+def adjust_params(net, mode="add", value=1e-2, threshold=5e-4, which_layer=None):
+    """
+    Adjusts the variances of weights and biases in the network's state dictionary.
+
+    For each layer (or specified layers), if a variance value is below the given threshold,
+    either adds or sets it to the specified value depending on the mode.
+
+    Args:
+        net: The neural network whose parameters will be modified.
+        mode (str): "add" to increment variances, "set" to assign the value directly.
+        value (float): The value to add or set for the variances.
+        threshold (float): Variances below this value will be adjusted.
+        which_layer (list or None): List of layer names to adjust. If None, all layers are adjusted.
+
+    Returns:
+        None. The network's parameters are updated in-place.
+    """
+
+    state_dict = net.state_dict()
+    for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+        if which_layer is None or layer_name in which_layer:
+            if mode.lower() == "add":
+                var_w = [x + value if x < threshold else x for x in var_w]
+                var_b = [x + value if x < threshold else x for x in var_b]
+            elif mode.lower() == "set":
+                var_w = [value if x < threshold else x for x in var_w]
+                var_b = [value if x < threshold else x for x in var_b]
+            state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+    net.load_state_dict(state_dict)

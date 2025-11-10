@@ -597,7 +597,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     state_dict = net.state_dict()
                     for layer_name, params in state_dict.items():
                         is_lstm = "lstm" in layer_name.lower()
-                        gate_names = ("forget", "input", "cell", "output")
+                        gate_names = ("forget", "input", "candidate", "output")
                         param_labels = ("mu_w", "var_w", "mu_b", "var_b")
                         for param, label in zip(params, param_labels):
                             if param is None:
@@ -648,11 +648,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
             # Restore best embeddings
             embeddings = early_stopping.best_embeddings
-
-            # Log the best score to W&B summary
-            if wandb_run:
-                best_metric_name = f"best_val_{config.early_stopping_criteria}"
-                wandb.summary[best_metric_name] = early_stopping.best_score
 
             break
 
@@ -887,16 +882,16 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
             stand_yt_test = normalizer.standardize(yt_test, train_mean, train_std)
             stand_ypred_test = normalizer.standardize(ypred_test, train_mean, train_std)
-            stand_spred_test = spred_test / (train_std + 1e-6)
+            stand_spred_test = spred_test / (train_std + 1e-10)
 
             if np.any(mask_test):
                 y_true = stand_yt_test[mask_test]
                 y_pred = stand_ypred_test[mask_test]
                 s_pred = stand_spred_test[mask_test]
-                max_std = 3.0 * np.std(y_true - y_pred)
-                s_pred = np.where(
-                    s_pred > max_std, np.nan, np.clip(s_pred, 1e-6, max_std)
-                )
+                # max_std = 3.0 * np.std(y_true - y_pred)
+                # s_pred = np.where(
+                #     s_pred > max_std, np.nan, np.clip(s_pred, 1e-6, max_std)
+                # )
 
                 # normalize data
                 test_rmse = metric.rmse(y_pred, y_true)
@@ -1270,25 +1265,31 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [2, 42, 235, 1234, 2024]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [1]
+    list_of_experiments = ["train60"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
         for exp in list_of_experiments:
             print(f"Running experiment: {exp} with seed {seed}")
 
+            # Model category
+            model_category = "global_model"
+
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_global_model"
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}_gainbias"
 
             # Create configuration
             config = Config()
             config.seed = seed
-            config.batch_size = 64
+            config.batch_size = 16
+            config.shuffle = True
             config.device = "cuda" if torch.cuda.is_available() else "cpu"
-            # config.device = "cpu"
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.eval_plots = False
+            # config.embed_plots = True
+            # config.embedding_size = 15
 
             # Convert config object to a dictionary for W&B
             config_dict = {
@@ -1300,8 +1301,9 @@ def main(Train=True, Eval=True, log_wandb=True):
             if log_wandb:
                 # Initialize W&B run
                 run = wandb.init(
-                    project="Forecasting_SHM",
-                    name=experiment_name,
+                    project="Model_Comaprison_SHM",
+                    group=model_category,
+                    name=f"{exp}_Seed{seed}",
                     config=config_dict,
                     reinit=True,  # Allows re-initializing in a loop
                     save_code=True,  # Saves the main script
