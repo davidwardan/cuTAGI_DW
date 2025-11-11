@@ -1,15 +1,16 @@
 
 #include "../include/activation_cuda.cuh"
+#include "../include/cuda_error_checking.cuh"
 #include "../include/custom_logger.h"
 #include "../include/lstm_layer.h"
 #include "../include/lstm_layer_cuda.cuh"
 #include "../include/param_init.h"
 
 __global__ void lstm_linear_fwd_mean_var_cuda(
-    float const *mu_w, float const *var_w, float const *mu_b,
-    float const *var_b, const float *mu_a, const float *var_a,
+    float const* mu_w, float const* var_w, float const* mu_b,
+    float const* var_b, const float* mu_a, const float* var_a,
     size_t input_size, size_t output_size, int batch_size, bool bias, int w_pos,
-    int b_pos, float *mu_z, float *var_z)
+    int b_pos, float* mu_z, float* var_z)
 /*
  */
 {
@@ -41,8 +42,8 @@ __global__ void lstm_linear_fwd_mean_var_cuda(
 }
 
 __global__ void lstm_cov_input_cell_states_cuda(
-    float const *Sha, float const *mw, float const *Ji_ga, float const *Jc_ga,
-    int w_pos_i, int w_pos_c, int ni, int no, int seq_len, int B, float *Ci_c)
+    float const* Sha, float const* mw, float const* Ji_ga, float const* Jc_ga,
+    int w_pos_i, int w_pos_c, int ni, int no, int seq_len, int B, float* Ci_c)
 /*Compute covariance between input gates and cell states. Note that we store the
    hidden state vector as follows: z = [seq1, seq2, ..., seq n] where seq's
    shape = [1, no * B]
@@ -80,10 +81,10 @@ Args:
 }
 
 __global__ void lstm_cell_state_mean_var_cuda(
-    float const *mf_ga, float const *Sf_ga, float const *mi_ga,
-    float const *Si_ga, float const *mc_ga, float const *Sc_ga,
-    float const *mc_prev, float const *Sc_prev, float const *Ci_c, int no,
-    int seq_len, int B, float *mc, float *Sc)
+    float const* mf_ga, float const* Sf_ga, float const* mi_ga,
+    float const* Si_ga, float const* mc_ga, float const* Sc_ga,
+    float const* mc_prev, float const* Sc_prev, float const* Ci_c, int no,
+    int seq_len, int B, float* mc, float* Sc)
 /*Compute cell states for the current state
 
 Args:
@@ -121,11 +122,11 @@ Args:
 }
 
 __global__ void lstm_cov_output_tanh_cell_states_cuda(
-    float const *mw, float const *Sha, float const *mc_prev, float const *Jc_a,
-    float const *Jf_ga, float const *mi_ga, float const *Ji_ga,
-    float const *mc_ga, float const *Jc_ga, float const *Jo_ga, int w_pos_f,
+    float const* mw, float const* Sha, float const* mc_prev, float const* Jc_a,
+    float const* Jf_ga, float const* mi_ga, float const* Ji_ga,
+    float const* mc_ga, float const* Jc_ga, float const* Jo_ga, int w_pos_f,
     int w_pos_i, int w_pos_c, int w_pos_o, int ni, int no, int seq_len, int B,
-    float *Co_tanh_c)
+    float* Co_tanh_c)
 /*Compute convariance between output gates & tanh(cell states)
 
 Args:
@@ -177,9 +178,9 @@ Args:
 }
 
 __global__ void lstm_hidden_state_mean_var_cuda(
-    float const *mo_ga, float const *So_ga, float const *mc_a,
-    float const *Sc_a, float const *Co_tanh_c, int no, int seq_len, int B,
-    float *mz, float *Sz)
+    float const* mo_ga, float const* So_ga, float const* mc_a,
+    float const* Sc_a, float const* Co_tanh_c, int no, int seq_len, int B,
+    float* mz, float* Sz)
 /*Compute mean and variance for hidden states of the LSTM layer
 
 Args:
@@ -211,9 +212,9 @@ Args:
     }
 }
 
-__global__ void lstm_cat_act_and_prev_states_cuda(float const *a,
-                                                  float const *b, int n, int m,
-                                                  int seq_len, int B, float *c)
+__global__ void lstm_cat_act_and_prev_states_cuda(float const* a,
+                                                  float const* b, int n, int m,
+                                                  int seq_len, int B, float* c)
 /*Concatenate two vectors*/
 {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
@@ -231,7 +232,7 @@ __global__ void lstm_cat_act_and_prev_states_cuda(float const *a,
     }
 }
 
-__global__ void to_prev_states(float const *curr, int n, float *prev)
+__global__ void to_prev_states(float const* curr, int n, float* prev)
 /*Transfer data from current cell & hidden to previous cell & hidden states
    which are used for the next step*/
 {
@@ -245,12 +246,12 @@ __global__ void to_prev_states(float const *curr, int n, float *prev)
 // BACKWARD PASS
 ////////////////////////////////////////////////////////////////////////////////
 __global__ void lstm_delta_mean_var_z(
-    float const *mw, float const *Jf_ga, float const *mi_ga, float const *Ji_ga,
-    float const *mc_ga, float const *Jc_ga, float const *mo_ga,
-    float const *Jo_ga, float const *mc_prev, float const *mca,
-    float const *Jca, float const *delta_m_out, float const *delta_S_out,
+    float const* mw, float const* Jf_ga, float const* mi_ga, float const* Ji_ga,
+    float const* mc_ga, float const* Jc_ga, float const* mo_ga,
+    float const* Jo_ga, float const* mc_prev, float const* mca,
+    float const* Jca, float const* delta_m_out, float const* delta_S_out,
     int w_pos_f, int w_pos_i, int w_pos_c, int w_pos_o, int no, int ni,
-    int seq_len, int B, float *delta_m, float *delta_S)
+    int seq_len, int B, float* delta_m, float* delta_S)
 /*Compute the updated quatitites of the mean of the hidden states for lstm
    layer
 
@@ -332,8 +333,8 @@ NOTE: All LSTM states excepted mc_prev are from the next layer e.g., mi_ga(l+1)
 }
 
 __global__ void lstm_update_prev_hidden_states(
-    const float *mu_h_prior, const float *var_h_prior, const float *delta_mu,
-    const float *delta_var, int num_states, float *mu_h_prev, float *var_h_prev)
+    const float* mu_h_prior, const float* var_h_prior, const float* delta_mu,
+    const float* delta_var, int num_states, float* mu_h_prev, float* var_h_prev)
 /*
  */
 {
@@ -346,9 +347,9 @@ __global__ void lstm_update_prev_hidden_states(
 }
 
 __global__ void lstm_update_prev_cell_states(
-    const float *mu_c_prior, const float *var_c_prior, const float *jcb_ca,
-    const float *mu_o_ga, const float *delta_mu, const float *delta_var,
-    int num_states, float *mu_c_prev, float *var_c_prev)
+    const float* mu_c_prior, const float* var_c_prior, const float* jcb_ca,
+    const float* mu_o_ga, const float* delta_mu, const float* delta_var,
+    int num_states, float* mu_c_prev, float* var_c_prev)
 /*
  */
 {
@@ -362,13 +363,13 @@ __global__ void lstm_update_prev_cell_states(
 }
 
 __global__ void lstm_delta_mean_var_w(
-    float const *Sw, float const *mha, float const *Jf_ga, float const *mi_ga,
-    float const *Ji_ga, float const *mc_ga, float const *Jc_ga,
-    float const *mo_ga, float const *Jo_ga, float const *mc_prev,
-    float const *mca, float const *Jc, float const *delta_m_out,
-    float const *delta_S_out, int w_pos_f, int w_pos_i, int w_pos_c,
-    int w_pos_o, int no, int ni, int seq_len, int B, float *delta_mw,
-    float *delta_Sw)
+    float const* Sw, float const* mha, float const* Jf_ga, float const* mi_ga,
+    float const* Ji_ga, float const* mc_ga, float const* Jc_ga,
+    float const* mo_ga, float const* Jo_ga, float const* mc_prev,
+    float const* mca, float const* Jc, float const* delta_m_out,
+    float const* delta_S_out, int w_pos_f, int w_pos_i, int w_pos_c,
+    int w_pos_o, int no, int ni, int seq_len, int B, float* delta_mw,
+    float* delta_Sw)
 /*Compute updating quantities of the weight parameters for lstm layer
 
 Args:
@@ -462,12 +463,12 @@ NOTE: All LSTM states are from the next layer e.g., mi_ga(l+1)
 }
 
 __global__ void lstm_delta_mean_var_b(
-    float const *Sb, float const *Jf_ga, float const *mi_ga, float const *Ji_ga,
-    float const *mc_ga, float const *Jc_ga, float const *mo_ga,
-    float const *Jo_ga, float const *mc_prev, float const *mca, float const *Jc,
-    float const *delta_m_out, float const *delta_S_out, int b_pos_f,
+    float const* Sb, float const* Jf_ga, float const* mi_ga, float const* Ji_ga,
+    float const* mc_ga, float const* Jc_ga, float const* mo_ga,
+    float const* Jo_ga, float const* mc_prev, float const* mca, float const* Jc,
+    float const* delta_m_out, float const* delta_S_out, int b_pos_f,
     int b_pos_i, int b_pos_c, int b_pos_o, int no, int seq_len, int B,
-    float *delta_mb, float *delta_Sb)
+    float* delta_mb, float* delta_Sb)
 /*Compute updating quantities of the bias for the lstm layer
 
 Args:
@@ -657,13 +658,13 @@ void LSTMCuda::init_weight_bias()
     this->params_to_device();
 }
 
-void LSTMCuda::prepare_input(BaseHiddenStates &input_states)
+void LSTMCuda::prepare_input(BaseHiddenStates& input_states)
 /*
  */
 {
     // New poitner will point to the same memory location when casting
-    HiddenStateCuda *cu_input_states =
-        dynamic_cast<HiddenStateCuda *>(&input_states);
+    HiddenStateCuda* cu_input_states =
+        dynamic_cast<HiddenStateCuda*>(&input_states);
     int batch_size = cu_input_states->block_size;
 
     unsigned int grid_row =
@@ -799,9 +800,9 @@ void LSTMCuda::output_gate(int batch_size)
         this->lstm_state.d_var_o_ga);
 }
 
-void LSTMCuda::forward(BaseHiddenStates &input_states,
-                       BaseHiddenStates &output_states,
-                       BaseTempStates &temp_states)
+void LSTMCuda::forward(BaseHiddenStates& input_states,
+                       BaseHiddenStates& output_states,
+                       BaseTempStates& temp_states)
 /*
  */
 {
@@ -814,10 +815,10 @@ void LSTMCuda::forward(BaseHiddenStates &input_states,
     }
 
     // New poitner will point to the same memory location when casting
-    HiddenStateCuda *cu_input_states =
-        dynamic_cast<HiddenStateCuda *>(&input_states);
-    HiddenStateCuda *cu_output_states =
-        dynamic_cast<HiddenStateCuda *>(&output_states);
+    HiddenStateCuda* cu_input_states =
+        dynamic_cast<HiddenStateCuda*>(&input_states);
+    HiddenStateCuda* cu_output_states =
+        dynamic_cast<HiddenStateCuda*>(&output_states);
 
     int batch_size = input_states.block_size;
     this->set_cap_factor_udapte(batch_size);
@@ -932,19 +933,19 @@ void LSTMCuda::forward(BaseHiddenStates &input_states,
     }
 }
 
-void LSTMCuda::backward(BaseDeltaStates &input_delta_states,
-                        BaseDeltaStates &output_delta_states,
-                        BaseTempStates &temp_states, bool state_udapte)
+void LSTMCuda::backward(BaseDeltaStates& input_delta_states,
+                        BaseDeltaStates& output_delta_states,
+                        BaseTempStates& temp_states, bool state_udapte)
 /*
  */
 {
     // New poitner will point to the same memory location when casting
-    DeltaStateCuda *cu_input_delta_states =
-        dynamic_cast<DeltaStateCuda *>(&input_delta_states);
-    DeltaStateCuda *cu_output_delta_states =
-        dynamic_cast<DeltaStateCuda *>(&output_delta_states);
-    BackwardStateCuda *cu_next_bwd_states =
-        dynamic_cast<BackwardStateCuda *>(this->bwd_states.get());
+    DeltaStateCuda* cu_input_delta_states =
+        dynamic_cast<DeltaStateCuda*>(&input_delta_states);
+    DeltaStateCuda* cu_output_delta_states =
+        dynamic_cast<DeltaStateCuda*>(&output_delta_states);
+    BackwardStateCuda* cu_next_bwd_states =
+        dynamic_cast<BackwardStateCuda*>(this->bwd_states.get());
 
     // Initialization
     int batch_size = input_delta_states.block_size;
@@ -1053,10 +1054,10 @@ void LSTMCuda::preinit_layer() {
     }
 }
 
-void LSTMCuda::d_get_LSTM_states(std::vector<float> &mu_h,
-                                 std::vector<float> &var_h,
-                                 std::vector<float> &mu_c,
-                                 std::vector<float> &var_c) const {
+void LSTMCuda::d_get_LSTM_states(std::vector<float>& mu_h,
+                                 std::vector<float>& var_h,
+                                 std::vector<float>& mu_c,
+                                 std::vector<float>& var_c) const {
     // Size check
     mu_h.resize(this->lstm_state.num_states);
     var_h.resize(this->lstm_state.num_states);
@@ -1077,10 +1078,43 @@ void LSTMCuda::d_get_LSTM_states(std::vector<float> &mu_h,
                lstm_state.num_states * sizeof(float), cudaMemcpyDeviceToHost);
 }
 
-void LSTMCuda::d_set_LSTM_states(const std::vector<float> &mu_h,
-                                 const std::vector<float> &var_h,
-                                 const std::vector<float> &mu_c,
-                                 const std::vector<float> &var_c) {
+void LSTMCuda::d_set_LSTM_states(const std::vector<float>& mu_h,
+                                 const std::vector<float>& var_h,
+                                 const std::vector<float>& mu_c,
+                                 const std::vector<float>& var_c) {
+    const size_t provided_states = mu_h.size();
+
+    if (provided_states == 0) {
+        return;
+    }
+
+    if (var_h.size() != provided_states || mu_c.size() != provided_states ||
+        var_c.size() != provided_states) {
+        std::cerr << "setLSTMStates() received inconsistent state sizes.\n";
+        return;
+    }
+
+    if (lstm_state.num_states != provided_states) {
+        const size_t states_per_sample = this->seq_len * this->output_size;
+        if (states_per_sample == 0 ||
+            provided_states % states_per_sample != 0) {
+            std::cerr << "setLSTMStates() cannot infer batch size for resize.\n";
+            return;
+        }
+
+        const size_t batch_size = provided_states / states_per_sample;
+        const size_t num_state_elems =
+            batch_size * this->seq_len * this->output_size;
+        const size_t num_input_elems =
+            batch_size * this->seq_len * this->input_size;
+
+        lstm_state.set_num_states(num_state_elems, num_input_elems,
+                                  this->device_idx);
+    }
+
+    cudaSetDevice(this->device_idx);
+
+    // Copy from host to device
     cudaMemcpy(lstm_state.d_mu_h_prior, mu_h.data(),
                lstm_state.num_states * sizeof(float), cudaMemcpyHostToDevice);
 
@@ -1092,5 +1126,6 @@ void LSTMCuda::d_set_LSTM_states(const std::vector<float> &mu_h,
 
     cudaMemcpy(lstm_state.d_var_c_prior, var_c.data(),
                lstm_state.num_states * sizeof(float), cudaMemcpyHostToDevice);
+    CHECK_LAST_CUDA_ERROR();
 }
 void LSTMCuda::to(int device_idx) { this->device_idx = device_idx; }
