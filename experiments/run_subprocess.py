@@ -1,6 +1,8 @@
 import multiprocessing as mp
 from typing import Iterable, Sequence
 
+from experiments.wandb_helpers import finish_run, init_run
+
 
 DEFAULT_SEEDS: Sequence[int] = (1, 42, 235, 1234, 2024)
 DEFAULT_EXPERIMENTS: Sequence[str] = (
@@ -23,7 +25,12 @@ def _run_experiment(
 
     torch = tsg.torch
 
-    experiment_name = f"seed{seed}/{experiment}/experiment01_global_model"
+    # Model category
+    model_category = "global"
+    embed_category = "no embedding"
+
+    # Define experiment name
+    experiment_name = f"seed{seed}/{experiment}/experiment01_{model_category}"
 
     config = tsg.Config()
     config.seed = seed
@@ -40,12 +47,20 @@ def _run_experiment(
 
     wandb_run = None
     if log_wandb:
-        wandb_run = tsg.wandb.init(
-            project="Forecasting_SHM",
-            name=experiment_name,
+        # Initialize W&B run
+        run_id = f"{model_category}_{embed_category}_{experiment}_seed{seed}".replace(
+            " ", "_"
+        )
+        run = init_run(
+            project="Experiment_01_Forecasting",
+            name=f"{model_category}_{embed_category}",
+            group=f"{experiment}_Seed{seed}",
+            tags=[model_category, embed_category],
             config=config_dict,
             reinit=True,
             save_code=True,
+            id=run_id,
+            resume="never",
         )
 
     try:
@@ -59,10 +74,10 @@ def _run_experiment(
             tsg.eval_global_model(
                 config,
                 experiment_name=experiment_name,
+                wandb_run=wandb_run,
             )
     finally:
-        if wandb_run is not None:
-            wandb_run.finish()
+        finish_run(wandb_run)
 
 
 def run_experiments(

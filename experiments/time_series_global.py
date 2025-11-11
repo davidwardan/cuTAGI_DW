@@ -2,8 +2,9 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from typing import List, Optional
-import wandb
+from typing import Any, List, Optional
+
+from experiments.wandb_helpers import create_histogram, init_run, log_data, finish_run
 import torch
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
@@ -31,6 +32,8 @@ import pytagi.metric as metric
 
 # Plotting defaults
 import matplotlib as mpl
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 
 # Update matplotlib parameters in a single dictionary
 mpl.rcParams.update(
@@ -188,6 +191,29 @@ class Config:
             for name in dir(self):
                 if not name.startswith("_") and not callable(getattr(self, name)):
                     f.write(f"{name}: {getattr(self, name)}\n")
+
+    def wandb_dict(self):
+        """Converts the configuration to a dictionary for W&B logging."""
+        return {
+            "seed": self.seed,
+            "epochs": self.num_epochs,
+            "batch_size": self.batch_size,
+            "input_seq_len": self.input_seq_len,
+            "time_covariates": self.time_covariates,
+            "scale_method": self.scale_method,
+            "order_mode": self.order_mode,
+            "nb_ts": self.nb_ts,
+            "training_size": self.x_train.split("/")[-2],
+            "use_AGVI": self.use_AGVI,
+            "Sigma_v_bounds": self.Sigma_v_bounds,
+            "decaying_factor": self.decaying_factor,
+            "embedding_type": (
+                "mapped"
+                if self.use_mapped_embeddings
+                else "standard" if self.use_standard_embeddings else "none"
+            ),
+            "embedding_size": self.total_embedding_size,
+        }
 
 
 def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=None):
@@ -610,18 +636,22 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                                     for idx, gate in enumerate(gate_names):
                                         start = idx * gate_size
                                         end = start + gate_size
-                                        log_payload[
-                                            f"params/{layer_name}/{label}_{gate}"
-                                        ] = wandb.Histogram(flat_values[start:end])
+                                        histogram = create_histogram(
+                                            flat_values[start:end], num_bins=512
+                                        )
+                                        if histogram is not None:
+                                            log_payload[
+                                                f"params/{layer_name}/{label}_{gate}"
+                                            ] = histogram
                                     continue
-                            log_payload[f"params/{layer_name}/{label}"] = (
-                                wandb.Histogram(values)
-                            )
+                            histogram = create_histogram(values, num_bins=512)
+                            if histogram is not None:
+                                log_payload[f"params/{layer_name}/{label}"] = histogram
                 except Exception as e:
                     print(f"Warning: Could not log model parameters to W&B. Error: {e}")
 
             # Send all logs for this epoch
-            wandb.log(log_payload)
+            log_data(log_payload, wandb_run=wandb_run)
 
         # Check for early stopping
         val_score = (
@@ -779,7 +809,11 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     )
 
 
-def eval_global_model(config, experiment_name: Optional[str] = None):
+def eval_global_model(
+    config,
+    experiment_name: Optional[str] = None,
+    wandb_run: Optional[Any] = None,
+):
     """Evaluates forecasts stored in the .npz format."""
 
     from pathlib import Path
@@ -888,10 +922,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 y_true = stand_yt_test[mask_test]
                 y_pred = stand_ypred_test[mask_test]
                 s_pred = stand_spred_test[mask_test]
-                # max_std = 3.0 * np.std(y_true - y_pred)
-                # s_pred = np.where(
-                #     s_pred > max_std, np.nan, np.clip(s_pred, 1e-6, max_std)
-                # )
 
                 # normalize data
                 test_rmse = metric.rmse(y_pred, y_true)
@@ -943,24 +973,78 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                 f"{overall_p90:.4f}\n"
             )
 
+        overall_metrics_payload = {
+            "eval/test_rmse": float(overall_rmse),
+            "eval/test_log_likelihood": float(overall_log_lik),
+            "eval/test_mae": float(overall_mae),
+            "eval/test_p50": float(overall_p50),
+            "evaltest_p90": float(overall_p90),
+        }
+
+        if wandb_run is not None:
+            log_data(overall_metrics_payload, wandb_run=wandb_run)
+
     # Embedding plots
-    if config.embed_plots:
-        if config.total_embedding_size > 0:
-            embedding_dir = input_dir / "embeddings"
+    if config.total_embedding_size > 0:
+        embedding_dir = input_dir / "embeddings"
 
-            if config.use_standard_embeddings:
-                print("Plotting standard (one-per-series) embeddings...")
-                try:
-                    start_data = np.load(embedding_dir / "embeddings_start.npz")
-                    final_data = np.load(embedding_dir / "embeddings_final.npz")
+        if config.use_standard_embeddings:
+            print("Plotting standard (one-per-series) embeddings...")
+            try:
+                start_data = np.load(embedding_dir / "embeddings_start.npz")
+                final_data = np.load(embedding_dir / "embeddings_final.npz")
 
-                    start_embeddings_mu = start_data["mu"]
-                    start_embeddings_var = start_data["var"]
-                    final_embeddings_mu = final_data["mu"]
-                    final_embeddings_var = final_data["var"]
+                start_embeddings_mu = start_data["mu"]
+                start_embeddings_var = start_data["var"]
+                final_embeddings_mu = final_data["mu"]
+                final_embeddings_var = final_data["var"]
 
-                    # Labels for standard embeddings are the time series IDs
-                    labels = [str(ts_id) for ts_id in config.ts_to_use]
+                # Labels for standard embeddings are the time series IDs
+                labels = [str(ts_id) for ts_id in config.ts_to_use]
+
+                start_similarity = cosine_similarity_matrix(start_embeddings_mu)
+                final_similarity = cosine_similarity_matrix(final_embeddings_mu)
+
+                start_bhattacharyya = bhattacharyya_distance_matrix(
+                    start_embeddings_mu, start_embeddings_var
+                )
+                final_bhattacharyya = bhattacharyya_distance_matrix(
+                    final_embeddings_mu, final_embeddings_var
+                )
+
+                bhatt_vmax = float(
+                    max(
+                        np.nanmax(start_bhattacharyya),
+                        np.nanmax(final_bhattacharyya),
+                        1e-12,
+                    )
+                )
+
+                if wandb_run is not None:
+                    fig = go.Figure(
+                        data=go.Heatmap(
+                            z=final_similarity,
+                            x=labels,
+                            y=labels,
+                            colorscale="RdBu",
+                            zmin=-1.0,
+                            zmax=1.0,
+                        )
+                    )
+                    fig.update_layout(title=f"Cosine similarity", yaxis_scaleanchor="x")
+                    log_data({f"embeddings/similarity": fig}, wandb_run=wandb_run)
+
+                if config.embed_plots:
+                    plot_similarity(
+                        start_similarity,
+                        embedding_dir / "embeddings_cosine_similarity_start.png",
+                        "Cosine Similarity (Start)",
+                    )
+                    plot_similarity(
+                        final_similarity,
+                        embedding_dir / "embeddings_cosine_similarity_final.png",
+                        "Cosine Similarity (Final)",
+                    )
 
                     plot_embeddings(
                         start_embeddings_mu,
@@ -977,35 +1061,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         labels=labels,
                     )
 
-                    start_similarity = cosine_similarity_matrix(start_embeddings_mu)
-                    final_similarity = cosine_similarity_matrix(final_embeddings_mu)
-
-                    plot_similarity(
-                        start_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_start.png",
-                        "Cosine Similarity (Start)",
-                    )
-                    plot_similarity(
-                        final_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_final.png",
-                        "Cosine Similarity (Final)",
-                    )
-
-                    start_bhattacharyya = bhattacharyya_distance_matrix(
-                        start_embeddings_mu, start_embeddings_var
-                    )
-                    final_bhattacharyya = bhattacharyya_distance_matrix(
-                        final_embeddings_mu, final_embeddings_var
-                    )
-
-                    bhatt_vmax = float(
-                        max(
-                            np.nanmax(start_bhattacharyya),
-                            np.nanmax(final_bhattacharyya),
-                            1e-12,
-                        )
-                    )
-
                     plot_similarity(
                         start_bhattacharyya,
                         embedding_dir / "embeddings_bhattacharyya_distance_start.png",
@@ -1020,53 +1075,84 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         vmin=0.0,
                         vmax=bhatt_vmax,
                     )
-                except FileNotFoundError as e:
-                    print(
-                        f"Warning: Could not plot standard embeddings. File not found: {e}"
+            except FileNotFoundError as e:
+                print(
+                    f"Warning: Could not plot standard embeddings. File not found: {e}"
+                )
+            except Exception as e:
+                print(f"Warning: Failed to plot standard embeddings. Error: {e}")
+
+        elif config.use_mapped_embeddings:
+            print("Plotting mapped (categorical) embeddings...")
+
+            # Plot per-category embeddings
+            categories = sorted(list(config.embedding_map_sizes.keys()))
+
+            # Store loaded embeddings to use for stitching
+            loaded_start_mus = {}
+            loaded_start_vars = {}
+            loaded_final_mus = {}
+            loaded_final_vars = {}
+
+            for category in categories:
+                print(f"  Plotting for category: {category}")
+                try:
+                    start_data = np.load(
+                        embedding_dir / f"embeddings_start_{category}.npz"
                     )
-                except Exception as e:
-                    print(f"Warning: Failed to plot standard embeddings. Error: {e}")
+                    final_data = np.load(
+                        embedding_dir / f"embeddings_final_{category}.npz"
+                    )
 
-            elif config.use_mapped_embeddings:
-                print("Plotting mapped (categorical) embeddings...")
+                    start_mu = start_data["mu"]
+                    start_var = start_data["var"]
+                    final_mu = final_data["mu"]
+                    final_var = final_data["var"]
 
-                # Plot per-category embeddings
-                categories = sorted(list(config.embedding_map_sizes.keys()))
+                    # Store for stitching
+                    loaded_start_mus[category] = start_mu
+                    loaded_start_vars[category] = start_var
+                    loaded_final_mus[category] = final_mu
+                    loaded_final_vars[category] = final_var
 
-                # Store loaded embeddings to use for stitching
-                loaded_start_mus = {}
-                loaded_start_vars = {}
-                loaded_final_mus = {}
-                loaded_final_vars = {}
+                    n_entities = start_mu.shape[0]
+                    labels = config.embedding_map_labels[category]
 
-                for category in categories:
-                    print(f"  Plotting for category: {category}")
-                    try:
-                        start_data = np.load(
-                            embedding_dir / f"embeddings_start_{category}.npz"
+                    # Create sub-directory
+                    category_plot_dir = embedding_dir / category
+                    category_plot_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Plot Cosine Similarity
+                    start_similarity = cosine_similarity_matrix(start_mu)
+                    final_similarity = cosine_similarity_matrix(final_mu)
+
+                    # Plot Bhattacharyya Distance
+                    start_bhat = bhattacharyya_distance_matrix(start_mu, start_var)
+                    final_bhat = bhattacharyya_distance_matrix(final_mu, final_var)
+                    bhat_vmax = float(
+                        max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
+                    )
+
+                    if wandb_run is not None:
+                        fig = go.Figure(
+                            data=go.Heatmap(
+                                z=final_similarity,
+                                x=labels,
+                                y=labels,
+                                colorscale="RdBu",
+                                zmin=-1.0,
+                                zmax=1.0,
+                            )
                         )
-                        final_data = np.load(
-                            embedding_dir / f"embeddings_final_{category}.npz"
+                        fig.update_layout(
+                            title=f"Cosine similarity {category}", yaxis_scaleanchor="x"
+                        )
+                        log_data(
+                            {f"embeddings/similarity_{category}": fig},
+                            wandb_run=wandb_run,
                         )
 
-                        start_mu = start_data["mu"]
-                        start_var = start_data["var"]
-                        final_mu = final_data["mu"]
-                        final_var = final_data["var"]
-
-                        # Store for stitching
-                        loaded_start_mus[category] = start_mu
-                        loaded_start_vars[category] = start_var
-                        loaded_final_mus[category] = final_mu
-                        loaded_final_vars[category] = final_var
-
-                        n_entities = start_mu.shape[0]
-                        labels = config.embedding_map_labels[category]
-
-                        # Create sub-directory
-                        category_plot_dir = embedding_dir / category
-                        category_plot_dir.mkdir(parents=True, exist_ok=True)
-
+                    if not config.embed_plots:
                         # Plot PCA
                         plot_embeddings(
                             start_mu,
@@ -1083,10 +1169,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                             labels=labels,
                         )
 
-                        # Plot Cosine Similarity
-                        start_similarity = cosine_similarity_matrix(start_mu)
-                        final_similarity = cosine_similarity_matrix(final_mu)
-
                         plot_similarity(
                             start_similarity,
                             category_plot_dir / "cosine_similarity_start.png",
@@ -1099,14 +1181,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                             f"Cosine Similarity (Final) - {category}",
                             labels=labels,
                         )
-
-                        # Plot Bhattacharyya Distance
-                        start_bhat = bhattacharyya_distance_matrix(start_mu, start_var)
-                        final_bhat = bhattacharyya_distance_matrix(final_mu, final_var)
-                        bhat_vmax = float(
-                            max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
-                        )
-
                         plot_similarity(
                             start_bhat,
                             category_plot_dir / "bhattacharyya_distance_start.png",
@@ -1123,79 +1197,107 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                             vmax=bhat_vmax,
                             labels=labels,
                         )
-                    except FileNotFoundError as e:
+                except FileNotFoundError as e:
+                    print(
+                        f"  Warning: Could not plot category {category}. File not found: {e}"
+                    )
+                    continue  # Skip to next category
+                except Exception as e:
+                    print(f"  Warning: Failed to plot category {category}. Error: {e}")
+                    continue
+
+            # Stitch Embeddings
+            print("Stitching full time series embeddings for plotting...")
+            try:
+                # Load and filter map to the series we used, in the correct order
+                if not os.path.exists(config.embedding_map_dir):
+                    raise FileNotFoundError(
+                        f"Map file not found: {config.embedding_map_dir}"
+                    )
+
+                map_df = pd.read_csv(config.embedding_map_dir).set_index("ts_id")
+
+                if config.ts_to_use is None:
+                    raise ValueError(
+                        "config.ts_to_use is None, cannot stitch embeddings."
+                    )
+
+                # Re-order map based on ts_to_use
+                map_df_ordered = map_df.loc[config.ts_to_use]
+
+                # Initialize stitched matrices
+                mu_stitched_start = np.zeros(
+                    (config.nb_ts, config.total_embedding_size), dtype=np.float32
+                )
+                var_stitched_start = np.zeros_like(mu_stitched_start)
+                mu_stitched_final = np.zeros_like(mu_stitched_start)
+                var_stitched_final = np.zeros_like(mu_stitched_start)
+
+                current_offset = 0
+                for category in categories:  # categories is already sorted
+                    if category not in loaded_start_mus:
                         print(
-                            f"  Warning: Could not plot category {category}. File not found: {e}"
+                            f"  Skipping category {category} in stitching (was not loaded)."
                         )
-                        continue  # Skip to next category
-                    except Exception as e:
-                        print(
-                            f"  Warning: Failed to plot category {category}. Error: {e}"
-                        )
+                        # Need to advance offset!
+                        current_offset += config.embedding_map_sizes[category]
                         continue
 
-                # Stitch Embeddings
-                print("Stitching full time series embeddings for plotting...")
-                try:
-                    # Load and filter map to the series we used, in the correct order
-                    if not os.path.exists(config.embedding_map_dir):
-                        raise FileNotFoundError(
-                            f"Map file not found: {config.embedding_map_dir}"
-                        )
+                    cat_size = config.embedding_map_sizes[category]
 
-                    map_df = pd.read_csv(config.embedding_map_dir).set_index("ts_id")
+                    # Get indices from the ordered map
+                    cat_indices = map_df_ordered[category].values
 
-                    if config.ts_to_use is None:
-                        raise ValueError(
-                            "config.ts_to_use is None, cannot stitch embeddings."
-                        )
-
-                    # Re-order map based on ts_to_use
-                    map_df_ordered = map_df.loc[config.ts_to_use]
-
-                    # Initialize stitched matrices
-                    mu_stitched_start = np.zeros(
-                        (config.nb_ts, config.total_embedding_size), dtype=np.float32
+                    # Pull embeddings using the indices
+                    mu_stitched_start[:, current_offset : current_offset + cat_size] = (
+                        loaded_start_mus[category][cat_indices]
                     )
-                    var_stitched_start = np.zeros_like(mu_stitched_start)
-                    mu_stitched_final = np.zeros_like(mu_stitched_start)
-                    var_stitched_final = np.zeros_like(mu_stitched_start)
+                    var_stitched_start[
+                        :, current_offset : current_offset + cat_size
+                    ] = loaded_start_vars[category][cat_indices]
+                    mu_stitched_final[:, current_offset : current_offset + cat_size] = (
+                        loaded_final_mus[category][cat_indices]
+                    )
+                    var_stitched_final[
+                        :, current_offset : current_offset + cat_size
+                    ] = loaded_final_vars[category][cat_indices]
 
-                    current_offset = 0
-                    for category in categories:  # categories is already sorted
-                        if category not in loaded_start_mus:
-                            print(
-                                f"  Skipping category {category} in stitching (was not loaded)."
-                            )
-                            # Need to advance offset!
-                            current_offset += config.embedding_map_sizes[category]
-                            continue
+                    current_offset += cat_size
 
-                        cat_size = config.embedding_map_sizes[category]
+                # Plot Stitched Embeddings
+                print("Plotting stitched (full) time series embeddings...")
+                labels = [str(ts_id) for ts_id in config.ts_to_use]
 
-                        # Get indices from the ordered map
-                        cat_indices = map_df_ordered[category].values
+                # Plot Cosine Similarity
+                start_similarity = cosine_similarity_matrix(mu_stitched_start)
+                final_similarity = cosine_similarity_matrix(mu_stitched_final)
 
-                        # Pull embeddings using the indices
-                        mu_stitched_start[
-                            :, current_offset : current_offset + cat_size
-                        ] = loaded_start_mus[category][cat_indices]
-                        var_stitched_start[
-                            :, current_offset : current_offset + cat_size
-                        ] = loaded_start_vars[category][cat_indices]
-                        mu_stitched_final[
-                            :, current_offset : current_offset + cat_size
-                        ] = loaded_final_mus[category][cat_indices]
-                        var_stitched_final[
-                            :, current_offset : current_offset + cat_size
-                        ] = loaded_final_vars[category][cat_indices]
+                # Plot Bhattacharyya Distance
+                start_bhat = bhattacharyya_distance_matrix(
+                    mu_stitched_start, var_stitched_start
+                )
+                final_bhat = bhattacharyya_distance_matrix(
+                    mu_stitched_final, var_stitched_final
+                )
+                bhat_vmax = float(
+                    max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
+                )
 
-                        current_offset += cat_size
+                if wandb_run is not None:
+                    fig = go.Figure(
+                        data=go.Heatmap(
+                            z=final_similarity,
+                            x=labels,
+                            y=labels,
+                            colorscale="RdBu",
+                            zmin=-1.0,
+                            zmax=1.0,
+                        )
+                    )
+                    fig.update_layout(title=f"Cosine similarity", yaxis_scaleanchor="x")
+                    log_data({f"embeddings/similarity": fig}, wandb_run=wandb_run)
 
-                    # Plot Stitched Embeddings
-                    print("Plotting stitched (full) time series embeddings...")
-                    labels = [str(ts_id) for ts_id in config.ts_to_use]
-
+                if config.embed_plots:
                     # Plot PCA
                     plot_embeddings(
                         mu_stitched_start,
@@ -1212,10 +1314,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         labels=labels,
                     )
 
-                    # Plot Cosine Similarity
-                    start_similarity = cosine_similarity_matrix(mu_stitched_start)
-                    final_similarity = cosine_similarity_matrix(mu_stitched_final)
-
                     plot_similarity(
                         start_similarity,
                         embedding_dir
@@ -1227,17 +1325,6 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         embedding_dir
                         / "embeddings_cosine_similarity_final_stitched.png",
                         "Cosine Similarity (Final) - Stitched",
-                    )
-
-                    # Plot Bhattacharyya Distance
-                    start_bhat = bhattacharyya_distance_matrix(
-                        mu_stitched_start, var_stitched_start
-                    )
-                    final_bhat = bhattacharyya_distance_matrix(
-                        mu_stitched_final, var_stitched_final
-                    )
-                    bhat_vmax = float(
-                        max(np.nanmax(start_bhat), np.nanmax(final_bhat), 1e-12)
                     )
 
                     plot_similarity(
@@ -1257,16 +1344,16 @@ def eval_global_model(config, experiment_name: Optional[str] = None):
                         vmax=bhat_vmax,
                     )
 
-                except Exception as e:
-                    print(
-                        f"  Warning: Failed to stitch and plot full embeddings. Error: {e}"
-                    )
+            except Exception as e:
+                print(
+                    f"  Warning: Failed to stitch and plot full embeddings. Error: {e}"
+                )
 
 
 def main(Train=True, Eval=True, log_wandb=True):
 
     list_of_seeds = [1]
-    list_of_experiments = ["train60"]
+    list_of_experiments = ["train30"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1274,10 +1361,11 @@ def main(Train=True, Eval=True, log_wandb=True):
             print(f"Running experiment: {exp} with seed {seed}")
 
             # Model category
-            model_category = "global_model"
+            model_category = "global"
+            embed_category = "no embedding"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}_gainbias"
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
 
             # Create configuration
             config = Config()
@@ -1288,25 +1376,28 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             config.eval_plots = False
-            # config.embed_plots = True
-            # config.embedding_size = 15
+            config.embed_plots = False
+            # config.embedding_size = 10
+            config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
 
             # Convert config object to a dictionary for W&B
-            config_dict = {
-                k: getattr(config, k)
-                for k in dir(config)
-                if not k.startswith("_") and not callable(getattr(config, k))
-            }
+            config_dict = config.wandb_dict()
 
             if log_wandb:
                 # Initialize W&B run
-                run = wandb.init(
-                    project="Model_Comaprison_SHM",
-                    group=model_category,
-                    name=f"{exp}_Seed{seed}",
+                run_id = f"{model_category}_{embed_category}_{exp}_seed{seed}".replace(
+                    " ", "_"
+                )
+                run = init_run(
+                    project="Experiment_01_Forecasting",
+                    name=f"{model_category}_{embed_category}",
+                    group=f"{exp}_Seed{seed}",
+                    tags=[model_category, embed_category],
                     config=config_dict,
-                    reinit=True,  # Allows re-initializing in a loop
-                    save_code=True,  # Saves the main script
+                    reinit=True,
+                    save_code=True,
+                    id=run_id,
+                    resume="never",
                 )
             else:
                 run = None
@@ -1319,11 +1410,13 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             if Eval:
                 # Evaluate model
-                eval_global_model(config, experiment_name=experiment_name)
+                eval_global_model(
+                    config, experiment_name=experiment_name, wandb_run=run
+                )
 
             # Finish the W&B run
             if log_wandb:
-                run.finish()
+                finish_run(run)
 
 
 if __name__ == "__main__":

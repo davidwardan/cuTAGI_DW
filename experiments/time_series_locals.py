@@ -2,7 +2,7 @@ import os
 import numpy as np
 from tqdm import tqdm
 from typing import List, Optional
-import wandb
+from experiments.wandb_helpers import create_histogram, finish_run, init_run, log_data
 
 from examples.data_loader import (
     TimeSeriesDataloader,
@@ -645,20 +645,26 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                                         for idx, gate in enumerate(gate_names):
                                             start = idx * gate_size
                                             end = start + gate_size
-                                            log_payload[
-                                                f"params/{layer_name}/{label}_{gate}"
-                                            ] = wandb.Histogram(flat_values[start:end])
+                                            histogram = create_histogram(
+                                                flat_values[start:end]
+                                            )
+                                            if histogram is not None:
+                                                log_payload[
+                                                    f"params/{layer_name}/{label}_{gate}"
+                                                ] = histogram
                                         continue
-                                log_payload[f"params/{layer_name}/{label}"] = (
-                                    wandb.Histogram(values)
-                                )
+                                histogram = create_histogram(values)
+                                if histogram is not None:
+                                    log_payload[
+                                        f"params/{layer_name}/{label}"
+                                    ] = histogram
                     except Exception as e:
                         print(
                             f"Warning: Could not log model parameters to W&B. Error: {e}"
                         )
 
-            # Send all logs for this epoch
-            wandb.log(log_payload)
+                # Send all logs for this epoch
+                log_data(log_payload, wandb_run=wandb_run)
 
             # Check for early stopping
             val_score = (
@@ -1011,7 +1017,7 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             if log_wandb:
                 # Initialize W&B run
-                run = wandb.init(
+                run = init_run(
                     project="Local_Model_Run",
                     group="Time_Series_Local_Models",
                     name=f"{exp}_Seed{seed}",
@@ -1034,7 +1040,7 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Finish the W&B run
             if log_wandb:
-                run.finish()
+                finish_run(run)
 
 
 if __name__ == "__main__":

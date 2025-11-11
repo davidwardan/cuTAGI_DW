@@ -116,6 +116,8 @@ def prepare_input(
         var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
 
     if embeddings is not None:
+        # TODO: temporary fix for shared setup
+        indices[indices == -1] = 0
         embed_mu, embed_var = embeddings(indices)  # shape: (B, E)
 
         # Zero out embedding rows for inactive entries
@@ -551,14 +553,18 @@ class LSTMStateContainer:
         self.layer_state_shapes = layer_state_shapes
         self.states = {}
 
+        np.random.seed(1)
+
         # Initialize NumPy arrays for each layer and state component
         for layer_idx, state_dim in layer_state_shapes.items():
             # Shape: (num_series, state_dim)
             self.states[layer_idx] = {
-                "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
-                "var_h": np.zeros((num_series, state_dim), dtype=np.float32),
-                "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
-                "var_c": np.zeros((num_series, state_dim), dtype=np.float32),
+                # "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
+                "mu_h": np.random.randn(num_series, state_dim).astype(np.float32),
+                "var_h": np.ones((num_series, state_dim), dtype=np.float32),
+                # "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
+                "mu_c": np.random.randn(num_series, state_dim).astype(np.float32),
+                "var_c": np.ones((num_series, state_dim), dtype=np.float32),
             }
 
     def _unpack_net_states(self, net_states: dict, batch_size: int):
