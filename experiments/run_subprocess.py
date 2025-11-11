@@ -34,16 +34,12 @@ def _run_experiment(
 
     config = tsg.Config()
     config.seed = seed
-    config.batch_size = 64
+    config.batch_size = 16
     config.device = "cuda" if torch.cuda.is_available() else "cpu"
     config.x_train = f"data/hq/{experiment}/split_train_values.csv"
     config.dates_train = f"data/hq/{experiment}/split_train_datetimes.csv"
 
-    config_dict = {
-        key: getattr(config, key)
-        for key in dir(config)
-        if not key.startswith("_") and not callable(getattr(config, key))
-    }
+    config_dict = config.wandb_dict()
 
     wandb_run = None
     if log_wandb:
@@ -51,7 +47,7 @@ def _run_experiment(
         run_id = f"{model_category}_{embed_category}_{experiment}_seed{seed}".replace(
             " ", "_"
         )
-        run = init_run(
+        wandb_run = init_run(
             project="Experiment_01_Forecasting",
             name=f"{model_category}_{embed_category}",
             group=f"{experiment}_Seed{seed}",

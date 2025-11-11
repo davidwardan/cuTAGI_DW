@@ -110,10 +110,10 @@ class Config:
         self.patience: int = 10
         self.min_delta: float = 1e-4
         self.warmup_epochs: int = 0
-        self.shuffle: bool = False
+        self.shuffle: bool = True
 
         # Set evaluation parameters
-        self.eval_plots: bool = True
+        self.eval_plots: bool = False
         self.eval_metrics: bool = True
         self.seansonal_period: int = 52
         self.embed_plots: bool = False
@@ -196,6 +196,7 @@ class Config:
         """Converts the configuration to a dictionary for W&B logging."""
         return {
             "seed": self.seed,
+            "device": self.device,
             "epochs": self.num_epochs,
             "batch_size": self.batch_size,
             "input_seq_len": self.input_seq_len,

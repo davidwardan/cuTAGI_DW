@@ -75,16 +75,16 @@ def build_model(input_size, use_AGVI, seed, device, init_params=None):
     manual_seed(seed)
     if use_AGVI:
         net = Sequential(
-            LSTM(input_size, 40, 1, gain_bias=0.1),
-            LSTM(40, 40, 1, gain_bias=0.1),
-            Linear(40, 2, gain_bias=0.1),
+            LSTM(input_size, 40, 1),
+            LSTM(40, 40, 1),
+            Linear(40, 2),
             EvenExp(),
         )
     else:
         net = Sequential(
-            LSTM(input_size, 40, 1, gain_bias=0.1),
-            LSTM(40, 40, 1, gain_bias=0.1),
-            Linear(40, 1, gain_bias=0.1),
+            LSTM(input_size, 40, 1),
+            LSTM(40, 40, 1),
+            Linear(40, 1),
         )
 
     if init_params is not None:
