@@ -3,6 +3,7 @@ import numpy as np
 from sklearn.decomposition import PCA
 from typing import Optional
 import copy
+import networkx as nx
 
 from experiments.data_loader import (
     TimeSeriesDataBuilder,
@@ -412,65 +413,6 @@ def cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
     return normalized @ normalized.T
 
 
-def plot_similarity(
-    sim_matrix: np.ndarray,
-    out_path,
-    title: str,
-    labels: Optional[List[str]] = None,
-    *,
-    vmin: float = -1.0,
-    vmax: float = 1.0,
-) -> None:
-    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
-    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
-        raise ValueError("sim_matrix must be a square 2D array")
-
-    # Order rows/cols by aggregate similarity to highlight structure.
-    score = np.sum(sim_matrix, axis=1)
-    order = np.argsort(-score)
-    ordered = sim_matrix[order][:, order]
-
-    if labels is not None:
-        if len(labels) != sim_matrix.shape[0]:
-            raise ValueError("labels must have the same length as sim_matrix size")
-        ordered_labels = [str(labels[idx]) for idx in order]
-    else:
-        ordered_labels = [str(idx) for idx in order]
-
-    num_series = ordered.shape[0]
-    width = max(8.0, min(num_series * 0.4, 24.0))
-    height = max(6.0, min(num_series * 0.4, 24.0))
-    plt.figure(figsize=(width, height))
-    heatmap = plt.imshow(
-        ordered,
-        cmap="coolwarm",
-        vmin=vmin,
-        vmax=vmax,
-        interpolation="nearest",
-    )
-    plt.title(f"{title} (sorted by similarity)")
-    plt.xlabel("Entity/Series Index")  # Generic label
-    plt.ylabel("Entity/Series Index")  # Generic label
-
-    if num_series > 0:
-        tick_positions = np.arange(num_series, dtype=int)
-        rotation = 45 if num_series <= 20 else 90
-        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
-        plt.xticks(
-            tick_positions,
-            ordered_labels,
-            rotation=rotation,
-            ha="right",
-            fontsize=fontsize,
-        )
-        plt.yticks(tick_positions, ordered_labels, fontsize=fontsize)
-
-    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
-    plt.close()
-
-
 def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
     mu = np.asarray(mu, dtype=np.float32)
     var = np.asarray(var, dtype=np.float32)
@@ -498,6 +440,98 @@ def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray
     dist = term1 + term2
     np.fill_diagonal(dist, 0.0)
     return dist
+
+
+def plot_similarity(
+    sim_matrix: np.ndarray,
+    out_path,
+    title: str,
+    labels: Optional[List[str]] = None,
+    *,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+) -> None:
+    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
+    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
+        raise ValueError("sim_matrix must be a square 2D array")
+
+    if labels is not None:
+        if len(labels) != sim_matrix.shape[0]:
+            raise ValueError("labels must have the same length as sim_matrix size")
+
+    num_series = sim_matrix.shape[0]
+    width = max(8.0, min(num_series * 0.4, 24.0))
+    height = max(6.0, min(num_series * 0.4, 24.0))
+    plt.figure(figsize=(width, height))
+    heatmap = plt.imshow(
+        sim_matrix,
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    plt.title(f"{title} (sorted by similarity)")
+    plt.xlabel("Entity/Series Index")  # Generic label
+    plt.ylabel("Entity/Series Index")  # Generic label
+
+    if num_series > 0:
+        tick_positions = np.arange(num_series, dtype=int)
+        rotation = 45 if num_series <= 20 else 90
+        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
+        plt.xticks(
+            tick_positions,
+            labels,
+            rotation=rotation,
+            ha="right",
+            fontsize=fontsize,
+        )
+        plt.yticks(tick_positions, labels, fontsize=fontsize)
+
+    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.close()
+
+
+def plot_similarity_graph(
+    sim_matrix: np.ndarray,
+    out_path,
+    threshold=0.8,
+    title="Time Series Similarity Graph",
+):
+    sim = np.asarray(sim_matrix, dtype=float)
+    n = sim.shape[0]
+    assert sim.shape[0] == sim.shape[1], "sim_matrix must be square"
+
+    # Build graph
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            val = sim[i, j]
+            if np.isfinite(val) and val >= threshold:
+                G.add_edge(i, j, weight=float(val))
+
+    if G.number_of_edges() == 0:
+        print(f"No edges at threshold {threshold}. Try lowering it.")
+        return
+
+    # Layout
+    pos = nx.spring_layout(G, seed=42, k=0.4)
+
+    # Get edges + widths safely
+    edges_with_data = list(G.edges(data=True))
+    edgelist = [(u, v) for (u, v, _) in edges_with_data]
+    widths = [max(0.5, d.get("weight", 0.0) * 2.0) for (_, _, d) in edges_with_data]
+
+    plt.figure(figsize=(10, 8))
+    nx.draw_networkx_nodes(G, pos, node_color="skyblue", node_size=300, alpha=0.9)
+    nx.draw_networkx_edges(G, pos, edgelist=edgelist, width=widths, alpha=0.6)
+    nx.draw_networkx_labels(G, pos, font_size=14)
+    plt.title(f"{title}\n(Edges ≥ {threshold})", fontsize=16)
+    plt.axis("off")
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.close()
 
 
 # Define a class to store the look_back_buffers
@@ -934,3 +968,33 @@ def adjust_params(net, mode="add", value=1e-2, threshold=5e-4, which_layer=None)
                 var_b = [value if x < threshold else x for x in var_b]
             state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
     net.load_state_dict(state_dict)
+
+
+def reset_param_variance(net, param_dir):
+    """
+    Reset the variances on `net` while loading the means from `param_to_load`.
+    """
+    variance_dict = net.state_dict()
+    if isinstance(param_dir, dict):
+        mean_dict = param_dir
+    elif hasattr(param_dir, "state_dict"):
+        mean_dict = param_dir.state_dict()
+    else:
+        raise TypeError(
+            "param_dir must be a state_dict or an object exposing state_dict()."
+        )
+
+    new_state_dict = {}
+    for layer_name, (_, var_w, _, var_b) in variance_dict.items():
+        if layer_name not in mean_dict:
+            raise KeyError(f"Layer '{layer_name}' not found in source state_dict.")
+        mu_w, _, mu_b, _ = mean_dict[layer_name]
+
+        new_state_dict[layer_name] = (
+            np.array(mu_w, copy=True),
+            np.array(var_w, copy=True),
+            np.array(mu_b, copy=True),
+            np.array(var_b, copy=True),
+        )
+
+    net.load_state_dict(new_state_dict)
