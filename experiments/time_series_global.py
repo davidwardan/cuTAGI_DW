@@ -334,6 +334,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             order_mode=config.order_mode,
             batch_size=config.batch_size,
             shuffle=config.shuffle,
+            seed=1,  # fixed for all seeds and runs
         )
 
         # Initialize look-back buffer and LSTM state container
@@ -867,6 +868,14 @@ def eval_global_model(
     test_p50_list = []
     test_p90_list = []
 
+    # create wandb metrics to log
+    if wandb_run is not None:
+        wandb_run.define_metric("rmse", summary="last")
+        wandb_run.define_metric("mae", summary="last")
+        wandb_run.define_metric("log_lik", summary="last")
+        wandb_run.define_metric("p50", summary="last")
+        wandb_run.define_metric("p90", summary="last")
+
     # Iterate over each time series and calculate metrics
     for i in tqdm(range(config.nb_ts), desc="Evaluating series"):
 
@@ -975,11 +984,11 @@ def eval_global_model(
             )
 
         overall_metrics_payload = {
-            "eval/test_rmse": float(overall_rmse),
-            "eval/test_log_likelihood": float(overall_log_lik),
-            "eval/test_mae": float(overall_mae),
-            "eval/test_p50": float(overall_p50),
-            "evaltest_p90": float(overall_p90),
+            "rmse": overall_rmse,
+            "mae": overall_mae,
+            "log_lik": overall_log_lik,
+            "p50": overall_p50,
+            "p90": overall_p90,
         }
 
         if wandb_run is not None:
@@ -1383,22 +1392,21 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
+            config_dict["model_type"] = f"{model_category}_{embed_category}"
 
             if log_wandb:
                 # Initialize W&B run
                 run_id = f"{model_category}_{embed_category}_{exp}_seed{seed}".replace(
-                    " ", "_"
+                    " ", ""
                 )
                 run = init_run(
                     project="Experiment_01_Forecasting",
-                    name=f"{model_category}_{embed_category}",
-                    group=f"{exp}_Seed{seed}",
+                    name=run_id,
+                    group=f"{model_category}_Seed{embed_category}",
                     tags=[model_category, embed_category],
                     config=config_dict,
                     reinit=True,
                     save_code=True,
-                    id=run_id,
-                    resume="never",
                 )
             else:
                 run = None

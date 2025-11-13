@@ -169,7 +169,7 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
 
     # --- Kalman Update Section ---
 
-    # STABILITY: Use a safe epsilon for clipping, not machine epsilon.
+    # Use a safe epsilon for clipping, not machine epsilon.
     eps = 1e-8
 
     # manually update states on python API
@@ -180,6 +180,7 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
         y = np.array(y, copy=True)
         var_y = np.array(var_y, copy=True)
 
+        # TODO: check this logic
         # Where y is NaN, we treat the prediction as the observation.
         np.copyto(y, m_pred, where=nan_indices)
 
@@ -188,28 +189,27 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
         # for these points.
         np.copyto(var_y, 0.0, where=nan_indices)
 
-    # STABILITY: Clean all inputs to the Kalman filter BEFORE using them.
-    # This prevents pre-existing NaNs or Infs from propagating.
+    # Clean all inputs to the Kalman filter before using them.
     safe_m_pred = np.nan_to_num(m_pred, nan=0.0)
     safe_v_pred = np.nan_to_num(v_pred, nan=0.0)
     safe_y = np.nan_to_num(y, nan=0.0)
     safe_var_y = np.nan_to_num(var_y, nan=0.0)
 
-    # STABILITY: Clip the observation variance away from zero.
+    # Clip the observation variance away from zero.
     # Use a larger max value (e.g., 5.0) just in case.
     stablized_var_y = np.clip(safe_var_y, eps, 5.0)
 
-    # STABILITY: Clip the *denominator* of the gain calculation.
+    # Clip the *denominator* of the gain calculation.
     kalman_denominator = safe_v_pred + stablized_var_y
     stablized_denominator = np.clip(kalman_denominator, a_min=eps, a_max=None)
 
     # Kalman gain
     K = safe_v_pred / stablized_denominator
 
-    # STABILITY: Clean the gain just in case 0/0 or inf/inf occurred.
+    # Clean the gain just in case 0/0 or inf/inf occurred.
     K = np.nan_to_num(K, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # STABILITY: Clip gain to [0, 1] range to ensure variance reduction.
+    # Clip gain to [0, 1] range to ensure variance reduction.
     K = np.clip(K, 0.0, 1.0)
 
     # Posterior mean
@@ -218,15 +218,14 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
     # Posterior variance
     v_post = (1.0 - K) * safe_v_pred
 
-    # STABILITY: Ensure posterior variance is always positive.
+    # Ensure posterior variance is always positive.
     v_post = np.clip(v_post, a_min=eps, a_max=None)
 
     if has_nan:
-        # For entries where y was originally NaN, we didn't actually
-        # perform an update, so we reset the posterior variance to the prior.
+        # reset the posterior variance to the prior.
         np.copyto(v_post, safe_v_pred, where=nan_indices)
 
-    # STABILITY: Final check to ensure no NaNs are returned.
+    # Final check to ensure no NaNs are returned.
     m_post = np.nan_to_num(m_post)
     v_post = np.nan_to_num(v_post)
 
@@ -245,15 +244,11 @@ def update_aleatoric_uncertainty(
     on the moments of the output distribution.
     """
 
-    # STABILITY: Use a safe, small epsilon. np.finfo is too small.
-    eps = 1e-8
-    # STABILITY: Define a large value to cap overflows
+    eps = 1e-8  # Cap for numerical stability
     max_val = 1e6  # Cap values at 1 million
     max_val_sq = 1e12  # Cap squared values
 
-    # STABILITY: Clean ALL inputs *before* doing anything else.
-    # This prevents NaNs at valid indices from poisoning the calculation.
-    # We now also cap posinf/neginf to prevent overflows.
+    # Clean ALL inputs
     mu_z0 = np.nan_to_num(mu_z0, posinf=max_val, neginf=-max_val)
     var_z0 = np.nan_to_num(var_z0, nan=eps, posinf=max_val)  # Use eps for variance
     mu_v2bar = np.nan_to_num(mu_v2bar, posinf=max_val, neginf=-max_val)
@@ -261,7 +256,7 @@ def update_aleatoric_uncertainty(
         var_v2bar, nan=eps, posinf=max_val
     )  # Use eps for variance
 
-    # Note: We don't clean 'y' here because np.isnan(y) is our control flow.
+    # y may contain NaNs
     valid_indices = ~np.isnan(y)
 
     # Initialize posterior arrays as copies of the priors
@@ -276,9 +271,7 @@ def update_aleatoric_uncertainty(
         )
 
     # Filter all inputs to only include the data for valid (non-NaN) indices.
-    # These are now guaranteed to be clean *because* we cleaned the inputs above.
     y_valid = y[valid_indices]
-    # STABILITY: Clean y_valid *after* filtering NaNs to handle Infs
     y_valid = np.nan_to_num(y_valid, posinf=max_val, neginf=-max_val)
 
     mu_z0_valid = mu_z0[valid_indices]
@@ -291,14 +284,14 @@ def update_aleatoric_uncertainty(
     # Define Prior Moments for V, Y, H on valid data
     mu_v = np.zeros_like(mu_v2bar_valid)
 
-    # STABILITY: Clip prior variance to be positive
+    # Clip prior variance to be positive
     var_v = np.clip(
         mu_v2bar_valid, a_min=eps, a_max=None
     )  # Prior aleatoric uncertainty
 
     mu_y = mu_z0_valid + mu_v
 
-    # STABILITY: Clip prior variance components to be positive
+    # Clip prior variance components to be positive
     var_z0_valid_clipped = np.clip(var_z0_valid, a_min=eps, a_max=None)
     var_v_clipped = np.clip(var_v, a_min=eps, a_max=None)
     var_y = var_z0_valid_clipped + var_v_clipped
@@ -311,9 +304,7 @@ def update_aleatoric_uncertainty(
 
     cov_hy = np.stack([var_z0_valid_clipped, var_v_clipped], axis=1)
 
-    # Calculate Posterior Moments for H using y on valid data
-
-    # STABILITY: Clip denominator for Kalman gain
+    # Clip denominator for Kalman gain
     stabilized_var_y = np.clip(var_y, eps, 5.0)  # Using 5.0 as a reasonable max
 
     kalman_gain_h = np.divide(
@@ -323,17 +314,17 @@ def update_aleatoric_uncertainty(
         where=stabilized_var_y[:, np.newaxis] > eps,  # Use > eps
     )
 
-    # STABILITY: Clean gain just in case (e.g., if cov_hy was 0 and var_y was 0)
+    # Clean gain just in case
     kalman_gain_h = np.nan_to_num(kalman_gain_h, nan=0.0, posinf=0.0, neginf=0.0)
 
     mu_h_posterior = mu_h + kalman_gain_h * (y_valid - mu_y)[:, np.newaxis]
     cov_h_posterior = cov_h - np.einsum("bi,bj->bij", kalman_gain_h, cov_hy)
 
-    # STABILITY: Enforce symmetry
+    # Enforce symmetry
     cov_h_posterior_transposed = np.transpose(cov_h_posterior, (0, 2, 1))
     cov_h_posterior = 0.5 * (cov_h_posterior + cov_h_posterior_transposed)
 
-    # STABILITY: Add diagonal jitter to ensure positive definiteness
+    # Add diagonal jitter to ensure positive definiteness
     num_hidden = cov_h_posterior.shape[1]
     jitter = 1e-6
     cov_h_posterior = cov_h_posterior + jitter * np.eye(num_hidden)[np.newaxis, :, :]
@@ -341,12 +332,12 @@ def update_aleatoric_uncertainty(
     # --- Moment Matching for V^2 ---
 
     mu_v_posterior = mu_h_posterior[:, 1]
-    # STABILITY: Clip mu_v_posterior to prevent overflow when squared
+    # Clip mu_v_posterior to prevent overflow when squared
     mu_v_posterior = np.clip(mu_v_posterior, -max_val, max_val)
 
     var_v_posterior = cov_h_posterior[:, 1, 1]
 
-    # STABILITY: Clip posterior variance to be positive and prevent overflow
+    # Clip posterior variance to be positive and prevent overflow
     var_v_posterior = np.clip(var_v_posterior, eps, max_val_sq)
 
     # Calculate Posterior Moments for V^2 on valid data
@@ -354,17 +345,15 @@ def update_aleatoric_uncertainty(
     var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
         mu_v_posterior**2
     )
-    # STABILITY: Clip resulting variance
+    # Clip resulting variance
     var_v2_posterior = np.clip(var_v2_posterior, eps, max_val_sq)
 
     # Calculate Prior Moments for V^2 and Gain 'k' on valid data
     mu_v2_prior = mu_v2bar_valid
     var_v2_prior_unclipped = 3.0 * var_v2bar_valid + 2.0 * (mu_v2bar_valid**2)
 
-    # STABILITY: Clip prior variance (with max)
+    # Clip prior variance (with max)
     var_v2_prior = np.clip(var_v2_prior_unclipped, eps, max_val_sq)
-
-    # STABILITY: Use the "clean, stabilize, operate" pattern for gain 'k'
 
     # 1. Clean inputs (though they should be clean from the top, this is safer)
     safe_var_v2bar_valid = np.nan_to_num(var_v2bar_valid, nan=eps, posinf=max_val)
@@ -376,7 +365,7 @@ def update_aleatoric_uncertainty(
     # 3. This division is now safe
     k = safe_var_v2bar_valid / stabilized_var_v2_prior
 
-    # STABILITY: Clean and clip gain k
+    # Clean and clip gain k
     k = np.nan_to_num(k, nan=0.0, posinf=0.0, neginf=0.0)
     k = np.clip(k, 0.0, 1.0)  # Gain should be between 0 and 1
 
@@ -386,14 +375,14 @@ def update_aleatoric_uncertainty(
         var_v2_posterior - var_v2_prior
     )
 
-    # STABILITY: Clip final posterior variance
+    # Clip final posterior variance
     var_v2bar_posterior_valid = np.clip(var_v2bar_posterior_valid, eps, max_val_sq)
 
     # Place the calculated posterior values
     mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
     var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
 
-    # STABILITY: Final paranoid check
+    # Final check
     mu_v2bar_posterior = np.nan_to_num(
         mu_v2bar_posterior, posinf=max_val, neginf=-max_val
     )
@@ -405,7 +394,7 @@ def update_aleatoric_uncertainty(
     )
 
 
-# Display and plot embeddings if used
+# Similarity / Distance Matrices
 def cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
     emb = np.asarray(emb, dtype=np.float32)
     norms = np.linalg.norm(emb, axis=1, keepdims=True)
@@ -594,11 +583,11 @@ class LSTMStateContainer:
         for layer_idx, state_dim in layer_state_shapes.items():
             # Shape: (num_series, state_dim)
             self.states[layer_idx] = {
-                # "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
-                "mu_h": np.random.randn(num_series, state_dim).astype(np.float32),
+                "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
+                # "mu_h": np.random.randn(num_series, state_dim).astype(np.float32),
                 "var_h": np.ones((num_series, state_dim), dtype=np.float32),
-                # "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
-                "mu_c": np.random.randn(num_series, state_dim).astype(np.float32),
+                "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
+                # "mu_c": np.random.randn(num_series, state_dim).astype(np.float32),
                 "var_c": np.ones((num_series, state_dim), dtype=np.float32),
             }
 
@@ -936,6 +925,65 @@ def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
     plt.grid(True)
     emb_plot_path = in_dir / out_path
     plt.savefig(emb_plot_path, dpi=600, bbox_inches="tight")
+    plt.close()
+
+
+def plot_similarity(
+    sim_matrix: np.ndarray,
+    out_path,
+    title: str,
+    labels: Optional[List[str]] = None,
+    *,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+) -> None:
+    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
+    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
+        raise ValueError("sim_matrix must be a square 2D array")
+
+    # Order rows/cols by aggregate similarity to highlight structure.
+    score = np.sum(sim_matrix, axis=1)
+    order = np.argsort(-score)
+    ordered = sim_matrix[order][:, order]
+
+    if labels is not None:
+        if len(labels) != sim_matrix.shape[0]:
+            raise ValueError("labels must have the same length as sim_matrix size")
+        ordered_labels = [str(labels[idx]) for idx in order]
+    else:
+        ordered_labels = [str(idx) for idx in order]
+
+    num_series = ordered.shape[0]
+    width = max(8.0, min(num_series * 0.4, 24.0))
+    height = max(6.0, min(num_series * 0.4, 24.0))
+    plt.figure(figsize=(width, height))
+    heatmap = plt.imshow(
+        ordered,
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    plt.title(f"{title} (sorted by similarity)")
+    plt.xlabel("Entity/Series Index")  # Generic label
+    plt.ylabel("Entity/Series Index")  # Generic label
+
+    if num_series > 0:
+        tick_positions = np.arange(num_series, dtype=int)
+        rotation = 45 if num_series <= 20 else 90
+        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
+        plt.xticks(
+            tick_positions,
+            ordered_labels,
+            rotation=rotation,
+            ha="right",
+            fontsize=fontsize,
+        )
+        plt.yticks(tick_positions, ordered_labels, fontsize=fontsize)
+
+    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close()
 
 

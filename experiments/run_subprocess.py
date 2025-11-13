@@ -4,7 +4,7 @@ from typing import Iterable, Sequence
 from experiments.wandb_helpers import finish_run, init_run
 
 
-DEFAULT_SEEDS: Sequence[int] = (1, 42, 235, 1234, 2024)
+DEFAULT_SEEDS: Sequence[int] = (3, 67, 9, 17, 99)  # (1, 42, 235, 1234, 2024)
 DEFAULT_EXPERIMENTS: Sequence[str] = (
     "train30",
     "train40",
@@ -27,36 +27,41 @@ def _run_experiment(
 
     # Model category
     model_category = "global"
-    embed_category = "no embedding"
+    embed_category = "simple embedding"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{experiment}/experiment01_{model_category}"
+    experiment_name = (
+        f"seed{seed}/{experiment}/experiment01_{model_category}_{embed_category}"
+    )
 
     config = tsg.Config()
     config.seed = seed
     config.batch_size = 16
+    config.embedding_size = 15
+    # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
+    config.eval_plots = False
+    config.embed_plots = False
     config.device = "cuda" if torch.cuda.is_available() else "cpu"
     config.x_train = f"data/hq/{experiment}/split_train_values.csv"
     config.dates_train = f"data/hq/{experiment}/split_train_datetimes.csv"
 
     config_dict = config.wandb_dict()
+    config_dict["model_type"] = f"{model_category}_{embed_category}"
 
     wandb_run = None
     if log_wandb:
         # Initialize W&B run
         run_id = f"{model_category}_{embed_category}_{experiment}_seed{seed}".replace(
-            " ", "_"
+            " ", ""
         )
         wandb_run = init_run(
             project="Experiment_01_Forecasting",
-            name=f"{model_category}_{embed_category}",
+            name=run_id,
             group=f"{experiment}_Seed{seed}",
             tags=[model_category, embed_category],
             config=config_dict,
             reinit=True,
             save_code=True,
-            id=run_id,
-            resume="never",
         )
 
     try:
@@ -82,7 +87,7 @@ def run_experiments(
     *,
     train: bool = True,
     evaluate: bool = True,
-    log_wandb: bool = True,
+    log_wandb: bool = False,
 ) -> None:
     ctx = mp.get_context("spawn")
 

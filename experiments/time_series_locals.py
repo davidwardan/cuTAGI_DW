@@ -981,11 +981,9 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 
 def main(Train=True, Eval=True, log_wandb=True):
-    # list_of_seeds = [1, 42, 235, 1234, 2024]
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
-    list_of_seeds = [75]
-    list_of_experiments = ["train100"]
+    list_of_seeds = [1, 42, 235, 1234, 2024]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -1006,7 +1004,6 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             config.eval_plots = False
-            config.ts_to_use = [0]
 
             # Convert config object to a dictionary for W&B
             config_dict = {
@@ -1044,4 +1041,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, False, True)
+    main(True, True, False)

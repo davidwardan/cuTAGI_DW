@@ -373,6 +373,7 @@ class GlobalBatchLoader:
         K: np.ndarray,
         batch_size: int,
         shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
     ) -> Generator[
         Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
     ]:
@@ -402,7 +403,10 @@ class GlobalBatchLoader:
             group_indices = np.arange(num_series_in_group)
 
             if shuffle:
-                np.random.shuffle(group_indices)
+                if rng is not None:
+                    rng.shuffle(group_indices)
+                else:
+                    np.random.shuffle(group_indices)
 
             for i in range(0, num_series_in_group, batch_size):
                 batch_indices = group_indices[i : i + batch_size]
@@ -442,6 +446,7 @@ class GlobalBatchLoader:
         K: np.ndarray,
         batch_size: int,
         shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
     ) -> Generator[
         Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
     ]:
@@ -460,7 +465,10 @@ class GlobalBatchLoader:
 
         unique_series_ids = np.unique(S)
         if shuffle:
-            np.random.shuffle(unique_series_ids)
+            if rng is not None:
+                rng.shuffle(unique_series_ids)
+            else:
+                np.random.shuffle(unique_series_ids)
 
         for series_id in unique_series_ids:
             (series_indices,) = np.where(S == series_id)
@@ -478,6 +486,7 @@ class GlobalBatchLoader:
         order_mode: str,
         batch_size: int,
         shuffle: bool = False,
+        seed: Optional[int] = None,
     ) -> Generator[
         Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
     ]:
@@ -502,14 +511,16 @@ class GlobalBatchLoader:
         if len(X) == 0:
             return
 
+        rng = np.random.default_rng(seed) if seed is not None else None
+
         # Call the other static methods using the class name
         if order_mode == "by_series":
             yield from GlobalBatchLoader._loader_by_series(
-                X, Y, S, K, batch_size, shuffle
+                X, Y, S, K, batch_size, shuffle, rng
             )
         elif order_mode == "by_window":
             yield from GlobalBatchLoader._loader_by_window(
-                X, Y, S, K, batch_size, shuffle
+                X, Y, S, K, batch_size, shuffle, rng
             )
         else:
             raise ValueError(f"Unknown order_mode: {order_mode}")
