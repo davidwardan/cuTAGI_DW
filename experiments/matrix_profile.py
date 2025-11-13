@@ -2,14 +2,11 @@ import numpy as np
 import pandas as pd
 import stumpy
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 
 from experiments.utils import plot_similarity, plot_similarity_graph
 
 
-def matrix_profile_similarity(
-    df: pd.DataFrame, m: int = 50, adaptive: bool = True
-) -> np.ndarray:
+def matrix_profile_similarity(df: pd.DataFrame, m: int = 50) -> np.ndarray:
     cols = df.columns
     n = len(cols)
     sim_matrix = np.full((n, n), np.nan, dtype=float)
@@ -20,29 +17,14 @@ def matrix_profile_similarity(
             y = df[cols[j]].dropna().to_numpy()
 
             if i == j:
-                sim = 1.0
+                sim = 1.0 # faster to set self-similarity to 1
             else:
-                m_eff = min(m, len(x) // 2, len(y) // 2) if adaptive else m
-
-                # guard too-short series when adaptive=False (or after shrink)
-                if (len(x) < m_eff) or (len(y) < m_eff) or (m_eff < 4):
-                    if len(x) > 1 and len(y) > 1:
-                        # fallback: correlation on resampled shapes
-                        xs = np.interp(
-                            np.linspace(0, 1, 100), np.linspace(0, 1, len(x)), x
-                        )
-                        ys = np.interp(
-                            np.linspace(0, 1, 100), np.linspace(0, 1, len(y)), y
-                        )
-                        corr = np.corrcoef(xs, ys)[0, 1]
-                        sim = (corr + 1) / 2
-                    else:
-                        sim = np.nan
+                if (len(x) < m) or (len(y) < m):
+                    sim = np.nan
                 else:
-                    # use keywords to avoid the signature clash
-                    mp = stumpy.stump(T_A=x, T_B=y, m=m_eff)
+                    mp = stumpy.stump(T_A=x, T_B=y, m=m)
                     dist = np.nanmean(mp[:, 0])
-                    sim = 1 / (1 + dist)
+                    sim = 1 / (1 + dist) # convert distance to similarity
 
             sim_matrix[i, j] = sim
             sim_matrix[j, i] = sim

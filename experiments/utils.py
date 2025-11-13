@@ -88,6 +88,7 @@ def build_model(input_size, use_AGVI, seed, device, init_params=None):
         )
 
     if init_params is not None:
+        # reset_param_variance(net, init_params)
         net.load(init_params)
     if device == "cpu":
         net.set_threads(1)
@@ -975,14 +976,8 @@ def reset_param_variance(net, param_dir):
     Reset the variances on `net` while loading the means from `param_to_load`.
     """
     variance_dict = net.state_dict()
-    if isinstance(param_dir, dict):
-        mean_dict = param_dir
-    elif hasattr(param_dir, "state_dict"):
-        mean_dict = param_dir.state_dict()
-    else:
-        raise TypeError(
-            "param_dir must be a state_dict or an object exposing state_dict()."
-        )
+    net.load(param_dir)
+    mean_dict = net.state_dict()
 
     new_state_dict = {}
     for layer_name, (_, var_w, _, var_b) in variance_dict.items():
