@@ -36,6 +36,7 @@ mpl.rcParams.update(
 
 
 # --- Helper functions ---
+# data loaders specific to local models
 def prepare_dtls(
     x_file,
     date_file,
@@ -88,7 +89,7 @@ def prepare_dtls(
 
     return train_dtl, val_dtl, test_dtl
 
-
+# prepare input specific to local models
 def prepare_input(
     x,
     var_x: Optional[np.ndarray],
@@ -110,6 +111,7 @@ def prepare_input(
 
 
 # Define a class to store the look_back_buffers
+# TODO: use the LookBackBuffer in the utils file instead
 class LookBackBuffer:
     def __init__(self, input_seq_len, nb_ts):
         self.mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
@@ -161,6 +163,7 @@ class LookBackBuffer:
 
 
 # Define class for storing predictions over all time steps
+# TODO: use the Sates in the utils file instead
 class States:
     def __init__(self, nb_ts, total_time_steps):
         """Initializes storage for mean and variance for time series states."""

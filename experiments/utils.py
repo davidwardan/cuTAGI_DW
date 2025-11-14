@@ -18,6 +18,325 @@ from pytagi import manual_seed
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 
 
+# --- Buffer Classes ---
+class LookBackBuffer:
+    def __init__(self, input_seq_len, nb_ts):
+        self.mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+        self.var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
+        self.needs_initialization = [True for _ in range(nb_ts)]
+
+    def initialize(self, initial_mu, initial_var, indices):
+        for idx, mu, var in zip(indices, initial_mu, initial_var):
+            if self.needs_initialization[idx] and idx >= 0:
+                self.mu[idx] = np.nan_to_num(mu, nan=0.0)
+                self.var[idx] = np.nan_to_num(var, nan=0.0)
+                self.needs_initialization[idx] = False
+
+    def update(self, new_mu, new_var, indices):
+        # Check for negative indexes
+        active_mask = indices >= 0
+        indices = indices[active_mask]
+        new_mu = new_mu[active_mask]
+        new_var = new_var[active_mask]
+
+        self.mu[indices] = np.roll(self.mu[indices], -1, axis=1)
+        self.var[indices] = np.roll(self.var[indices], -1, axis=1)
+
+        # Update the last column with new values
+        self.mu[indices, -1] = new_mu.ravel()
+        self.var[indices, -1] = new_var.ravel()
+
+    def __call__(self, indices):
+        return self.mu[indices], self.var[indices]
+
+
+# LSTM State Container
+class LSTMStateContainer:
+    """
+    An optimized container for managing LSTM states using pre-allocated NumPy arrays.
+
+    This container stores the hidden and cell states (mean and variance) for all
+    time series across all LSTM layers in contiguous NumPy arrays. This avoids the
+    overhead of creating and managing dictionaries or lists for each series and
+    leverages vectorized operations for updating and retrieving batch states.
+
+    Args:
+        num_series (int): The total number of time series.
+        layer_state_shapes (dict): A dictionary mapping layer index to the shape
+                                   of its hidden state (e.g., {0: 40, 1: 40}).
+    """
+
+    def __init__(self, num_series: int, layer_state_shapes: dict):
+        self.num_series = num_series
+        self.layer_state_shapes = layer_state_shapes
+        self.states = {}
+
+        np.random.seed(1)
+
+        # Initialize NumPy arrays for each layer and state component
+        for layer_idx, state_dim in layer_state_shapes.items():
+            # Shape: (num_series, state_dim)
+            self.states[layer_idx] = {
+                "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
+                # "mu_h": np.random.randn(num_series, state_dim).astype(np.float32),
+                "var_h": np.ones((num_series, state_dim), dtype=np.float32),
+                "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
+                # "mu_c": np.random.randn(num_series, state_dim).astype(np.float32),
+                "var_c": np.ones((num_series, state_dim), dtype=np.float32),
+            }
+
+    def _unpack_net_states(self, net_states: dict, batch_size: int):
+        """Helper to unpack the flat state arrays from the network into a structured dict."""
+        try:
+            unpacked = {}
+            for layer_idx, (mu_h, var_h, mu_c, var_c) in net_states.items():
+                state_dim = self.layer_state_shapes[layer_idx]
+                # Reshape from flat array to (batch_size, state_dim)
+                unpacked[layer_idx] = {
+                    "mu_h": np.asarray(mu_h).reshape(batch_size, state_dim),
+                    "var_h": np.asarray(var_h).reshape(batch_size, state_dim),
+                    "mu_c": np.asarray(mu_c).reshape(batch_size, state_dim),
+                    "var_c": np.asarray(var_c).reshape(batch_size, state_dim),
+                }
+            return unpacked
+        except Exception as e:
+            raise ValueError(
+                f"Error unpacking network states: {e}. "
+                f"Check that the network states match expected shapes."
+                f"Layer idx: {layer_idx}, expected state dim: {state_dim}, "
+                f"batch size: {batch_size}"
+            ) from e
+
+    def _pack_for_net(self, batch_states: dict):
+        """Helper to pack a structured dict of states into the flat tuple format for the network."""
+        packed = {}
+        for layer_idx, states in batch_states.items():
+            packed[layer_idx] = (
+                states["mu_h"].flatten(),
+                states["var_h"].flatten(),
+                states["mu_c"].flatten(),
+                states["var_c"].flatten(),
+            )
+        return packed
+
+    def update_states_from_net(self, indices: np.ndarray, net):
+        """
+        Gets the latest states from the network for the given indices and
+        updates the internal storage using vectorized assignment.
+
+        Indices with a value of -1 are skipped.
+        """
+
+        valid_mask = indices != -1
+        valid_indices_to_update = indices[valid_mask]
+        if valid_indices_to_update.size == 0:
+            return
+
+        net_states = net.get_lstm_states()
+        batch_size = len(indices)
+
+        unpacked_states = self._unpack_net_states(net_states, batch_size)
+
+        # Vectorized update using advanced indexing
+        for layer_idx, components in unpacked_states.items():
+            self.states[layer_idx]["mu_h"][valid_indices_to_update] = components[
+                "mu_h"
+            ][valid_mask]
+            self.states[layer_idx]["var_h"][valid_indices_to_update] = components[
+                "var_h"
+            ][valid_mask]
+            self.states[layer_idx]["mu_c"][valid_indices_to_update] = components[
+                "mu_c"
+            ][valid_mask]
+            self.states[layer_idx]["var_c"][valid_indices_to_update] = components[
+                "var_c"
+            ][valid_mask]
+
+    def set_states_on_net(self, indices: np.ndarray, net):
+        """
+        Retrieves the stored states for the given indices and sets them on the network.
+
+        Indices with a value of -1 are sent as zero-states.
+        """
+
+        batch_size = len(indices)
+        if batch_size != 1:
+            valid_mask = indices != -1
+            valid_indices_to_read = indices[valid_mask]
+        else:
+            valid_mask = np.array([True], dtype=bool)
+            valid_indices_to_read = indices
+
+        batch_states = {}
+        for layer_idx, components in self.states.items():
+            state_dim = self.layer_state_shapes[layer_idx]
+
+            # 1. Create zero-filled arrays for the batch
+            batch_mu_h = np.zeros((batch_size, state_dim), dtype=np.float32)
+            batch_var_h = np.zeros((batch_size, state_dim), dtype=np.float32)
+            batch_mu_c = np.zeros((batch_size, state_dim), dtype=np.float32)
+            batch_var_c = np.zeros((batch_size, state_dim), dtype=np.float32)
+
+            # 2. Get the states from storage *only* for valid indices
+            source_mu_h = components["mu_h"][valid_indices_to_read]
+            source_var_h = components["var_h"][valid_indices_to_read]
+            source_mu_c = components["mu_c"][valid_indices_to_read]
+            source_var_c = components["var_c"][valid_indices_to_read]
+
+            # 3. Fill the batch arrays at the valid slots
+            batch_mu_h[valid_mask] = source_mu_h
+            batch_var_h[valid_mask] = source_var_h
+            batch_mu_c[valid_mask] = source_mu_c
+            batch_var_c[valid_mask] = source_var_c
+
+            # 4. Store the correctly constructed batch
+            batch_states[layer_idx] = {
+                "mu_h": batch_mu_h,
+                "var_h": batch_var_h,
+                "mu_c": batch_mu_c,
+                "var_c": batch_var_c,
+            }
+
+        packed_states = self._pack_for_net(batch_states)
+        net.set_lstm_states(packed_states)
+
+    def __call__(self, *args, **kwds):
+        pass
+
+
+# --- Early Stopping Class ---
+class EarlyStopping:
+    def __init__(
+        self,
+        criteria="log_lik",
+        patience=10,
+        min_delta=1e-4,
+        warmup_epochs=0,
+    ):
+        self.criteria = criteria
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_score = -np.inf if criteria == "log_lik" else np.inf
+        self.counter = 0
+        self.best_state = None
+        self.best_look_back_buffer = None
+        self.best_lstm_state_container = None
+        self.train_states = None
+        self.val_states = None
+        self.best_sigma_v = None
+        self.best_embeddings = None
+        self.warmup_epochs = max(0, warmup_epochs)
+        self.epoch_count = 0
+
+    def _as_float(self, score):
+        score_array = np.asarray(score)
+        if score_array.size != 1:
+            raise ValueError(
+                f"Expected scalar score for early stopping, got shape {score_array.shape}"
+            )
+        return float(score_array.item())
+
+    def _is_improvement(self, current_score):
+        if not np.isfinite(current_score):
+            return False
+        if self.criteria == "log_lik":
+            return current_score > self.best_score + self.min_delta
+        return current_score < self.best_score - self.min_delta
+
+    def _store_checkpoint(
+        self,
+        current_score,
+        model,
+        look_back_buffer,
+        lstm_state_container,
+        train_states,
+        val_states,
+        sigma_v,
+        embeddings,
+    ):
+        self.best_score = current_score
+        self.best_state = copy.deepcopy(model.state_dict())
+        self.best_look_back_buffer = copy.deepcopy(look_back_buffer)
+        self.best_lstm_state_container = copy.deepcopy(lstm_state_container)
+        self.train_states = copy.deepcopy(train_states)
+        self.val_states = copy.deepcopy(val_states)
+        self.best_sigma_v = sigma_v
+        self.best_embeddings = copy.deepcopy(embeddings)
+
+    def __call__(
+        self,
+        current_score,
+        model,
+        look_back_buffer,
+        lstm_state_container,
+        train_states,
+        val_states,
+        sigma_v,
+        embeddings,
+    ):
+        self.epoch_count += 1
+        current_score = self._as_float(current_score)
+        in_warmup = self.epoch_count <= self.warmup_epochs
+
+        if in_warmup:
+            return False  # Skip checkpointing during warmup
+
+        if self.best_state is None or self._is_improvement(current_score):
+            self._store_checkpoint(
+                current_score,
+                model,
+                look_back_buffer,
+                lstm_state_container,
+                train_states,
+                val_states,
+                sigma_v,
+                embeddings,
+            )
+            self.counter = 0
+            return False  # Not early stopping
+
+        self.counter += 1
+        if self.counter >= self.patience:
+            return True  # Early stopping
+        return False  # Not early stopping
+
+
+# --- States Class for plotting ---
+class States:
+    def __init__(self, nb_ts, total_time_steps):
+        """Initializes storage for mean and variance for time series states."""
+        self.mu = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
+        self.std = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
+
+    def update(self, new_mu, new_std, indices, time_step):
+        """
+        Efficiently updates states using vectorized NumPy indexing.
+
+        Args:
+            new_mu: Array of new mean values.
+            new_std: Array of new std values.
+            indices: Array of time series indices to update.
+            time_step: Array of time steps to update.
+        """
+        # Check for negative indices and skip them
+        valid_mask = indices >= 0
+        indices = indices[valid_mask]
+        time_step = time_step[valid_mask]
+        new_mu = new_mu[valid_mask]
+        new_std = new_std[valid_mask]
+
+        self.mu[indices, time_step] = new_mu.flatten()
+        self.std[indices, time_step] = new_std.flatten()
+
+    def __getitem__(self, idx):
+        """Allows retrieving a full time series' states via my_states[idx]."""
+        return self.mu[idx], self.std[idx]
+
+    def __setitem__(self, idx, value):
+        """Allows setting a full time series' states via my_states[idx] = (mu_array, var_array)."""
+        self.mu[idx], self.std[idx] = value
+
+
 # --- Helper functions ---
 def prepare_data(
     x_file,
@@ -394,6 +713,62 @@ def update_aleatoric_uncertainty(
     )
 
 
+# --- Uncertainty Injection Function ---
+def adjust_params(net, mode="add", value=1e-2, threshold=5e-4, which_layer=None):
+    """
+    Adjusts the variances of weights and biases in the network's state dictionary.
+
+    For each layer (or specified layers), if a variance value is below the given threshold,
+    either adds or sets it to the specified value depending on the mode.
+
+    Args:
+        net: The neural network whose parameters will be modified.
+        mode (str): "add" to increment variances, "set" to assign the value directly.
+        value (float): The value to add or set for the variances.
+        threshold (float): Variances below this value will be adjusted.
+        which_layer (list or None): List of layer names to adjust. If None, all layers are adjusted.
+
+    Returns:
+        None. The network's parameters are updated in-place.
+    """
+
+    state_dict = net.state_dict()
+    for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+        if which_layer is None or layer_name in which_layer:
+            if mode.lower() == "add":
+                var_w = [x + value if x < threshold else x for x in var_w]
+                var_b = [x + value if x < threshold else x for x in var_b]
+            elif mode.lower() == "set":
+                var_w = [value if x < threshold else x for x in var_w]
+                var_b = [value if x < threshold else x for x in var_b]
+            state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+    net.load_state_dict(state_dict)
+
+
+def reset_param_variance(net, param_dir):
+    """
+    Reset the variances on `net` while loading the means from `param_to_load`.
+    """
+    variance_dict = net.state_dict()
+    net.load(param_dir)
+    mean_dict = net.state_dict()
+
+    new_state_dict = {}
+    for layer_name, (_, var_w, _, var_b) in variance_dict.items():
+        if layer_name not in mean_dict:
+            raise KeyError(f"Layer '{layer_name}' not found in source state_dict.")
+        mu_w, _, mu_b, _ = mean_dict[layer_name]
+
+        new_state_dict[layer_name] = (
+            np.array(mu_w, copy=True),
+            np.array(var_w, copy=True),
+            np.array(mu_b, copy=True),
+            np.array(var_b, copy=True),
+        )
+
+    net.load_state_dict(new_state_dict)
+
+
 # Similarity / Distance Matrices
 def cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
     emb = np.asarray(emb, dtype=np.float32)
@@ -430,416 +805,6 @@ def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray
     dist = term1 + term2
     np.fill_diagonal(dist, 0.0)
     return dist
-
-
-def plot_similarity(
-    sim_matrix: np.ndarray,
-    out_path,
-    title: str,
-    labels: Optional[List[str]] = None,
-    *,
-    vmin: float = -1.0,
-    vmax: float = 1.0,
-) -> None:
-    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
-    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
-        raise ValueError("sim_matrix must be a square 2D array")
-
-    if labels is not None:
-        if len(labels) != sim_matrix.shape[0]:
-            raise ValueError("labels must have the same length as sim_matrix size")
-
-    num_series = sim_matrix.shape[0]
-    width = max(8.0, min(num_series * 0.4, 24.0))
-    height = max(6.0, min(num_series * 0.4, 24.0))
-    plt.figure(figsize=(width, height))
-    heatmap = plt.imshow(
-        sim_matrix,
-        cmap="coolwarm",
-        vmin=vmin,
-        vmax=vmax,
-        interpolation="nearest",
-    )
-    plt.title(f"{title} (sorted by similarity)")
-    plt.xlabel("Entity/Series Index")  # Generic label
-    plt.ylabel("Entity/Series Index")  # Generic label
-
-    if num_series > 0:
-        tick_positions = np.arange(num_series, dtype=int)
-        rotation = 45 if num_series <= 20 else 90
-        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
-        plt.xticks(
-            tick_positions,
-            labels,
-            rotation=rotation,
-            ha="right",
-            fontsize=fontsize,
-        )
-        plt.yticks(tick_positions, labels, fontsize=fontsize)
-
-    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
-    plt.close()
-
-
-def plot_similarity_graph(
-    sim_matrix: np.ndarray,
-    out_path,
-    threshold=0.8,
-    title="Time Series Similarity Graph",
-):
-    sim = np.asarray(sim_matrix, dtype=float)
-    n = sim.shape[0]
-    assert sim.shape[0] == sim.shape[1], "sim_matrix must be square"
-
-    # Build graph
-    G = nx.Graph()
-    G.add_nodes_from(range(n))
-    for i in range(n):
-        for j in range(i + 1, n):
-            val = sim[i, j]
-            if np.isfinite(val) and val >= threshold:
-                G.add_edge(i, j, weight=float(val))
-
-    if G.number_of_edges() == 0:
-        print(f"No edges at threshold {threshold}. Try lowering it.")
-        return
-
-    # Layout
-    pos = nx.spring_layout(G, seed=42, k=0.4)
-
-    # Get edges + widths safely
-    edges_with_data = list(G.edges(data=True))
-    edgelist = [(u, v) for (u, v, _) in edges_with_data]
-    widths = [max(0.5, d.get("weight", 0.0) * 2.0) for (_, _, d) in edges_with_data]
-
-    plt.figure(figsize=(10, 8))
-    nx.draw_networkx_nodes(G, pos, node_color="skyblue", node_size=300, alpha=0.9)
-    nx.draw_networkx_edges(G, pos, edgelist=edgelist, width=widths, alpha=0.6)
-    nx.draw_networkx_labels(G, pos, font_size=14)
-    plt.title(f"{title}\n(Edges ≥ {threshold})", fontsize=16)
-    plt.axis("off")
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
-    plt.close()
-
-
-# Define a class to store the look_back_buffers
-class LookBackBuffer:
-    def __init__(self, input_seq_len, nb_ts):
-        self.mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
-        self.var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
-        self.needs_initialization = [True for _ in range(nb_ts)]
-
-    def initialize(self, initial_mu, initial_var, indices):
-        for idx, mu, var in zip(indices, initial_mu, initial_var):
-            if self.needs_initialization[idx] and idx >= 0:
-                self.mu[idx] = np.nan_to_num(mu, nan=0.0)
-                self.var[idx] = np.nan_to_num(var, nan=0.0)
-                self.needs_initialization[idx] = False
-
-    def update(self, new_mu, new_var, indices):
-        # Check for negative indexes
-        active_mask = indices >= 0
-        indices = indices[active_mask]
-        new_mu = new_mu[active_mask]
-        new_var = new_var[active_mask]
-
-        self.mu[indices] = np.roll(self.mu[indices], -1, axis=1)
-        self.var[indices] = np.roll(self.var[indices], -1, axis=1)
-
-        # Update the last column with new values
-        self.mu[indices, -1] = new_mu.ravel()
-        self.var[indices, -1] = new_var.ravel()
-
-    def __call__(self, indices):
-        return self.mu[indices], self.var[indices]
-
-
-# Define a class to handle the lstm state buffers
-class LSTMStateContainer:
-    """
-    An optimized container for managing LSTM states using pre-allocated NumPy arrays.
-
-    This container stores the hidden and cell states (mean and variance) for all
-    time series across all LSTM layers in contiguous NumPy arrays. This avoids the
-    overhead of creating and managing dictionaries or lists for each series and
-    leverages vectorized operations for updating and retrieving batch states.
-
-    Args:
-        num_series (int): The total number of time series.
-        layer_state_shapes (dict): A dictionary mapping layer index to the shape
-                                   of its hidden state (e.g., {0: 40, 1: 40}).
-    """
-
-    def __init__(self, num_series: int, layer_state_shapes: dict):
-        self.num_series = num_series
-        self.layer_state_shapes = layer_state_shapes
-        self.states = {}
-
-        np.random.seed(1)
-
-        # Initialize NumPy arrays for each layer and state component
-        for layer_idx, state_dim in layer_state_shapes.items():
-            # Shape: (num_series, state_dim)
-            self.states[layer_idx] = {
-                "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
-                # "mu_h": np.random.randn(num_series, state_dim).astype(np.float32),
-                "var_h": np.ones((num_series, state_dim), dtype=np.float32),
-                "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
-                # "mu_c": np.random.randn(num_series, state_dim).astype(np.float32),
-                "var_c": np.ones((num_series, state_dim), dtype=np.float32),
-            }
-
-    def _unpack_net_states(self, net_states: dict, batch_size: int):
-        """Helper to unpack the flat state arrays from the network into a structured dict."""
-        try:
-            unpacked = {}
-            for layer_idx, (mu_h, var_h, mu_c, var_c) in net_states.items():
-                state_dim = self.layer_state_shapes[layer_idx]
-                # Reshape from flat array to (batch_size, state_dim)
-                unpacked[layer_idx] = {
-                    "mu_h": np.asarray(mu_h).reshape(batch_size, state_dim),
-                    "var_h": np.asarray(var_h).reshape(batch_size, state_dim),
-                    "mu_c": np.asarray(mu_c).reshape(batch_size, state_dim),
-                    "var_c": np.asarray(var_c).reshape(batch_size, state_dim),
-                }
-            return unpacked
-        except Exception as e:
-            raise ValueError(
-                f"Error unpacking network states: {e}. "
-                f"Check that the network states match expected shapes."
-                f"Layer idx: {layer_idx}, expected state dim: {state_dim}, "
-                f"batch size: {batch_size}"
-            ) from e
-
-    def _pack_for_net(self, batch_states: dict):
-        """Helper to pack a structured dict of states into the flat tuple format for the network."""
-        packed = {}
-        for layer_idx, states in batch_states.items():
-            packed[layer_idx] = (
-                states["mu_h"].flatten(),
-                states["var_h"].flatten(),
-                states["mu_c"].flatten(),
-                states["var_c"].flatten(),
-            )
-        return packed
-
-    def update_states_from_net(self, indices: np.ndarray, net):
-        """
-        Gets the latest states from the network for the given indices and
-        updates the internal storage using vectorized assignment.
-
-        Indices with a value of -1 are skipped.
-        """
-
-        valid_mask = indices != -1
-        valid_indices_to_update = indices[valid_mask]
-        if valid_indices_to_update.size == 0:
-            return
-
-        net_states = net.get_lstm_states()
-        batch_size = len(indices)
-
-        unpacked_states = self._unpack_net_states(net_states, batch_size)
-
-        # Vectorized update using advanced indexing
-        for layer_idx, components in unpacked_states.items():
-            self.states[layer_idx]["mu_h"][valid_indices_to_update] = components[
-                "mu_h"
-            ][valid_mask]
-            self.states[layer_idx]["var_h"][valid_indices_to_update] = components[
-                "var_h"
-            ][valid_mask]
-            self.states[layer_idx]["mu_c"][valid_indices_to_update] = components[
-                "mu_c"
-            ][valid_mask]
-            self.states[layer_idx]["var_c"][valid_indices_to_update] = components[
-                "var_c"
-            ][valid_mask]
-
-    def set_states_on_net(self, indices: np.ndarray, net):
-        """
-        Retrieves the stored states for the given indices and sets them on the network.
-
-        Indices with a value of -1 are sent as zero-states.
-        """
-
-        batch_size = len(indices)
-        if batch_size != 1:
-            valid_mask = indices != -1
-            valid_indices_to_read = indices[valid_mask]
-        else:
-            valid_mask = np.array([True], dtype=bool)
-            valid_indices_to_read = indices
-
-        batch_states = {}
-        for layer_idx, components in self.states.items():
-            state_dim = self.layer_state_shapes[layer_idx]
-
-            # 1. Create zero-filled arrays for the batch
-            batch_mu_h = np.zeros((batch_size, state_dim), dtype=np.float32)
-            batch_var_h = np.zeros((batch_size, state_dim), dtype=np.float32)
-            batch_mu_c = np.zeros((batch_size, state_dim), dtype=np.float32)
-            batch_var_c = np.zeros((batch_size, state_dim), dtype=np.float32)
-
-            # 2. Get the states from storage *only* for valid indices
-            source_mu_h = components["mu_h"][valid_indices_to_read]
-            source_var_h = components["var_h"][valid_indices_to_read]
-            source_mu_c = components["mu_c"][valid_indices_to_read]
-            source_var_c = components["var_c"][valid_indices_to_read]
-
-            # 3. Fill the batch arrays at the valid slots
-            batch_mu_h[valid_mask] = source_mu_h
-            batch_var_h[valid_mask] = source_var_h
-            batch_mu_c[valid_mask] = source_mu_c
-            batch_var_c[valid_mask] = source_var_c
-
-            # 4. Store the correctly constructed batch
-            batch_states[layer_idx] = {
-                "mu_h": batch_mu_h,
-                "var_h": batch_var_h,
-                "mu_c": batch_mu_c,
-                "var_c": batch_var_c,
-            }
-
-        packed_states = self._pack_for_net(batch_states)
-        net.set_lstm_states(packed_states)
-
-    def __call__(self, *args, **kwds):
-        pass
-
-
-class EarlyStopping:
-    def __init__(
-        self,
-        criteria="log_lik",
-        patience=10,
-        min_delta=1e-4,
-        warmup_epochs=0,
-    ):
-        self.criteria = criteria
-        self.patience = patience
-        self.min_delta = min_delta
-        self.best_score = -np.inf if criteria == "log_lik" else np.inf
-        self.counter = 0
-        self.best_state = None
-        self.best_look_back_buffer = None
-        self.best_lstm_state_container = None
-        self.train_states = None
-        self.val_states = None
-        self.best_sigma_v = None
-        self.best_embeddings = None
-        self.warmup_epochs = max(0, warmup_epochs)
-        self.epoch_count = 0
-
-    def _as_float(self, score):
-        score_array = np.asarray(score)
-        if score_array.size != 1:
-            raise ValueError(
-                f"Expected scalar score for early stopping, got shape {score_array.shape}"
-            )
-        return float(score_array.item())
-
-    def _is_improvement(self, current_score):
-        if not np.isfinite(current_score):
-            return False
-        if self.criteria == "log_lik":
-            return current_score > self.best_score + self.min_delta
-        return current_score < self.best_score - self.min_delta
-
-    def _store_checkpoint(
-        self,
-        current_score,
-        model,
-        look_back_buffer,
-        lstm_state_container,
-        train_states,
-        val_states,
-        sigma_v,
-        embeddings,
-    ):
-        self.best_score = current_score
-        self.best_state = copy.deepcopy(model.state_dict())
-        self.best_look_back_buffer = copy.deepcopy(look_back_buffer)
-        self.best_lstm_state_container = copy.deepcopy(lstm_state_container)
-        self.train_states = copy.deepcopy(train_states)
-        self.val_states = copy.deepcopy(val_states)
-        self.best_sigma_v = sigma_v
-        self.best_embeddings = copy.deepcopy(embeddings)
-
-    def __call__(
-        self,
-        current_score,
-        model,
-        look_back_buffer,
-        lstm_state_container,
-        train_states,
-        val_states,
-        sigma_v,
-        embeddings,
-    ):
-        self.epoch_count += 1
-        current_score = self._as_float(current_score)
-        in_warmup = self.epoch_count <= self.warmup_epochs
-
-        if in_warmup:
-            return False  # Skip checkpointing during warmup
-
-        if self.best_state is None or self._is_improvement(current_score):
-            self._store_checkpoint(
-                current_score,
-                model,
-                look_back_buffer,
-                lstm_state_container,
-                train_states,
-                val_states,
-                sigma_v,
-                embeddings,
-            )
-            self.counter = 0
-            return False  # Not early stopping
-
-        self.counter += 1
-        if self.counter >= self.patience:
-            return True  # Early stopping
-        return False  # Not early stopping
-
-
-# Define class for storing predictions over all time steps
-class States:
-    def __init__(self, nb_ts, total_time_steps):
-        """Initializes storage for mean and variance for time series states."""
-        self.mu = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
-        self.std = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
-
-    def update(self, new_mu, new_std, indices, time_step):
-        """
-        Efficiently updates states using vectorized NumPy indexing.
-
-        Args:
-            new_mu: Array of new mean values.
-            new_std: Array of new std values.
-            indices: Array of time series indices to update.
-            time_step: Array of time steps to update.
-        """
-        # Check for negative indices and skip them
-        valid_mask = indices >= 0
-        indices = indices[valid_mask]
-        time_step = time_step[valid_mask]
-        new_mu = new_mu[valid_mask]
-        new_std = new_std[valid_mask]
-
-        self.mu[indices, time_step] = new_mu.flatten()
-        self.std[indices, time_step] = new_std.flatten()
-
-    def __getitem__(self, idx):
-        """Allows retrieving a full time series' states via my_states[idx]."""
-        return self.mu[idx], self.std[idx]
-
-    def __setitem__(self, idx, value):
-        """Allows setting a full time series' states via my_states[idx] = (mu_array, var_array)."""
-        self.mu[idx], self.std[idx] = value
 
 
 # --- Eval Helper Functions ---
@@ -987,57 +952,94 @@ def plot_similarity(
     plt.close()
 
 
-# --- Uncertainty Injection Function ---
-def adjust_params(net, mode="add", value=1e-2, threshold=5e-4, which_layer=None):
-    """
-    Adjusts the variances of weights and biases in the network's state dictionary.
+# --- Plotting Functions ---
+def plot_similarity(
+    sim_matrix: np.ndarray,
+    out_path,
+    title: str,
+    labels: Optional[List[str]] = None,
+    *,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+) -> None:
+    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
+    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
+        raise ValueError("sim_matrix must be a square 2D array")
 
-    For each layer (or specified layers), if a variance value is below the given threshold,
-    either adds or sets it to the specified value depending on the mode.
+    if labels is not None:
+        if len(labels) != sim_matrix.shape[0]:
+            raise ValueError("labels must have the same length as sim_matrix size")
 
-    Args:
-        net: The neural network whose parameters will be modified.
-        mode (str): "add" to increment variances, "set" to assign the value directly.
-        value (float): The value to add or set for the variances.
-        threshold (float): Variances below this value will be adjusted.
-        which_layer (list or None): List of layer names to adjust. If None, all layers are adjusted.
+    num_series = sim_matrix.shape[0]
+    width = max(8.0, min(num_series * 0.4, 24.0))
+    height = max(6.0, min(num_series * 0.4, 24.0))
+    plt.figure(figsize=(width, height))
+    heatmap = plt.imshow(
+        sim_matrix,
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    plt.title(f"{title} (sorted by similarity)")
+    plt.xlabel("Entity/Series Index")  # Generic label
+    plt.ylabel("Entity/Series Index")  # Generic label
 
-    Returns:
-        None. The network's parameters are updated in-place.
-    """
-
-    state_dict = net.state_dict()
-    for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
-        if which_layer is None or layer_name in which_layer:
-            if mode.lower() == "add":
-                var_w = [x + value if x < threshold else x for x in var_w]
-                var_b = [x + value if x < threshold else x for x in var_b]
-            elif mode.lower() == "set":
-                var_w = [value if x < threshold else x for x in var_w]
-                var_b = [value if x < threshold else x for x in var_b]
-            state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
-    net.load_state_dict(state_dict)
-
-
-def reset_param_variance(net, param_dir):
-    """
-    Reset the variances on `net` while loading the means from `param_to_load`.
-    """
-    variance_dict = net.state_dict()
-    net.load(param_dir)
-    mean_dict = net.state_dict()
-
-    new_state_dict = {}
-    for layer_name, (_, var_w, _, var_b) in variance_dict.items():
-        if layer_name not in mean_dict:
-            raise KeyError(f"Layer '{layer_name}' not found in source state_dict.")
-        mu_w, _, mu_b, _ = mean_dict[layer_name]
-
-        new_state_dict[layer_name] = (
-            np.array(mu_w, copy=True),
-            np.array(var_w, copy=True),
-            np.array(mu_b, copy=True),
-            np.array(var_b, copy=True),
+    if num_series > 0:
+        tick_positions = np.arange(num_series, dtype=int)
+        rotation = 45 if num_series <= 20 else 90
+        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
+        plt.xticks(
+            tick_positions,
+            labels,
+            rotation=rotation,
+            ha="right",
+            fontsize=fontsize,
         )
+        plt.yticks(tick_positions, labels, fontsize=fontsize)
 
-    net.load_state_dict(new_state_dict)
+    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.close()
+
+
+def plot_similarity_graph(
+    sim_matrix: np.ndarray,
+    out_path,
+    threshold=0.8,
+    title="Time Series Similarity Graph",
+):
+    sim = np.asarray(sim_matrix, dtype=float)
+    n = sim.shape[0]
+    assert sim.shape[0] == sim.shape[1], "sim_matrix must be square"
+
+    # Build graph
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            val = sim[i, j]
+            if np.isfinite(val) and val >= threshold:
+                G.add_edge(i, j, weight=float(val))
+
+    if G.number_of_edges() == 0:
+        print(f"No edges at threshold {threshold}. Try lowering it.")
+        return
+
+    # Layout
+    pos = nx.spring_layout(G, seed=42, k=0.4)
+
+    # Get edges + widths safely
+    edges_with_data = list(G.edges(data=True))
+    edgelist = [(u, v) for (u, v, _) in edges_with_data]
+    widths = [max(0.5, d.get("weight", 0.0) * 2.0) for (_, _, d) in edges_with_data]
+
+    plt.figure(figsize=(10, 8))
+    nx.draw_networkx_nodes(G, pos, node_color="skyblue", node_size=300, alpha=0.9)
+    nx.draw_networkx_edges(G, pos, edgelist=edgelist, width=widths, alpha=0.6)
+    nx.draw_networkx_labels(G, pos, font_size=14)
+    plt.title(f"{title}\n(Edges ≥ {threshold})", fontsize=16)
+    plt.axis("off")
+    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.close()

@@ -105,10 +105,6 @@ class EmbeddingLayer:
         mu_delta_filtered = mu_delta[active_mask]
         var_delta_filtered = var_delta[active_mask]
 
-        # Check if any valid deltas remain after masking
-        if idx_filtered.size == 0:
-            return
-
         # Use np.add.at to correctly sum updates for repeated indices
         np.add.at(self.mu, idx_filtered, mu_delta_filtered)
         np.add.at(self.var, idx_filtered, var_delta_filtered)
@@ -176,8 +172,7 @@ class MappedTimeSeriesEmbeddings:
                     f"Please provide it in the embedding_sizes dictionary."
                 )
 
-        # self.embedding_categories.sort()
-        # The category order is now preserved from the CSV file columns.
+        # Check category order consistency
         print(f"Using category order from CSV: {self.embedding_categories}")
 
         # Initialize an EmbeddingLayer for each category
@@ -218,8 +213,6 @@ class MappedTimeSeriesEmbeddings:
         self.embedding_categories = [
             col for col in self.ts_map.columns if col != "ts_id"
         ]
-
-        # Note: Sorting is now handled in __init__ or by set_category_order
 
         self.ts_map_info = {}
         for category in self.embedding_categories:
@@ -323,13 +316,12 @@ class MappedTimeSeriesEmbeddings:
 
         map_df = pd.read_csv(new_map_file_path)
 
-        # --- Validation Check 1: 'ts_id' column ---
+        # Validation Check 1: 'ts_id' column
         if "ts_id" not in map_df.columns:
             raise ValueError("New map file must contain a 'ts_id' column.")
 
-        # --- Validation Check 2: Category columns ---
-        # Note: This checks against the *active* order, which is fine.
-        # A more robust check might be against self.embeddings.keys()
+        # Validation Check 2: Category columns
+        # TODO: A more robust check might be against self.embeddings.keys()
         new_categories = [col for col in map_df.columns if col != "ts_id"]
         if set(new_categories) != set(self.embedding_categories):
             raise ValueError(
@@ -337,7 +329,7 @@ class MappedTimeSeriesEmbeddings:
                 f"original categories {set(self.embedding_categories)}"
             )
 
-        # --- Validation Check 3: Max IDs (Index Bounds) ---
+        # Validation Check 3: Max IDs (Index Bounds)
         for category in self.embedding_categories:
             new_max_id = map_df[category].max()
             original_num_embeddings = self.ts_map_info[category]["num_embeddings"]
@@ -405,7 +397,7 @@ class MappedTimeSeriesEmbeddings:
             embedding_layer = self.embeddings[category]
             embedding_size = embedding_layer.embedding_dim[1]
 
-            # 1. Slice the deltas for the current category
+            # Slice the deltas for the current category
             # Shape: (batch_size, embedding_size)
             mu_delta_cat = mu_deltas_combined[
                 :, current_offset : current_offset + embedding_size
@@ -415,13 +407,11 @@ class MappedTimeSeriesEmbeddings:
             ]
             current_offset += embedding_size
 
-            # 2. Get the corresponding embedding indices for the batch
+            # Get the corresponding embedding indices for the batch
             # Shape: (batch_size,)
             cat_indices = batch_map[category].values
 
-            # 3. Apply the updates directly.
-            # EmbeddingLayer.update is responsible for summing deltas
-            # for repeated indices using np.add.at.
+            # Apply the updates directly
             embedding_layer.update(cat_indices, mu_delta_cat, var_delta_cat)
 
     def save(self, out_dir_prefix: str):
