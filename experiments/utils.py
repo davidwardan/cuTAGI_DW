@@ -1043,3 +1043,5 @@ def plot_similarity_graph(
     plt.axis("off")
     plt.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close()
+
+

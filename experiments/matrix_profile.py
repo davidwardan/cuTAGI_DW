@@ -38,7 +38,7 @@ if __name__ == "__main__":
     df = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
 
     # get similarity matrix
-    sim_matrix = matrix_profile_similarity(df, m=52, adaptive=True)
+    sim_matrix = matrix_profile_similarity(df, m=52)
 
     # plot heat map of similarity matrix
     # plot_similarity(
