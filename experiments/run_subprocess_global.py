@@ -1,10 +1,10 @@
 import multiprocessing as mp
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, List, Tuple
 
 from experiments.wandb_helpers import finish_run, init_run
 
 
-DEFAULT_SEEDS: Sequence[int] = (3, 67, 9, 17, 99)  # (1, 42, 235, 1234, 2024)
+DEFAULT_SEEDS: Sequence[int] = (3, 67, 9, 17, 99)
 DEFAULT_EXPERIMENTS: Sequence[str] = (
     "train30",
     "train40",
@@ -20,10 +20,22 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
     log_wandb: bool,
+    device: str,
 ) -> None:
+    """
+    Run a single experiment on a specific device (e.g. "cuda:0" or "cuda:1").
+    """
     from experiments import time_series_global as tsg
 
     torch = tsg.torch
+
+    # Make sure Torch is using the right GPU inside this process
+    if device.startswith("cuda") and torch.cuda.is_available():
+        # e.g. "cuda:0" -> 0
+        dev_idx = int(device.split(":")[1])
+        torch.cuda.set_device(dev_idx)
+    else:
+        device = "cpu"
 
     # Model category
     model_category = "global"
@@ -38,15 +50,15 @@ def _run_experiment(
     config.seed = seed
     config.batch_size = 16
     config.embedding_size = 15
-    # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
     config.eval_plots = False
     config.embed_plots = False
-    config.device = "cuda" if torch.cuda.is_available() else "cpu"
+    config.device = device  # <-- important: use the device passed in
     config.x_train = f"data/hq/{experiment}/split_train_values.csv"
     config.dates_train = f"data/hq/{experiment}/split_train_datetimes.csv"
 
     config_dict = config.wandb_dict()
     config_dict["model_type"] = f"{model_category}_{embed_category}"
+    config_dict["device"] = device
 
     wandb_run = None
     if log_wandb:
@@ -58,7 +70,7 @@ def _run_experiment(
             project="Experiment_01_Forecasting",
             name=run_id,
             group=f"{experiment}_Seed{seed}",
-            tags=[model_category, embed_category],
+            tags=[model_category, embed_category, device],
             config=config_dict,
             reinit=True,
             save_code=True,
@@ -88,24 +100,54 @@ def run_experiments(
     train: bool = True,
     evaluate: bool = True,
     log_wandb: bool = False,
+    device_ids: Sequence[str] = ("cuda:0", "cuda:1"),  # two GPUs by default
 ) -> None:
+    """
+    Run all (seed, experiment) combinations using at most len(device_ids)
+    parallel subprocesses, each pinned to a specific CUDA device.
+    """
     ctx = mp.get_context("spawn")
 
-    for seed in seeds:
-        for experiment in experiments:
-            print(f"Launching experiment '{experiment}' with seed {seed}")
-            process = ctx.Process(
-                target=_run_experiment,
-                args=(seed, experiment, train, evaluate, log_wandb),
-            )
-            process.start()
-            process.join()
+    # Build the work list
+    tasks: List[Tuple[int, str]] = [
+        (seed, experiment) for seed in seeds for experiment in experiments
+    ]
 
-            if process.exitcode:
-                raise RuntimeError(
-                    f"Experiment '{experiment}' with seed {seed} failed "
-                    f"with exit code {process.exitcode}"
-                )
+    active: List[Tuple[mp.Process, str]] = []
+    available_devices: List[str] = list(device_ids)
+
+    while tasks or active:
+        # Launch as many jobs as we have free devices
+        while tasks and available_devices:
+            seed, experiment = tasks.pop(0)
+            device = available_devices.pop(0)
+
+            print(
+                f"Launching experiment '{experiment}' with seed {seed} on device {device}"
+            )
+
+            p = ctx.Process(
+                target=_run_experiment,
+                args=(seed, experiment, train, evaluate, log_wandb, device),
+            )
+            p.start()
+            active.append((p, device))
+
+        # If nothing running, continue (should only happen at the very beginning)
+        if not active:
+            continue
+
+        # Wait for the first active process to complete
+        proc, dev = active.pop(0)
+        proc.join()
+
+        if proc.exitcode:
+            raise RuntimeError(
+                f"Experiment on {dev} failed with exit code {proc.exitcode}"
+            )
+
+        # Free up the device
+        available_devices.append(dev)
 
 
 if __name__ == "__main__":

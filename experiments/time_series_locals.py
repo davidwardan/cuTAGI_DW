@@ -3,6 +3,7 @@ import numpy as np
 from tqdm import tqdm
 from typing import List, Optional
 from experiments.wandb_helpers import create_histogram, finish_run, init_run, log_data
+import torch
 
 from examples.data_loader import (
     TimeSeriesDataloader,
@@ -88,6 +89,7 @@ def prepare_dtls(
     )
 
     return train_dtl, val_dtl, test_dtl
+
 
 # prepare input specific to local models
 def prepare_input(
@@ -658,9 +660,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                                         continue
                                 histogram = create_histogram(values)
                                 if histogram is not None:
-                                    log_payload[
-                                        f"params/{layer_name}/{label}"
-                                    ] = histogram
+                                    log_payload[f"params/{layer_name}/{label}"] = (
+                                        histogram
+                                    )
                     except Exception as e:
                         print(
                             f"Warning: Could not log model parameters to W&B. Error: {e}"
@@ -985,7 +987,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [1, 42, 235, 1234, 2024]
+    list_of_seeds = [3, 67, 9, 17, 99]  # [1, 42, 235, 1234, 2024]
     list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
@@ -998,7 +1000,7 @@ def main(Train=True, Eval=True, log_wandb=True):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_local_model"
+            experiment_name = f"seed{seed}/{exp}/experiment01_local"
 
             # Create configuration
             config = Config()
@@ -1007,6 +1009,7 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             config.eval_plots = False
+            config.device = "cuda" if torch.cuda.is_available() else "cpu"
 
             # Convert config object to a dictionary for W&B
             config_dict = {
