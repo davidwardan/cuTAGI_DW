@@ -4,7 +4,12 @@ import pandas as pd
 from tqdm import tqdm
 from typing import Any, List, Optional
 
-from experiments.wandb_helpers import create_histogram, init_run, log_data, finish_run
+from experiments.wandb_helpers import (
+    log_model_parameters,
+    init_run,
+    log_data,
+    finish_run,
+)
 import torch
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
@@ -46,6 +51,31 @@ mpl.rcParams.update(
         "lines.linewidth": 1,  # Set line width to 1
     }
 )
+
+
+# TODO: to remove
+def track_embedding_coordinates(
+    embeddings,
+    config,
+    coords_history: list,
+):
+    """
+    Snapshot embeddings in 2D using PCA and optionally log to W&B.
+
+    Uses embeddings.as_coordinates(n=2) -> (mu_coords, var_coords).
+
+    - coords_history: list to which (num_embeddings, 2) mu_coords arrays are appended.
+    """
+    if embeddings is None:
+        return
+    if not hasattr(embeddings, "as_coordinates"):
+        return
+    if config.total_embedding_size <= 0:
+        return
+
+    # (num_embeddings, 2) for means; we ignore the projected variances for now
+    mu_coords, var_coords = embeddings.as_coordinates(n=2)
+    coords_history.append(mu_coords.copy())
 
 
 class Config:
@@ -323,6 +353,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 sigma_end + (sigma_start - sigma_end) * weights
             ).tolist()
 
+    # Storage for 2D embedding coordinates per epoch
+    embedding_coords_history: List[np.ndarray] = []
+
     # --- Training loop ---
     for epoch in pbar:
         # net.train()
@@ -342,12 +375,21 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             input_seq_len=config.input_seq_len, nb_ts=config.nb_ts
         )
         lstm_state_container = LSTMStateContainer(
-            num_series=config.nb_ts, layer_state_shapes={0: 40, 1: 40}
+            num_series=config.nb_ts, layer_state_shapes={0: 20}
         )
 
         # get current sigma_v if not using AGVI
         if not config.use_AGVI:
             sigma_v = decaying_sigma_v[epoch]
+
+        # log current model parameters
+        if wandb_run is not None:
+            log_payload = log_model_parameters(
+                model=net,
+                epoch=epoch,
+                total_epochs=config.num_epochs,
+                logging_frequency=2,
+            )
 
         for (x, y), ts_id, w_id in train_batch_iter:
 
@@ -608,52 +650,36 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         if wandb_run:
             # Log metrics
-            log_payload = {
+            metrics_payload = {
                 "epoch": epoch,
                 "train_rmse": train_mse,
                 "train_log_lik": train_log_lik,
                 "val_rmse": val_mse,
                 "val_log_lik": val_log_lik,
             }
+            if log_payload is None:
+                log_payload = metrics_payload
+            else:
+                log_payload.update(metrics_payload)
             if not config.use_AGVI:
                 log_payload["sigma_v"] = sigma_v
 
-            # Log parameter histograms
-            log_param_freq = 2  # logs each n epochs
-            if (epoch % log_param_freq == 0) or (epoch == config.num_epochs - 1):
-                try:
-                    state_dict = net.state_dict()
-                    for layer_name, params in state_dict.items():
-                        is_lstm = "lstm" in layer_name.lower()
-                        gate_names = ("forget", "input", "candidate", "output")
-                        param_labels = ("mu_w", "var_w", "mu_b", "var_b")
-                        for param, label in zip(params, param_labels):
-                            if param is None:
-                                continue
-                            values = np.asarray(param)
-                            if is_lstm:
-                                flat_values = values.reshape(-1)
-                                gate_size = flat_values.size // 4
-                                if gate_size > 0 and flat_values.size % 4 == 0:
-                                    for idx, gate in enumerate(gate_names):
-                                        start = idx * gate_size
-                                        end = start + gate_size
-                                        histogram = create_histogram(
-                                            flat_values[start:end], num_bins=512
-                                        )
-                                        if histogram is not None:
-                                            log_payload[
-                                                f"params/{layer_name}/{label}_{gate}"
-                                            ] = histogram
-                                    continue
-                            histogram = create_histogram(values, num_bins=512)
-                            if histogram is not None:
-                                log_payload[f"params/{layer_name}/{label}"] = histogram
-                except Exception as e:
-                    print(f"Warning: Could not log model parameters to W&B. Error: {e}")
+            # log current lstm states
+            # lstm_states_statistics = lstm_state_container.get_statistics()
+            # # iterate over layers
+            # for layer_idx in lstm_states_statistics.keys():
+            #     for stat_name, stat_value in lstm_states_statistics[layer_idx].items():
+            #         log_payload[f"LSTM.{layer_idx}_{stat_name}"] = stat_value
 
             # Send all logs for this epoch
             log_data(log_payload, wandb_run=wandb_run)
+
+        # --- Track embeddings in 2D for this epoch ---
+        # track_embedding_coordinates(
+        #     embeddings=embeddings,
+        #     config=config,
+        #     coords_history=embedding_coords_history,
+        # )
 
         # Check for early stopping
         val_score = (
@@ -692,6 +718,16 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             embeddings.save(os.path.join(embedding_dir, "embeddings_final"))
         elif config.use_standard_embeddings:
             embeddings.save(os.path.join(embedding_dir, "embeddings_final.npz"))
+
+    # Save 2D embedding trajectory if we tracked any
+    if embeddings is not None and len(embedding_coords_history) > 0:
+        coords_arr = np.stack(
+            embedding_coords_history, axis=0
+        )  # (n_epochs_run, n_entities, 2)
+        np.savez(
+            os.path.join(embedding_dir, "embedding_coords_history.npz"),
+            coords=coords_arr,
+        )
 
     # --- Testing ---
     # net.eval()
@@ -780,18 +816,19 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     net.reset_lstm_states()
 
     # Run over each time series and re_scale it
-    for i in range(config.nb_ts):
-        # get mean and std
-        mean = train_data.x_mean[i][0]
-        std = train_data.x_std[i][0]
+    if config.scale_method == "standard":
+        for i in range(config.nb_ts):
+            # get mean and std
+            mean = train_data.x_mean[i][0]
+            std = train_data.x_std[i][0]
 
-        # re-scale
-        train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
-        train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
-        val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
-        val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
-        test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
-        test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
+            # re-scale
+            train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
+            train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
+            val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
+            val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
+            test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
+            test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
 
     # Save results
     np.savez(
@@ -916,42 +953,28 @@ def eval_global_model(
 
         # Metrics
         if config.eval_metrics:
-            mask_test = (
-                np.isfinite(yt_test) & np.isfinite(ypred_test) & np.isfinite(spred_test)
-            )
 
             # Standardize test with training mean and std
-            train_mean = np.nanmean(yt_train)
-            train_std = np.nanstd(yt_train)
-
-            stand_yt_test = normalizer.standardize(yt_test, train_mean, train_std)
-            stand_ypred_test = normalizer.standardize(ypred_test, train_mean, train_std)
-            stand_spred_test = spred_test / (train_std + 1e-10)
-
-            if np.any(mask_test):
-                y_true = stand_yt_test[mask_test]
-                y_pred = stand_ypred_test[mask_test]
-                s_pred = stand_spred_test[mask_test]
-
-                # normalize data
-                test_rmse = metric.rmse(y_pred, y_true)
-                test_log_lik = metric.log_likelihood(y_pred, y_true, s_pred)
-                test_mae = metric.mae(y_pred, y_true)
-
-                denom = np.sum(np.abs(y_true))
-                if denom == 0:
-                    test_p50 = np.nan
-                    test_p90 = np.nan
-                else:
-                    test_p50 = metric.Np50(y_true, y_pred)
-                    test_p90 = metric.Np90(y_true, y_pred, s_pred)
-
+            if config.scale_method == "standard":
+                train_mean = np.nanmean(yt_train)
+                train_std = np.nanstd(yt_train)
             else:
-                test_rmse = np.nan
-                test_log_lik = np.nan
-                test_mae = np.nan
-                test_p50 = np.nan
-                test_p90 = np.nan
+                # manual standardization
+                train_mean = 0.0
+                train_std = 1.0
+
+            stand_y_true = normalizer.standardize(yt_test, train_mean, train_std)
+            stand_y_pred = normalizer.standardize(ypred_test, train_mean, train_std)
+            stand_s_pred = spred_test / (train_std + 1e-10)
+
+            # normalize data
+            test_rmse = metric.rmse(stand_y_pred, stand_y_true)
+            test_log_lik = metric.log_likelihood(
+                stand_y_pred, stand_y_true, stand_s_pred
+            )
+            test_mae = metric.mae(stand_y_pred, stand_y_true)
+            test_p50 = metric.Np50(stand_y_true, stand_y_pred)
+            test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
 
             # Append to lists
             test_rmse_list.append(test_rmse)
@@ -1363,7 +1386,7 @@ def eval_global_model(
 def main(Train=True, Eval=True, log_wandb=True):
 
     list_of_seeds = [1]
-    list_of_experiments = ["train30"]
+    list_of_experiments = ["train80"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1372,10 +1395,12 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Model category
             model_category = "global"
-            embed_category = "no embedding"
+            embed_category = "no embeddings"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
+            experiment_name = (
+                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
+            )
 
             # Create configuration
             config = Config()
@@ -1387,8 +1412,8 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             config.eval_plots = False
             config.embed_plots = False
-            # config.embedding_size = 10
-            config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
+            # config.embedding_size = 15
+            # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -1400,10 +1425,10 @@ def main(Train=True, Eval=True, log_wandb=True):
                     " ", ""
                 )
                 run = init_run(
-                    project="Experiment_01_Forecasting",
+                    project="tracking_weights_lstm",
                     name=run_id,
                     group=f"{model_category}_Seed{embed_category}",
-                    tags=[model_category, embed_category],
+                    tags=["normal"],
                     config=config_dict,
                     reinit=True,
                     save_code=True,
