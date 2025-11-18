@@ -71,11 +71,21 @@ class EmbeddingLayer:
         """
         return self.mu[idx], self.var[idx]
 
-    def update(self, idx: np.array, mu_delta: np.ndarray, var_delta: np.ndarray):
+    def update(
+        self,
+        idx: np.array,
+        mu_delta: np.ndarray,
+        var_delta: np.ndarray,
+        lr: float = 1.0,
+        skip_update: bool = False,
+    ):
         """
         Applies a delta update to embedding vectors.
         Handles batches and sums updates for repeated indices using np.add.at.
         """
+        if skip_update:
+            return
+
         # Ensure idx is an array for consistent processing
         idx = np.atleast_1d(idx)
 
@@ -102,8 +112,8 @@ class EmbeddingLayer:
         if idx_filtered.size == 0:
             return
 
-        mu_delta_filtered = mu_delta[active_mask]
-        var_delta_filtered = var_delta[active_mask]
+        mu_delta_filtered = mu_delta[active_mask] * lr
+        var_delta_filtered = var_delta[active_mask] * lr
 
         # Use np.add.at to correctly sum updates for repeated indices
         np.add.at(self.mu, idx_filtered, mu_delta_filtered)
@@ -128,6 +138,41 @@ class EmbeddingLayer:
         self.var = data["var"]
         # Update embedding_dim based on loaded data
         self.embedding_dim = self.mu.shape
+
+    def as_coordinates(self, n: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Returns PCA-reduced embedding coordinates for the requested number of
+        principal components.
+
+        Args:
+            n (int): Number of principal components (coordinates) to return.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: Projected (mu, var) with shape
+            (num_embeddings, n).
+        """
+        _, embedding_size = self.embedding_dim
+        if not 0 < n <= embedding_size:
+            raise ValueError(
+                "Requested coordinate dimensionality must be positive and <= "
+                f"embedding_size ({embedding_size})."
+            )
+
+        # Center mu before computing PCA
+        mu_centered = self.mu - self.mu.mean(axis=0, keepdims=True)
+
+        # Compute principal axes via SVD
+        _, _, vt = np.linalg.svd(mu_centered, full_matrices=False)
+        components = vt[:n]  # shape: (n, embedding_size)
+
+        # Project means
+        mu_coords = mu_centered @ components.T  # (num_embeddings, n)
+
+        # Project variances assuming diagonal covariance per dimension
+        comp_sq = components**2
+        var_coords = self.var @ comp_sq.T  # (num_embeddings, n)
+
+        return mu_coords.astype(np.float32), var_coords.astype(np.float32)
 
 
 class MappedTimeSeriesEmbeddings:

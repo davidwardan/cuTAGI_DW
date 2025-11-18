@@ -78,11 +78,9 @@ class LSTMStateContainer:
             # Shape: (num_series, state_dim)
             self.states[layer_idx] = {
                 "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
-                # "mu_h": np.random.randn(num_series, state_dim).astype(np.float32),
-                "var_h": np.ones((num_series, state_dim), dtype=np.float32),
+                "var_h": np.zeros((num_series, state_dim), dtype=np.float32),
                 "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
-                # "mu_c": np.random.randn(num_series, state_dim).astype(np.float32),
-                "var_c": np.ones((num_series, state_dim), dtype=np.float32),
+                "var_c": np.zeros((num_series, state_dim), dtype=np.float32),
             }
 
     def _unpack_net_states(self, net_states: dict, batch_size: int):
@@ -203,6 +201,16 @@ class LSTMStateContainer:
     def __call__(self, *args, **kwds):
         pass
 
+    def get_statistics(self):
+        stats = {}
+        for layer_idx, components in self.states.items():
+            stats[layer_idx] = {
+                "mu_h_mean": np.mean(components["mu_h"]),
+                "var_h_mean": np.mean(components["var_h"]),
+                "mu_c_mean": np.mean(components["mu_c"]),
+                "var_c_mean": np.mean(components["var_c"]),
+            }
+        return stats
 
 # --- Early Stopping Class ---
 class EarlyStopping:
@@ -405,6 +413,28 @@ def build_model(input_size, use_AGVI, seed, device, init_params=None):
             LSTM(40, 40, 1),
             Linear(40, 1),
         )
+
+    # hard set mu_b to 1.0 for all LSTM layers
+    # state_dict = net.state_dict()
+    # for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+    #     if layer_name.split(".")[0].lower() == "lstm":
+    #         b_gate_size = len(mu_b) // 4
+    #         gate_size = len(mu_w) // 4
+
+    #         print(f"Adjusting LSTM layer: {layer_name}")
+    #         print(f" - Bias gate size: {b_gate_size}, Weight gate size: {gate_size}")
+
+    #         # -- bias of forget gate
+    #         # forget is the first quarter
+    #         mu_b = mu_b.copy()
+    #         mu_b[:b_gate_size] = [1.0] * b_gate_size
+
+    #         # -- weights of forget gate
+    #         mu_w = mu_w.copy()
+    #         mu_w[:gate_size] = mu_w[:gate_size] + [0.05] * gate_size # shift weights to favor forget gate
+
+    #         state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+    # net.load_state_dict(state_dict)
 
     if init_params is not None:
         # reset_param_variance(net, init_params)
@@ -1043,5 +1073,3 @@ def plot_similarity_graph(
     plt.axis("off")
     plt.savefig(out_path, dpi=600, bbox_inches="tight")
     plt.close()
-
-
