@@ -422,6 +422,18 @@ class MappedTimeSeriesEmbeddings:
         # Ensure ts_ids are int for lookup
         ts_ids_int = ts_ids.astype(int)
 
+        # Filter out dummy samples (ts_id = -1)
+        valid_mask = ts_ids_int != -1
+        ts_ids_int = ts_ids_int[valid_mask]
+
+        # Also filter the deltas to match
+        if not np.all(valid_mask):
+            mu_deltas_combined = mu_deltas_combined[valid_mask]
+            var_deltas_combined = var_deltas_combined[valid_mask]
+
+        if ts_ids_int.size == 0:
+            return
+
         # Get the categorical indices for all ts_ids in the batch
         try:
             batch_map = self.ts_map.loc[ts_ids_int]

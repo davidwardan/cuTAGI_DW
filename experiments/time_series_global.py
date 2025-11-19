@@ -414,7 +414,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare look_back buffer
             # Filter out padded indices (-1) before checking initialization status
             valid_indices_for_init = [i for i in indices if i != -1]
-            if any(look_back_buffer.needs_initialization[i] for i in valid_indices_for_init):
+            if any(
+                look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
+            ):
                 look_back_buffer.initialize(
                     initial_mu=x[:, : config.input_seq_len],
                     initial_var=np.zeros_like(
@@ -570,7 +572,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare look_back buffer
             # Filter out padded indices (-1) before checking initialization status
             valid_indices_for_init = [i for i in indices if i != -1]
-            if any(look_back_buffer.needs_initialization[i] for i in valid_indices_for_init):
+            if any(
+                look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
+            ):
                 look_back_buffer.initialize(
                     initial_mu=x[:, : config.input_seq_len],
                     initial_var=np.zeros_like(
@@ -770,7 +774,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         # prepare look_back buffer
         # Filter out padded indices (-1) before checking initialization status
         valid_indices_for_init = [i for i in indices if i != -1]
-        if any(look_back_buffer.needs_initialization[i] for i in valid_indices_for_init):
+        if any(
+            look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
+        ):
             look_back_buffer.initialize(
                 initial_mu=x[:, : config.input_seq_len],
                 initial_var=np.zeros_like(
@@ -1195,7 +1201,7 @@ def eval_global_model(
                             wandb_run=wandb_run,
                         )
 
-                    if not config.embed_plots:
+                    if config.embed_plots:
                         # Plot PCA
                         plot_embeddings(
                             start_mu,
@@ -1464,4 +1470,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, True, True)
+    main(True, True, False)
