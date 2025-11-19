@@ -97,43 +97,25 @@ def run_local_experiments(
     device_ids: Sequence[str] = ("cuda:0", "cuda:1"),
 ) -> None:
     """Run every (seed, experiment) pair using the provided pool of devices."""
-    ctx = mp.get_context("spawn")
+    from experiments.runner_utils import run_experiments_parallel
 
     tasks: List[Tuple[int, str]] = [
         (seed, experiment) for seed in seeds for experiment in experiments
     ]
 
-    active: List[Tuple[mp.Process, str]] = []
-    available_devices: List[str] = list(device_ids)
+    def worker_args_mapper(task: Tuple[int, str], device: str) -> Tuple:
+        seed, experiment = task
+        print(
+            f"Launching local experiment '{experiment}' with seed {seed} on device {device}"
+        )
+        return (seed, experiment, train, evaluate, log_wandb, device)
 
-    while tasks or active:
-        while tasks and available_devices:
-            seed, experiment = tasks.pop(0)
-            device = available_devices.pop(0)
-
-            print(
-                f"Launching local experiment '{experiment}' with seed {seed} on device {device}"
-            )
-
-            p = ctx.Process(
-                target=_run_local_experiment,
-                args=(seed, experiment, train, evaluate, log_wandb, device),
-            )
-            p.start()
-            active.append((p, device))
-
-        if not active:
-            continue
-
-        proc, dev = active.pop(0)
-        proc.join()
-
-        if proc.exitcode:
-            raise RuntimeError(
-                f"Local experiment on {dev} failed with exit code {proc.exitcode}"
-            )
-
-        available_devices.append(dev)
+    run_experiments_parallel(
+        tasks=tasks,
+        worker_fn=_run_local_experiment,
+        worker_args_mapper=worker_args_mapper,
+        device_ids=device_ids,
+    )
 
 
 if __name__ == "__main__":

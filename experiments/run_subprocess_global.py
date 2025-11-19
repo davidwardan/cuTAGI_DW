@@ -106,48 +106,26 @@ def run_experiments(
     Run all (seed, experiment) combinations using at most len(device_ids)
     parallel subprocesses, each pinned to a specific CUDA device.
     """
-    ctx = mp.get_context("spawn")
+    from experiments.runner_utils import run_experiments_parallel
 
     # Build the work list
     tasks: List[Tuple[int, str]] = [
         (seed, experiment) for seed in seeds for experiment in experiments
     ]
 
-    active: List[Tuple[mp.Process, str]] = []
-    available_devices: List[str] = list(device_ids)
+    def worker_args_mapper(task: Tuple[int, str], device: str) -> Tuple:
+        seed, experiment = task
+        print(
+            f"Launching experiment '{experiment}' with seed {seed} on device {device}"
+        )
+        return (seed, experiment, train, evaluate, log_wandb, device)
 
-    while tasks or active:
-        # Launch as many jobs as we have free devices
-        while tasks and available_devices:
-            seed, experiment = tasks.pop(0)
-            device = available_devices.pop(0)
-
-            print(
-                f"Launching experiment '{experiment}' with seed {seed} on device {device}"
-            )
-
-            p = ctx.Process(
-                target=_run_experiment,
-                args=(seed, experiment, train, evaluate, log_wandb, device),
-            )
-            p.start()
-            active.append((p, device))
-
-        # If nothing running, continue (should only happen at the very beginning)
-        if not active:
-            continue
-
-        # Wait for the first active process to complete
-        proc, dev = active.pop(0)
-        proc.join()
-
-        if proc.exitcode:
-            raise RuntimeError(
-                f"Experiment on {dev} failed with exit code {proc.exitcode}"
-            )
-
-        # Free up the device
-        available_devices.append(dev)
+    run_experiments_parallel(
+        tasks=tasks,
+        worker_fn=_run_experiment,
+        worker_args_mapper=worker_args_mapper,
+        device_ids=device_ids,
+    )
 
 
 if __name__ == "__main__":

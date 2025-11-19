@@ -233,7 +233,7 @@ class TimeSeriesDataBuilder:
                 stride=self.stride,
             )
 
-            series_ids = np.full((len(window_ids),), series_idx, dtype=np.int32)
+            series_ids = np.full((len(window_ids),), j, dtype=np.int32)
 
             rolled_per_ts.append(
                 (

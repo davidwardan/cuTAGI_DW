@@ -1098,7 +1098,8 @@ void LSTMCuda::d_set_LSTM_states(const std::vector<float>& mu_h,
         const size_t states_per_sample = this->seq_len * this->output_size;
         if (states_per_sample == 0 ||
             provided_states % states_per_sample != 0) {
-            std::cerr << "setLSTMStates() cannot infer batch size for resize.\n";
+            std::cerr
+                << "setLSTMStates() cannot infer batch size for resize.\n";
             return;
         }
 

@@ -133,6 +133,7 @@ class Config:
         self.Sigma_v_bounds: tuple = (None, None)
         self.decaying_factor: float = 0.99
         self.device: str = "cuda"
+        self.lstm_hidden_sizes: List[int] = [40, 40]
 
         # Set training parameters
         self.num_epochs: int = 100
@@ -197,8 +198,6 @@ class Config:
         """Calculates the number of time series based on ts_to_use."""
         if self.ts_to_use is not None:
             return len(self.ts_to_use)
-        # This case should not be hit if ts_to_use is always populated
-        # Re-using dataloader's logic might be more robust
         return 1
 
     @property
@@ -311,6 +310,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         use_AGVI=config.use_AGVI,
         seed=config.seed,
         device=config.device,
+        hidden_sizes=config.lstm_hidden_sizes,
     )
 
     # Enable input state updates only if embeddings are being used
@@ -374,8 +374,12 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         look_back_buffer = LookBackBuffer(
             input_seq_len=config.input_seq_len, nb_ts=config.nb_ts
         )
+        # Create layer_state_shapes dynamically based on config
+        layer_state_shapes = {
+            i: size for i, size in enumerate(config.lstm_hidden_sizes)
+        }
         lstm_state_container = LSTMStateContainer(
-            num_series=config.nb_ts, layer_state_shapes={0: 20}
+            num_series=config.nb_ts, layer_state_shapes=layer_state_shapes
         )
 
         # get current sigma_v if not using AGVI
@@ -408,7 +412,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 )
 
             # prepare look_back buffer
-            if any(look_back_buffer.needs_initialization[i] for i in indices):
+            # Filter out padded indices (-1) before checking initialization status
+            valid_indices_for_init = [i for i in indices if i != -1]
+            if any(look_back_buffer.needs_initialization[i] for i in valid_indices_for_init):
                 look_back_buffer.initialize(
                     initial_mu=x[:, : config.input_seq_len],
                     initial_var=np.zeros_like(
@@ -562,7 +568,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 )
 
             # prepare look_back buffer
-            if any(look_back_buffer.needs_initialization[i] for i in indices):
+            # Filter out padded indices (-1) before checking initialization status
+            valid_indices_for_init = [i for i in indices if i != -1]
+            if any(look_back_buffer.needs_initialization[i] for i in valid_indices_for_init):
                 look_back_buffer.initialize(
                     initial_mu=x[:, : config.input_seq_len],
                     initial_var=np.zeros_like(
@@ -760,7 +768,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             var_y = np.full((B * len(config.output_col),), sigma_v**2, dtype=np.float32)
 
         # prepare look_back buffer
-        if any(look_back_buffer.needs_initialization[i] for i in indices):
+        # Filter out padded indices (-1) before checking initialization status
+        valid_indices_for_init = [i for i in indices if i != -1]
+        if any(look_back_buffer.needs_initialization[i] for i in valid_indices_for_init):
             look_back_buffer.initialize(
                 initial_mu=x[:, : config.input_seq_len],
                 initial_var=np.zeros_like(

@@ -398,21 +398,23 @@ def prepare_data(
 
 
 # Define model
-def build_model(input_size, use_AGVI, seed, device, init_params=None):
+def build_model(
+    input_size, use_AGVI, seed, device, hidden_sizes=[40, 40], init_params=None
+):
     manual_seed(seed)
+    layers = []
+    current_input_size = input_size
+    for hidden_size in hidden_sizes:
+        layers.append(LSTM(current_input_size, hidden_size, 1))
+        current_input_size = hidden_size
+
     if use_AGVI:
-        net = Sequential(
-            LSTM(input_size, 40, 1),
-            LSTM(40, 40, 1),
-            Linear(40, 2),
-            EvenExp(),
-        )
+        layers.append(Linear(current_input_size, 2))
+        layers.append(EvenExp())
     else:
-        net = Sequential(
-            LSTM(input_size, 40, 1),
-            LSTM(40, 40, 1),
-            Linear(40, 1),
-        )
+        layers.append(Linear(current_input_size, 1))
+
+    net = Sequential(*layers)
 
     # hard set mu_b to 1.0 for all LSTM layers
     # state_dict = net.state_dict()
@@ -467,15 +469,13 @@ def prepare_input(
         var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
 
     if embeddings is not None:
-        # TODO: temporary fix for shared setup
-        indices[indices == -1] = 0
-        embed_mu, embed_var = embeddings(indices)  # shape: (B, E)
+        lookup_indices = indices.copy()
+        lookup_indices[lookup_indices == -1] = 0
+        embed_mu, embed_var = embeddings(lookup_indices)  # shape: (B, E)
 
-        # Zero out embedding rows for inactive entries
         embed_mu[~active_mask] = 0.0
         embed_var[~active_mask] = 0.0
 
-        # Append embeddings
         x = np.concatenate((x, embed_mu), axis=1)
         var_x = np.concatenate((var_x, embed_var), axis=1)
 
