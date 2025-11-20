@@ -30,6 +30,7 @@ from experiments.utils import (
     LookBackBuffer,
     LSTMStateContainer,
 )
+from experiments.tracking import EmbeddingUpdateTracker, ParameterTracker
 
 
 from pytagi import Normalizer as normalizer
@@ -356,6 +357,24 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     # Storage for 2D embedding coordinates per epoch
     embedding_coords_history: List[np.ndarray] = []
 
+    # Initialize embedding update tracker
+    update_tracker = EmbeddingUpdateTracker(num_series=config.nb_ts)
+
+    # Initialize parameter tracker
+    param_tracker = ParameterTracker()
+    param_tracker.track_parameter(
+        layer_name="LSTM.0",
+        param_type="weight",
+        indices=list(range(40)),
+        label="LSTM Layer 0 Weights",
+    )
+    param_tracker.track_parameter(
+        layer_name="LSTM.0",
+        param_type="bias",
+        indices=list(range(40)),
+        label="LSTM Layer 0 Biases",
+    )
+
     # --- Training loop ---
     for epoch in pbar:
         # net.train()
@@ -504,6 +523,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     var_delta_slice,
                 )
 
+                # Track updates
+                update_tracker.update(indices, mu_delta_slice)
+
             # update aleatoric uncertainty if using AGVI
             if config.use_AGVI:
                 (
@@ -534,6 +556,10 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         # End of epoch
         train_mse = np.mean(train_mse)
         train_log_lik = np.mean(train_log_lik)
+
+        # Step tracker
+        update_tracker.step_epoch()
+        param_tracker.step_epoch(net)
 
         # Validation
         # net.eval()
@@ -740,6 +766,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             os.path.join(embedding_dir, "embedding_coords_history.npz"),
             coords=coords_arr,
         )
+
+    # Plot embedding updates
+    if embeddings is not None:
+        update_tracker.plot(embedding_dir, filename="embedding_updates_magnitude.png")
+
+    # Plot parameter evolution
+    param_tracker.plot(output_dir)
 
     # --- Testing ---
     # net.eval()
@@ -1402,7 +1435,7 @@ def eval_global_model(
 def main(Train=True, Eval=True, log_wandb=True):
 
     list_of_seeds = [1]
-    list_of_experiments = ["train80"]
+    list_of_experiments = ["train60"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1411,7 +1444,7 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Model category
             model_category = "global"
-            embed_category = "no embeddings"
+            embed_category = "simple embeddings"
 
             # Define experiment name
             experiment_name = (
@@ -1428,7 +1461,7 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             config.eval_plots = False
             config.embed_plots = False
-            # config.embedding_size = 15
+            config.embedding_size = 15
             # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
 
             # Convert config object to a dictionary for W&B
@@ -1470,4 +1503,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, True, False)
+    main(True, False, False)
