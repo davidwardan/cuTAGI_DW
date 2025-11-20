@@ -981,7 +981,7 @@ def eval_global_model(
 
             stand_y_true = normalizer.standardize(yt_test, train_mean, train_std)
             stand_y_pred = normalizer.standardize(ypred_test, train_mean, train_std)
-            stand_s_pred = spred_test / (train_std + 1e-10)
+            stand_s_pred = normalizer.standardize_std(spred_test, train_std)
 
             # normalize data
             test_rmse = metric.rmse(stand_y_pred, stand_y_true)

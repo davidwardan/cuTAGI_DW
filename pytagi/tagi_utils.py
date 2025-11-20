@@ -398,6 +398,23 @@ class Normalizer:
 
         return norm_std * (std + 1e-10)
 
+    @staticmethod
+    def standardize_std(std_data: np.ndarray, std: np.ndarray) -> np.ndarray:
+        """Standardizes the standard deviation.
+
+        The transformation is given by: :math:`\\text{std_data} / (\\sigma + \\epsilon)`.
+
+        :param std_data: The standard deviation to normalize.
+        :type std_data: numpy.ndarray
+        :param mu: The mean of the data (unused but kept for API consistency).
+        :type mu: numpy.ndarray
+        :param std: The standard deviation of the data.
+        :type std: numpy.ndarray
+        :return: The standardized standard deviation.
+        :rtype: numpy.ndarray
+        """
+        return std_data / (std + 1e-10)
+
     def max_min_norm(
         self, data: np.ndarray, max_value: np.ndarray, min_value: np.ndarray
     ) -> np.ndarray:
