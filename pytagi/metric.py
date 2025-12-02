@@ -198,7 +198,6 @@ def Np50(y, ypred):
     :return: Median absolute error normalized by the sum of the absolute targets.
     :rtype: float
     """
-    y = np.asarray(y)
     denom = np.nansum(np.abs(y)) + 1e-8
     return p50(y, ypred) / denom
 
@@ -215,9 +214,6 @@ def Np90(y, ypred, spred):
     :return: 90th percentile tilted loss normalized by the sum of absolute targets.
     :rtype: float
     """
-    y = np.asarray(y)
-    ypred = np.asarray(ypred)
-    spred = np.asarray(spred)
     denom = np.nansum(np.abs(y)) + 1e-8
     return p90(y, ypred, spred) / denom
 
@@ -232,10 +228,8 @@ def p50(y: np.ndarray, ypred: np.ndarray) -> float:
     :return: Sum of absolute deviations between targets and predictions.
     :rtype: float
     """
-    y = np.asarray(y)
-    ypred = np.asarray(ypred)
     e = y - ypred
-    return np.nansum(np.abs(e)) # TODO: np.nanmean() to match mae
+    return np.nansum(np.abs(e))
 
 
 def p90(y: np.ndarray, ypred: np.ndarray, spred: np.ndarray) -> float:
@@ -250,9 +244,6 @@ def p90(y: np.ndarray, ypred: np.ndarray, spred: np.ndarray) -> float:
     :return: 90th percentile tilted loss aggregated over targets.
     :rtype: float
     """
-    y = np.asarray(y)
-    ypred = np.asarray(ypred)
-    spred = np.asarray(spred)
     ypred_90q = ypred + 1.282 * spred  # 1.282 is the z-score for the 90th percentile
     Iq = y > ypred_90q
     Iq_ = ~Iq

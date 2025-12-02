@@ -212,6 +212,7 @@ class LSTMStateContainer:
             }
         return stats
 
+
 # --- Early Stopping Class ---
 class EarlyStopping:
     def __init__(
@@ -893,8 +894,8 @@ def plot_series(
         ncol=5,
         frameon=False,
     )
-    out_path = out_dir / f"series_{ts_idx:03d}.png"
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    out_path = out_dir / f"series_{ts_idx:03d}.svg"
+    plt.savefig(out_path, bbox_inches="tight")
     plt.close()
 
 
@@ -912,7 +913,7 @@ def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
         plt.xlabel("Embedding Dimension 1")
         plt.grid(True)
         emb_plot_path = in_dir / out_path
-        plt.savefig(emb_plot_path, dpi=600, bbox_inches="tight")
+        plt.savefig(emb_plot_path, bbox_inches="tight")
         plt.close()
         return
     pca = PCA(n_components=2)
@@ -931,7 +932,7 @@ def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
     plt.ylabel("Principal Component 2")
     plt.grid(True)
     emb_plot_path = in_dir / out_path
-    plt.savefig(emb_plot_path, dpi=600, bbox_inches="tight")
+    plt.savefig(emb_plot_path, bbox_inches="tight")
     plt.close()
 
 
@@ -990,7 +991,7 @@ def plot_similarity(
 
     plt.colorbar(heatmap, fraction=0.046, pad=0.04)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.savefig(out_path, bbox_inches="tight")
     plt.close()
 
 
@@ -1042,7 +1043,7 @@ def plot_similarity(
 
     plt.colorbar(heatmap, fraction=0.046, pad=0.04)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.savefig(out_path, bbox_inches="tight")
     plt.close()
 
 
@@ -1083,5 +1084,5 @@ def plot_similarity_graph(
     nx.draw_networkx_labels(G, pos, font_size=14)
     plt.title(f"{title}\n(Edges ≥ {threshold})", fontsize=16)
     plt.axis("off")
-    plt.savefig(out_path, dpi=600, bbox_inches="tight")
+    plt.savefig(out_path, bbox_inches="tight")
     plt.close()

@@ -691,17 +691,18 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         net.reset_lstm_states()
 
     # Run over each time series and re_scale it
-    for i in range(config.nb_ts):
-        # get mean and std
-        mean = x_means[i]
-        std = x_stds[i]
+    if config.data_loader.scale_method == "standard":
+        for i in range(config.nb_ts):
+            # get mean and std
+            mean = x_means[i]
+            std = x_stds[i]
 
-        # re-scale
-        train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
-        train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
-        val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
-        val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
-        test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
+            # re-scale
+            train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
+            train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
+            val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
+            val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
+            test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
         test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
 
     # Save results
@@ -739,21 +740,21 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.ts_to_use,
+        usecols=config.data_loader.ts_to_use,
     ).values
     true_val = pd.read_csv(
         config.x_file[1],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.ts_to_use,
+        usecols=config.data_loader.ts_to_use,
     ).values
     true_test = pd.read_csv(
         config.x_file[2],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.ts_to_use,
+        usecols=config.data_loader.ts_to_use,
     ).values
 
     def _trim_trailing_nans(x: np.ndarray):
@@ -782,9 +783,9 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
         # Get true values
         yt_train, yt_val, yt_test = (
-            _trim_trailing_nans(true_train[config.input_seq_len :, i]),
-            _trim_trailing_nans(true_val[config.input_seq_len :, i]),
-            _trim_trailing_nans(true_test[config.input_seq_len :, i]),
+            _trim_trailing_nans(true_train[config.data_loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_val[config.data_loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_test[config.data_loader.input_seq_len :, i]),
         )
         yt_full = np.concatenate([yt_train, yt_val, yt_test])
 
@@ -804,7 +805,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
         val_test_indices = (len(yt_train), len(yt_train) + len(yt_val))
 
         # --- Plotting ---
-        if config.eval_plots:
+        if config.evaluation.eval_plots:
             plot_series(
                 ts_idx=i,
                 y_true=yt_full,
@@ -816,13 +817,10 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             )
 
         # --- Metrics ---
-        if config.eval_metrics:
-            mask_test = (
-                np.isfinite(yt_test) & np.isfinite(ypred_test) & np.isfinite(spred_test)
-            )
+        if config.evaluation.eval_metrics:
 
             # Standardize test with training mean and std
-            if config.scale_method == "standard":
+            if config.data_loader.scale_method == "standard":
                 train_mean = np.nanmean(yt_train)
                 train_std = np.nanstd(yt_train)
             else:
@@ -840,9 +838,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
                 stand_y_pred, stand_y_true, stand_s_pred
             )
             test_mae = metric.mae(stand_y_pred, stand_y_true)
-            test_p50 = metric.Np50(
-                stand_y_true, stand_y_pred
-            )  # TODO: check without normalization p50 should be mae
+            test_p50 = metric.Np50(stand_y_true, stand_y_pred)
             test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
 
             # Append to lists
@@ -853,7 +849,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             test_p90_list.append(test_p90)
 
     # Calculate overall metrics
-    if config.eval_metrics:
+    if config.evaluation.eval_metrics:
         overall_rmse = np.nanmean(test_rmse_list)
         overall_log_lik = np.nanmean(test_log_lik_list)
         overall_mae = np.nanmean(test_mae_list)
@@ -865,7 +861,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             f.write("Series_ID,RMSE,LogLik,MAE,P50,P90\n")
             for i in range(config.nb_ts):
                 f.write(
-                    f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
+                    f"{config.data_loader.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
                     f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
                     f"{test_p90_list[i]:.4f}\n"
                 )
@@ -897,13 +893,14 @@ def main(Train=True, Eval=True, log_wandb=True):
             experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
 
             # Create configuration
-            config = Config.from_yaml(f"experiments/configurations/{model_category}_HQ127.yaml")
+            config = Config.from_yaml(
+                f"experiments/configurations/{model_category}_HQ127.yaml"
+            )
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
             config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.data_loader.batch_size = 1
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

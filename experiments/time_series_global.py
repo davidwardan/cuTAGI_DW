@@ -11,6 +11,7 @@ from experiments.wandb_helpers import (
     finish_run,
 )
 from experiments.config import Config
+import torch
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from experiments.data_loader import GlobalBatchLoader
@@ -66,8 +67,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     # Prepare data loaders
     train_data, val_data, test_data = prepare_data(
-        x_files=config.x_file,
-        date_files=config.date_file,
+        x_file=config.x_file,
+        date_file=config.date_file,
         input_seq_len=config.data_loader.input_seq_len,
         time_covariates=config.data_loader.time_covariates,
         scale_method=config.data_loader.scale_method,
@@ -588,7 +589,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     # # Plot embedding updates
     # if embeddings is not None:
-    #     update_tracker.plot(embedding_dir, filename="embedding_updates_magnitude.png")
+    #     update_tracker.plot(embedding_dir, filename="embedding_updates_magnitude.svg")
 
     # # Plot parameter evolution
     # param_tracker.plot(output_dir)
@@ -809,7 +810,7 @@ def eval_global_model(
         val_test_indices = (len(yt_train), len(yt_train) + len(yt_val))
 
         # Forecast Plotting
-        if config.eval_plots:
+        if config.evaluation.eval_plots:
             plot_series(
                 ts_idx=i,
                 y_true=yt_full,
@@ -821,10 +822,10 @@ def eval_global_model(
             )
 
         # Metrics
-        if config.eval_metrics:
+        if config.evaluation.eval_metrics:
 
             # Standardize test with training mean and std
-            if config.scale_method == "standard":
+            if config.data_loader.scale_method == "standard":
                 train_mean = np.nanmean(yt_train)
                 train_std = np.nanstd(yt_train)
             else:
@@ -844,7 +845,7 @@ def eval_global_model(
             test_mae = metric.mae(stand_y_pred, stand_y_true)
             test_p50 = metric.Np50(
                 stand_y_true, stand_y_pred
-            )  # TODO: check without normalization p50 should be mae
+            )
             test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
 
             # Append to lists
@@ -855,7 +856,7 @@ def eval_global_model(
             test_p90_list.append(test_p90)
 
     # Calculate overall metrics
-    if config.eval_metrics:
+    if config.evaluation.eval_metrics:
         overall_rmse = np.nanmean(test_rmse_list)
         overall_log_lik = np.nanmean(test_log_lik_list)
         overall_mae = np.nanmean(test_mae_list)
@@ -867,7 +868,7 @@ def eval_global_model(
             f.write("Series_ID,RMSE,LogLik,MAE,P50,P90\n")
             for i in range(config.nb_ts):
                 f.write(
-                    f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
+                    f"{config.data_loader.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
                     f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
                     f"{test_p90_list[i]:.4f}\n"
                 )
@@ -904,7 +905,7 @@ def eval_global_model(
                 final_embeddings_var = final_data["var"]
 
                 # Labels for standard embeddings are the time series IDs
-                labels = [str(ts_id) for ts_id in config.ts_to_use]
+                labels = [str(ts_id) for ts_id in config.data_loader.ts_to_use]
 
                 start_similarity = cosine_similarity_matrix(start_embeddings_mu)
                 final_similarity = cosine_similarity_matrix(final_embeddings_mu)
@@ -938,15 +939,15 @@ def eval_global_model(
                     fig.update_layout(title=f"Cosine similarity", yaxis_scaleanchor="x")
                     log_data({f"embeddings/similarity": fig}, wandb_run=wandb_run)
 
-                if config.embed_plots:
+                if config.evaluation.embed_plots:
                     plot_similarity(
                         start_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_start.png",
+                        embedding_dir / "embeddings_cosine_similarity_start.svg",
                         "Cosine Similarity (Start)",
                     )
                     plot_similarity(
                         final_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_final.png",
+                        embedding_dir / "embeddings_cosine_similarity_final.svg",
                         "Cosine Similarity (Final)",
                     )
 
@@ -954,27 +955,27 @@ def eval_global_model(
                         start_embeddings_mu,
                         config.nb_ts,
                         input_dir,
-                        "embeddings/embeddings_mu_pca_start.png",
+                        "embeddings/embeddings_mu_pca_start.svg",
                         labels=labels,
                     )
                     plot_embeddings(
                         final_embeddings_mu,
                         config.nb_ts,
                         input_dir,
-                        "embeddings/embeddings_mu_pca_final.png",
+                        "embeddings/embeddings_mu_pca_final.svg",
                         labels=labels,
                     )
 
                     plot_similarity(
                         start_bhattacharyya,
-                        embedding_dir / "embeddings_bhattacharyya_distance_start.png",
+                        embedding_dir / "embeddings_bhattacharyya_distance_start.svg",
                         "Bhattacharyya Distance (Start)",
                         vmin=0.0,
                         vmax=bhatt_vmax,
                     )
                     plot_similarity(
                         final_bhattacharyya,
-                        embedding_dir / "embeddings_bhattacharyya_distance_final.png",
+                        embedding_dir / "embeddings_bhattacharyya_distance_final.svg",
                         "Bhattacharyya Distance (Final)",
                         vmin=0.0,
                         vmax=bhatt_vmax,
@@ -1056,38 +1057,38 @@ def eval_global_model(
                             wandb_run=wandb_run,
                         )
 
-                    if config.embed_plots:
+                    if config.evaluation.embed_plots:
                         # Plot PCA
                         plot_embeddings(
                             start_mu,
                             n_entities,
                             input_dir,  # base dir
-                            f"embeddings/{category}/pca_start.png",
+                            f"embeddings/{category}/pca_start.svg",
                             labels=labels,
                         )
                         plot_embeddings(
                             final_mu,
                             n_entities,
                             input_dir,  # base dir
-                            f"embeddings/{category}/pca_final.png",
+                            f"embeddings/{category}/pca_final.svg",
                             labels=labels,
                         )
 
                         plot_similarity(
                             start_similarity,
-                            category_plot_dir / "cosine_similarity_start.png",
+                            category_plot_dir / "cosine_similarity_start.svg",
                             f"Cosine Similarity (Start) - {category}",
                             labels=labels,
                         )
                         plot_similarity(
                             final_similarity,
-                            category_plot_dir / "cosine_similarity_final.png",
+                            category_plot_dir / "cosine_similarity_final.svg",
                             f"Cosine Similarity (Final) - {category}",
                             labels=labels,
                         )
                         plot_similarity(
                             start_bhat,
-                            category_plot_dir / "bhattacharyya_distance_start.png",
+                            category_plot_dir / "bhattacharyya_distance_start.svg",
                             f"Bhattacharyya Distance (Start) - {category}",
                             vmin=0.0,
                             vmax=bhat_vmax,
@@ -1095,7 +1096,7 @@ def eval_global_model(
                         )
                         plot_similarity(
                             final_bhat,
-                            category_plot_dir / "bhattacharyya_distance_final.png",
+                            category_plot_dir / "bhattacharyya_distance_final.svg",
                             f"Bhattacharyya Distance (Final) - {category}",
                             vmin=0.0,
                             vmax=bhat_vmax,
@@ -1201,40 +1202,40 @@ def eval_global_model(
                     fig.update_layout(title=f"Cosine similarity", yaxis_scaleanchor="x")
                     log_data({f"embeddings/similarity": fig}, wandb_run=wandb_run)
 
-                if config.embed_plots:
+                if config.evaluation.embed_plots:
                     # Plot PCA
                     plot_embeddings(
                         mu_stitched_start,
                         config.nb_ts,
                         input_dir,
-                        "embeddings/embeddings_mu_pca_start_stitched.png",
+                        "embeddings/embeddings_mu_pca_start_stitched.svg",
                         labels=labels,
                     )
                     plot_embeddings(
                         mu_stitched_final,
                         config.nb_ts,
                         input_dir,
-                        "embeddings/embeddings_mu_pca_final_stitched.png",
+                        "embeddings/embeddings_mu_pca_final_stitched.svg",
                         labels=labels,
                     )
 
                     plot_similarity(
                         start_similarity,
                         embedding_dir
-                        / "embeddings_cosine_similarity_start_stitched.png",
+                        / "embeddings_cosine_similarity_start_stitched.svg",
                         "Cosine Similarity (Start) - Stitched",
                     )
                     plot_similarity(
                         final_similarity,
                         embedding_dir
-                        / "embeddings_cosine_similarity_final_stitched.png",
+                        / "embeddings_cosine_similarity_final_stitched.svg",
                         "Cosine Similarity (Final) - Stitched",
                     )
 
                     plot_similarity(
                         start_bhat,
                         embedding_dir
-                        / "embeddings_bhattacharyya_distance_start_stitched.png",
+                        / "embeddings_bhattacharyya_distance_start_stitched.svg",
                         "Bhattacharyya Distance (Start) - Stitched",
                         vmin=0.0,
                         vmax=bhat_vmax,
@@ -1242,7 +1243,7 @@ def eval_global_model(
                     plot_similarity(
                         final_bhat,
                         embedding_dir
-                        / "embeddings_bhattacharyya_distance_final_stitched.png",
+                        / "embeddings_bhattacharyya_distance_final_stitched.svg",
                         "Bhattacharyya Distance (Final) - Stitched",
                         vmin=0.0,
                         vmax=bhat_vmax,
@@ -1325,4 +1326,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(False, True, False)
+    main(True, True, False)
