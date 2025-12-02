@@ -62,17 +62,17 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         os.makedirs(output_dir)
 
     # Display and save configuration
-    config.save(os.path.join(output_dir, "config.txt"))
+    config.to_yaml(os.path.join(output_dir, "config.yaml"))
 
     # Prepare data loaders
     train_data, val_data, test_data = prepare_data(
-        x_file=config.x_file,
-        date_file=config.date_file,
-        input_seq_len=config.input_seq_len,
-        time_covariates=config.time_covariates,
-        scale_method=config.scale_method,
-        order_mode=config.order_mode,
-        ts_to_use=config.ts_to_use,
+        x_files=config.x_file,
+        date_files=config.date_file,
+        input_seq_len=config.data_loader.input_seq_len,
+        time_covariates=config.data_loader.time_covariates,
+        scale_method=config.data_loader.scale_method,
+        order_mode=config.data_loader.order_mode,
+        ts_to_use=config.data_loader.ts_to_use,
     )
 
     # Embeddings
@@ -84,9 +84,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             f"Using MappedTimeSeriesEmbeddings. Total embedding size: {config.total_embedding_size}"
         )
         embeddings = MappedTimeSeriesEmbeddings(
-            map_file_path=config.embedding_map_dir,
-            embedding_sizes=config.embedding_map_sizes,
-            encoding_types=config.embedding_map_initializer,
+            map_file_path=config.embeddings.mapped.embedding_map_dir,
+            embedding_sizes=config.embeddings.mapped.embedding_map_sizes,
+            encoding_types=config.embeddings.mapped.embedding_map_initializer,
             seed=config.seed,
         )
         if not os.path.exists(embedding_dir):
@@ -100,8 +100,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         )
         embeddings = EmbeddingLayer(
             num_embeddings=config.nb_ts,
-            embedding_size=config.embedding_size,
-            encoding_type=config.embedding_initializer,
+            embedding_size=config.embeddings.standard.embedding_size,
+            encoding_type=config.embeddings.standard.embedding_initializer,
             seed=config.seed,
         )
         if not os.path.exists(embedding_dir):
@@ -117,8 +117,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         input_size=config.input_size,
         use_AGVI=config.use_AGVI,
         seed=config.seed,
-        device=config.device,
-        hidden_sizes=config.lstm_hidden_sizes,
+        device=config.model.device,
+        hidden_sizes=config.model.lstm_hidden_sizes,
     )
 
     # Enable input state updates only if embeddings are being used
@@ -131,30 +131,34 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     test_states = States(nb_ts=config.nb_ts, total_time_steps=test_data.max_len)
 
     # Create progress bar
-    pbar = tqdm(range(config.num_epochs), desc="Epochs")
+    pbar = tqdm(range(config.training.num_epochs), desc="Epochs")
 
     # Initialize early stopping
     early_stopping = EarlyStopping(
-        criteria=config.early_stopping_criteria,
-        patience=config.patience,
-        min_delta=config.min_delta,
-        warmup_epochs=config.warmup_epochs,
+        criteria=config.training.early_stopping_criteria,
+        patience=config.training.patience,
+        min_delta=config.training.min_delta,
+        warmup_epochs=config.training.warmup_epochs,
     )
 
     # Prepare decaying sigma_v if not using AGVI
     if not config.use_AGVI:
-        sigma_start, sigma_end = config.Sigma_v_bounds
+        sigma_start, sigma_end = config.model.Sigma_v_bounds
         if sigma_start is None or sigma_end is None:
             raise ValueError("Sigma_v_bounds must be defined when AGVI is disabled.")
         sigma_start = float(sigma_start)
         sigma_end = float(sigma_end)
-        if config.num_epochs <= 1:
+        if config.training.num_epochs <= 1:
             decaying_sigma_v = [sigma_start]
         else:
-            decay_factor = float(config.decaying_factor)
-            exponents = decay_factor ** np.arange(config.num_epochs, dtype=np.float32)
+            decay_factor = float(config.model.decaying_factor)
+            exponents = decay_factor ** np.arange(
+                config.training.num_epochs, dtype=np.float32
+            )
             if np.isclose(exponents[0], exponents[-1]) or decay_factor <= 0.0:
-                weights = np.linspace(1.0, 0.0, config.num_epochs, dtype=np.float32)
+                weights = np.linspace(
+                    1.0, 0.0, config.training.num_epochs, dtype=np.float32
+                )
             else:
                 weights = (exponents - exponents[-1]) / (exponents[0] - exponents[-1])
             decaying_sigma_v = (
@@ -184,27 +188,25 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     # --- Training loop ---
     for epoch in pbar:
-        # embedding acumulator reset
-
         # net.train()
         train_mse = []
         train_log_lik = []
 
         train_batch_iter = GlobalBatchLoader.create_data_loader(
             dataset=train_data.dataset,
-            order_mode=config.order_mode,
-            batch_size=config.batch_size,
-            shuffle=config.shuffle,
+            order_mode=config.data_loader.order_mode,
+            batch_size=config.data_loader.batch_size,
+            shuffle=config.training.shuffle,
             seed=1,  # fixed for all seeds and runs
         )
 
         # Initialize look-back buffer and LSTM state container
         look_back_buffer = LookBackBuffer(
-            input_seq_len=config.input_seq_len, nb_ts=config.nb_ts
+            input_seq_len=config.data_loader.input_seq_len, nb_ts=config.nb_ts
         )
         # Create layer_state_shapes dynamically based on config
         layer_state_shapes = {
-            i: size for i, size in enumerate(config.lstm_hidden_sizes)
+            i: size for i, size in enumerate(config.model.lstm_hidden_sizes)
         }
         lstm_state_container = LSTMStateContainer(
             num_series=config.nb_ts, layer_state_shapes=layer_state_shapes
@@ -219,7 +221,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             log_payload = log_model_parameters(
                 model=net,
                 epoch=epoch,
-                total_epochs=config.num_epochs,
+                total_epochs=config.training.num_epochs,
                 logging_frequency=2,
             )
 
@@ -236,7 +238,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare obsevation noise matrix
             if not config.use_AGVI:
                 var_y = np.full(
-                    (B * len(config.output_col),), sigma_v**2, dtype=np.float32
+                    (B * len(config.data_loader.output_col),),
+                    sigma_v**2,
+                    dtype=np.float32,
                 )
 
             # prepare look_back buffer
@@ -246,9 +250,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
             ):
                 look_back_buffer.initialize(
-                    initial_mu=x[:, : config.input_seq_len],
+                    initial_mu=x[:, : config.data_loader.input_seq_len],
                     initial_var=np.zeros_like(
-                        x[:, : config.input_seq_len], dtype=np.float32
+                        x[:, : config.data_loader.input_seq_len], dtype=np.float32
                     ),
                     indices=indices,
                 )
@@ -386,8 +390,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         val_batch_iter = GlobalBatchLoader.create_data_loader(
             dataset=val_data.dataset,
-            order_mode=config.order_mode,
-            batch_size=config.batch_size,
+            order_mode=config.data_loader.order_mode,
+            batch_size=config.data_loader.batch_size,
             shuffle=False,
         )
 
@@ -404,7 +408,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare obsevation noise matrix
             if not config.use_AGVI:
                 var_y = np.full(
-                    (B * len(config.output_col),), sigma_v**2, dtype=np.float32
+                    (B * len(config.data_loader.output_col),),
+                    sigma_v**2,
+                    dtype=np.float32,
                 )
 
             # prepare look_back buffer
@@ -414,9 +420,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
             ):
                 look_back_buffer.initialize(
-                    initial_mu=x[:, : config.input_seq_len],
+                    initial_mu=x[:, : config.data_loader.input_seq_len],
                     initial_var=np.zeros_like(
-                        x[:, : config.input_seq_len], dtype=np.float32
+                        x[:, : config.data_loader.input_seq_len], dtype=np.float32
                     ),
                     indices=indices,
                 )
@@ -532,7 +538,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         # Check for early stopping
         val_score = (
-            val_log_lik if config.early_stopping_criteria == "log_lik" else val_mse
+            val_log_lik
+            if config.training.early_stopping_criteria == "log_lik"
+            else val_mse
         )
         if early_stopping(
             val_score,
@@ -596,8 +604,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     test_batch_iter = GlobalBatchLoader.create_data_loader(
         dataset=test_data.dataset,
-        order_mode=config.order_mode,
-        batch_size=config.batch_size,
+        order_mode=config.data_loader.order_mode,
+        batch_size=config.data_loader.batch_size,
         shuffle=False,
     )
 
@@ -613,7 +621,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         # prepare obsevation noise matrix
         if not config.use_AGVI:
-            var_y = np.full((B * len(config.output_col),), sigma_v**2, dtype=np.float32)
+            var_y = np.full(
+                (B * len(config.data_loader.output_col),), sigma_v**2, dtype=np.float32
+            )
 
         # prepare look_back buffer
         # Filter out padded indices (-1) before checking initialization status
@@ -622,9 +632,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
         ):
             look_back_buffer.initialize(
-                initial_mu=x[:, : config.input_seq_len],
+                initial_mu=x[:, : config.data_loader.input_seq_len],
                 initial_var=np.zeros_like(
-                    x[:, : config.input_seq_len], dtype=np.float32
+                    x[:, : config.data_loader.input_seq_len], dtype=np.float32
                 ),
                 indices=indices,
             )
@@ -675,7 +685,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     net.reset_lstm_states()
 
     # Run over each time series and re_scale it
-    if config.scale_method == "standard":
+    if config.data_loader.scale_method == "standard":
         for i in range(config.nb_ts):
             # get mean and std
             mean = train_data.x_mean[i][0]
@@ -726,21 +736,21 @@ def eval_global_model(
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.ts_to_use,
+        usecols=config.data_loader.ts_to_use,
     ).values
     true_val = pd.read_csv(
         config.x_file[1],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.ts_to_use,
+        usecols=config.data_loader.ts_to_use,
     ).values
     true_test = pd.read_csv(
         config.x_file[2],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.ts_to_use,
+        usecols=config.data_loader.ts_to_use,
     ).values
 
     def _trim_trailing_nans(x: np.ndarray):
@@ -777,9 +787,9 @@ def eval_global_model(
 
         # Get true values
         yt_train, yt_val, yt_test = (
-            _trim_trailing_nans(true_train[config.input_seq_len :, i]),
-            _trim_trailing_nans(true_val[config.input_seq_len :, i]),
-            _trim_trailing_nans(true_test[config.input_seq_len :, i]),
+            _trim_trailing_nans(true_train[config.data_loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_val[config.data_loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_test[config.data_loader.input_seq_len :, i]),
         )
         yt_full = np.concatenate([yt_train, yt_val, yt_test])
 
@@ -1246,12 +1256,8 @@ def eval_global_model(
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    # list_of_seeds = [1, 3, 9, 17, 42, 67, 99, 235, 1234]
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
-    list_of_seeds = [1996]
-    list_of_experiments = ["train100"]
-    embedding_size = 25
-    embed_initializer = "normal"
+    list_of_seeds = [1, 3, 17, 42, 99]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1259,8 +1265,8 @@ def main(Train=True, Eval=True, log_wandb=True):
             print(f"Running experiment: {exp} with seed {seed}")
 
             # Model category
-            model_category = f"global-look-{embed_initializer}"
-            embed_category = f"B={embedding_size}"
+            model_category = "global"
+            embed_category = "no-embeddings"
 
             # Define experiment name
             experiment_name = (
@@ -1268,12 +1274,21 @@ def main(Train=True, Eval=True, log_wandb=True):
             )
 
             # Load configuration
-            config = Config()
-            config.load(f"experiments/configs/time_series_global/{exp}.txt")
+            config = Config.from_yaml(
+                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
+            )
+
+            config.seed = seed
+            config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
+            config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
+            config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
             config_dict["model_type"] = f"{model_category}_{embed_category}"
+
+            # Display config
+            config.display()
 
             if log_wandb:
                 # Initialize W&B run

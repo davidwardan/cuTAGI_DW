@@ -10,6 +10,8 @@ from experiments.wandb_helpers import (
 )
 import torch
 
+from experiments.config import Config
+
 from examples.data_loader import (
     TimeSeriesDataloader,
 )
@@ -200,91 +202,6 @@ class States:
         self.mu[idx], self.std[idx] = value
 
 
-class Config:
-    def __init__(self):
-        # Seed for reproducibility
-        self.seed: int = 1
-
-        # Set data paths
-        self.x_train = "data/hq/train_0.3/split_train_values.csv"
-        self.dates_train = "data/hq/train_0.3/split_train_datetimes.csv"
-        self.x_val = "data/hq/split_val_values.csv"
-        self.dates_val = "data/hq/split_val_datetimes.csv"
-        self.x_test = "data/hq/split_test_values.csv"
-        self.dates_test = "data/hq/split_test_datetimes.csv"
-
-        # Set data_loader parameters
-        self.num_features: int = 2
-        self.time_covariates: list = ["week_of_year"]
-        self.input_seq_len: int = 52
-        self.batch_size: int = 1
-        self.output_col: list = [0]
-        self.ts_to_use: Optional[List[int]] = [i for i in range(127)]  # Use all series
-
-        # Set model parameters
-        self.Sigma_v_bounds: tuple = (None, None)
-        self.decaying_factor: float = 0.999
-        self.device: str = "cpu"
-        self.init_params: Optional[str] = None
-        self.variance_inject: float = 0.0
-        self.variance_threshold: float = 1
-        self.variance_action: str = "add"
-
-        # Set training parameters
-        self.num_epochs: int = 100
-        self.early_stopping_criteria: str = "rmse"
-        self.patience: int = 10
-        self.min_delta: float = 1e-4
-        self.warmup_epochs: int = 0
-
-        # Set evaluation parameters
-        self.eval_plots: bool = True
-        self.eval_metrics: bool = True
-        self.seansonal_period: int = 52
-
-    @property
-    def x_file(self) -> list:
-        """Dynamically creates the list of x files."""
-        return [self.x_train, self.x_val, self.x_test]
-
-    @property
-    def date_file(self) -> list:
-        """Dynamically creates the list of date files."""
-        return [self.dates_train, self.dates_val, self.dates_test]
-
-    @property
-    def use_AGVI(self) -> bool:
-        """Determines whether to use AGVI based on Sigma_v_bounds."""
-        return self.Sigma_v_bounds[0] is None and self.Sigma_v_bounds[1] is None
-
-    @property
-    def input_size(self) -> int:
-        """Calculates the input size for the model based on other params."""
-        input_size = self.num_features + self.input_seq_len - 1
-        return input_size
-
-    @property
-    def nb_ts(self) -> int:
-        """Calculates the number of time series based on ts_to_use."""
-        if self.ts_to_use is not None:
-            return len(self.ts_to_use)
-        return 1  # Default value if ts_to_use is None
-
-    def display(self):
-        print("\nConfiguration:")
-        # Display both regular attributes and properties
-        for name in dir(self):
-            if not name.startswith("_") and not callable(getattr(self, name)):
-                print(f"  {name}: {getattr(self, name)}")
-        print("\n")
-
-    def save(self, path):
-        with open(path, "w") as f:
-            for name in dir(self):
-                if not name.startswith("_") and not callable(getattr(self, name)):
-                    f.write(f"{name}: {getattr(self, name)}\n")
-
-
 def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
@@ -293,7 +210,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         os.makedirs(output_dir)
 
     # Display and save configuration
-    config.save(os.path.join(output_dir, "config.txt"))
+    config.to_yaml(os.path.join(output_dir, "config.yaml"))
 
     # Initalize states
     cap = 2000
@@ -313,9 +230,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         train_dtl, val_dtl, test_dtl = prepare_dtls(
             config.x_file,
             config.date_file,
-            config.input_seq_len,
-            config.num_features,
-            config.time_covariates,
+            config.data_loader.input_seq_len,
+            config.data_loader.num_features,
+            config.data_loader.time_covariates,
             ts,
         )
         x_means.append(train_dtl.x_mean[0])
@@ -326,48 +243,52 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             input_size=config.input_size,
             use_AGVI=config.use_AGVI,
             seed=config.seed,
-            device=config.device,
-            init_params=config.init_params,
+            device=config.model.device,
+            init_params=config.model.init_params,
         )
 
         # Add plasticity
-        if config.init_params and config.variance_inject != 0.0:
+        if config.model.init_params and config.model.variance_inject != 0.0:
             adjust_params(
                 net,
-                mode=config.variance_action,
-                value=config.variance_inject,
-                threshold=config.variance_threshold,
+                mode=config.model.variance_action,
+                value=config.model.variance_inject,
+                threshold=config.model.variance_threshold,
             )
 
         # Create progress bar
-        pbar = tqdm(range(config.num_epochs), desc=f"Epochs (TS {ts+1}/{config.nb_ts})")
+        pbar = tqdm(
+            range(config.training.num_epochs), desc=f"Epochs (TS {ts+1}/{config.nb_ts})"
+        )
 
         # Initialize early stopping
         early_stopping = EarlyStopping(
-            criteria=config.early_stopping_criteria,
-            patience=config.patience,
-            min_delta=config.min_delta,
-            warmup_epochs=config.warmup_epochs,
+            criteria=config.training.early_stopping_criteria,
+            patience=config.training.patience,
+            min_delta=config.training.min_delta,
+            warmup_epochs=config.training.warmup_epochs,
         )
 
         # Prepare decaying sigma_v if not using AGVI
         if not config.use_AGVI:
-            sigma_start, sigma_end = config.Sigma_v_bounds
+            sigma_start, sigma_end = config.model.Sigma_v_bounds
             if sigma_start is None or sigma_end is None:
                 raise ValueError(
                     "Sigma_v_bounds must be defined when AGVI is disabled."
                 )
             sigma_start = float(sigma_start)
             sigma_end = float(sigma_end)
-            if config.num_epochs <= 1:
+            if config.training.num_epochs <= 1:
                 decaying_sigma_v = [sigma_start]
             else:
-                decay_factor = float(config.decaying_factor)
+                decay_factor = float(config.model.decaying_factor)
                 exponents = decay_factor ** np.arange(
-                    config.num_epochs, dtype=np.float32
+                    config.training.num_epochs, dtype=np.float32
                 )
                 if np.isclose(exponents[0], exponents[-1]) or decay_factor <= 0.0:
-                    weights = np.linspace(1.0, 0.0, config.num_epochs, dtype=np.float32)
+                    weights = np.linspace(
+                        1.0, 0.0, config.training.num_epochs, dtype=np.float32
+                    )
                 else:
                     weights = (exponents - exponents[-1]) / (
                         exponents[0] - exponents[-1]
@@ -383,13 +304,13 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             train_log_lik = []
 
             train_batch_iter = train_dtl.create_data_loader(
-                batch_size=config.batch_size,
+                batch_size=config.data_loader.batch_size,
                 shuffle=False,
             )
 
             # Initialize look-back buffer and LSTM state container
             look_back_buffer = LookBackBuffer(
-                input_seq_len=config.input_seq_len, nb_ts=1
+                input_seq_len=config.data_loader.input_seq_len, nb_ts=1
             )
 
             # get current sigma_v if not using AGVI
@@ -400,7 +321,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             for x, y in train_batch_iter:
 
                 # get current batch size
-                B = config.batch_size
+                B = config.data_loader.batch_size
 
                 # set LSTM states for the current batch
                 if epoch != 0:
@@ -409,15 +330,17 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
                     var_y = np.full(
-                        (B * len(config.output_col),), sigma_v**2, dtype=np.float32
+                        (B * len(config.data_loader.output_col),),
+                        sigma_v**2,
+                        dtype=np.float32,
                     )
 
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
                     look_back_buffer.initialize(
-                        initial_mu=x[: config.input_seq_len],
+                        initial_mu=x[: config.data_loader.input_seq_len],
                         initial_var=np.zeros_like(
-                            x[: config.input_seq_len], dtype=np.float32
+                            x[: config.data_loader.input_seq_len], dtype=np.float32
                         ),
                         indices=[0],
                     )
@@ -521,7 +444,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             look_back_buffer.needs_initialization = [True]
 
             val_batch_iter = val_dtl.create_data_loader(
-                batch_size=config.batch_size,
+                batch_size=config.data_loader.batch_size,
                 shuffle=False,
             )
 
@@ -529,7 +452,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             for x, y in val_batch_iter:
 
                 # get current batch size
-                B = config.batch_size
+                B = config.data_loader.batch_size
 
                 # set LSTM states for the current batch
                 net.set_lstm_states(lstm_states)
@@ -537,15 +460,17 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
                     var_y = np.full(
-                        (B * len(config.output_col),), sigma_v**2, dtype=np.float32
+                        (B * len(config.data_loader.output_col),),
+                        sigma_v**2,
+                        dtype=np.float32,
                     )
 
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
                     look_back_buffer.initialize(
-                        initial_mu=x[: config.input_seq_len],
+                        initial_mu=x[: config.data_loader.input_seq_len],
                         initial_var=np.zeros_like(
-                            x[: config.input_seq_len], dtype=np.float32
+                            x[: config.data_loader.input_seq_len], dtype=np.float32
                         ),
                         indices=[0],
                     )
@@ -649,7 +574,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
             # Check for early stopping
             val_score = (
-                val_log_lik if config.early_stopping_criteria == "log_lik" else val_mse
+                val_log_lik
+                if config.training.early_stopping_criteria == "log_lik"
+                else val_mse
             )
             if early_stopping(
                 val_score,
@@ -684,7 +611,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         look_back_buffer.needs_initialization = [True]
 
         test_batch_iter = test_dtl.create_data_loader(
-            batch_size=config.batch_size,
+            batch_size=config.data_loader.batch_size,
             shuffle=False,
         )
 
@@ -695,7 +622,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         ) in test_batch_iter:
 
             # get current batch size
-            B = config.batch_size
+            B = config.data_loader.batch_size
 
             # set LSTM states for the current batch
             net.set_lstm_states(lstm_states)
@@ -703,15 +630,17 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare obsevation noise matrix
             if not config.use_AGVI:
                 var_y = np.full(
-                    (B * len(config.output_col),), sigma_v**2, dtype=np.float32
+                    (B * len(config.data_loader.output_col),),
+                    sigma_v**2,
+                    dtype=np.float32,
                 )
 
             # prepare look_back buffer
             if look_back_buffer.needs_initialization[0]:
                 look_back_buffer.initialize(
-                    initial_mu=x[: config.input_seq_len],
+                    initial_mu=x[: config.data_loader.input_seq_len],
                     initial_var=np.zeros_like(
-                        x[: config.input_seq_len], dtype=np.float32
+                        x[: config.data_loader.input_seq_len], dtype=np.float32
                     ),
                     indices=[0],
                 )
@@ -949,16 +878,15 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    # list_of_seeds = [3, 67, 9, 17, 99]  # [1, 42, 235, 1234, 2024]
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
-
-    list_of_seeds = [1]
-    list_of_experiments = ["train100"]
-
+    list_of_seeds = [1, 3, 17, 42, 99]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
             print(f"Running experiment: {exp} with seed {seed}")
+
+            # Model category
+            model_category = "locals"
 
             # Create folders for storing results
             output_base_dir = f"out/seed{seed}/{exp}"
@@ -966,31 +894,30 @@ def main(Train=True, Eval=True, log_wandb=True):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_local-loglik"
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
 
             # Create configuration
-            config = Config()
-            config.warmup_epochs = 5
+            config = Config.from_yaml(f"experiments/configurations/{model_category}_HQ127.yaml")
+
             config.seed = seed
-            config.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.eval_plots = False
-            config.device = "cuda" if torch.cuda.is_available() else "cpu"
-            config.early_stopping_criteria = "loglik"
+            config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
+            config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
+            config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.data_loader.batch_size = 1
 
             # Convert config object to a dictionary for W&B
-            config_dict = {
-                k: getattr(config, k)
-                for k in dir(config)
-                if not k.startswith("_") and not callable(getattr(config, k))
-            }
+            config_dict = config.wandb_dict()
+            config_dict["model_type"] = model_category
+
+            # Display config
+            config.display()
 
             if log_wandb:
                 # Initialize W&B run
                 run = init_run(
                     project="Local_Model_Run",
                     group="Time_Series_Local_Models",
-                    name=f"{exp}_Seed{seed}",
+                    name=f"{model_category}_{exp}_Seed{seed}",
                     config=config_dict,
                     reinit=True,  # Allows re-initializing in a loop
                     save_code=True,  # Saves the main script

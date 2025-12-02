@@ -1,0 +1,319 @@
+seed: 1
+
+data_paths:
+  x_train: "data/hq/train100/split_train_values.csv"
+  dates_train: "data/hq/train100/split_train_datetimes.csv"
+  x_val: "data/hq/split_val_values.csv"
+  dates_val: "data/hq/split_val_datetimes.csv"
+  x_test: "data/hq/split_test_values.csv"
+  dates_test: "data/hq/split_test_datetimes.csv"
+
+data_loader:
+  num_features: 2
+  time_covariates: ["week_of_year"]
+  scale_method: "standard"
+  order_mode: "by_window"
+  input_seq_len: 52
+  batch_size: 16
+  output_col: [0]
+  ts_to_use:
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99,
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      107,
+      108,
+      109,
+      110,
+      111,
+      112,
+      113,
+      114,
+      115,
+      116,
+      117,
+      118,
+      119,
+      120,
+      121,
+      122,
+      123,
+      124,
+      125,
+      126,
+    ]
+
+embeddings:
+  mapped:
+    embedding_map_dir: "data/hq/ts_embedding_map.csv"
+    embedding_map_sizes:
+      dam_id: 2
+      dam_type_id: 2
+      sensor_type_id: 2
+      direction_id: 2
+      sensor_id: 2
+    embedding_map_initializer:
+      dam_id: "normal"
+      dam_type_id: "normal"
+      sensor_type_id: "normal"
+      direction_id: "normal"
+      sensor_id: "normal"
+    embedding_map_labels:
+      dam_id: ["DRU", "GOU", "LGA", "LTU", "MAT", "M5"]
+      dam_type_id: ["Run-of-River", "Reservoir"]
+      sensor_type_id: ["PIZ", "EXT", "PEN"]
+      direction_id: ["NA", "X", "Y", "Z"]
+      sensor_id:
+        [
+          "sensor_0",
+          "sensor_1",
+          "sensor_2",
+          "sensor_3",
+          "sensor_4",
+          "sensor_5",
+          "sensor_6",
+          "sensor_7",
+          "sensor_8",
+          "sensor_9",
+          "sensor_10",
+          "sensor_11",
+          "sensor_12",
+          "sensor_13",
+          "sensor_14",
+          "sensor_15",
+          "sensor_16",
+          "sensor_17",
+          "sensor_18",
+          "sensor_19",
+          "sensor_20",
+          "sensor_21",
+          "sensor_22",
+          "sensor_23",
+          "sensor_24",
+          "sensor_25",
+          "sensor_26",
+          "sensor_27",
+          "sensor_28",
+          "sensor_29",
+          "sensor_30",
+          "sensor_31",
+          "sensor_32",
+          "sensor_33",
+          "sensor_34",
+          "sensor_35",
+          "sensor_36",
+          "sensor_37",
+          "sensor_38",
+          "sensor_39",
+          "sensor_40",
+          "sensor_41",
+          "sensor_42",
+          "sensor_43",
+          "sensor_44",
+          "sensor_45",
+          "sensor_46",
+          "sensor_47",
+          "sensor_48",
+          "sensor_49",
+          "sensor_50",
+          "sensor_51",
+          "sensor_52",
+          "sensor_53",
+          "sensor_54",
+          "sensor_55",
+          "sensor_56",
+          "sensor_57",
+          "sensor_58",
+          "sensor_59",
+          "sensor_60",
+          "sensor_61",
+          "sensor_62",
+          "sensor_63",
+          "sensor_64",
+          "sensor_65",
+          "sensor_66",
+          "sensor_67",
+          "sensor_68",
+          "sensor_69",
+          "sensor_70",
+          "sensor_71",
+          "sensor_72",
+          "sensor_73",
+          "sensor_74",
+          "sensor_75",
+          "sensor_76",
+          "sensor_77",
+          "sensor_78",
+          "sensor_79",
+          "sensor_80",
+          "sensor_81",
+          "sensor_82",
+          "sensor_83",
+          "sensor_84",
+          "sensor_85",
+          "sensor_86",
+          "sensor_87",
+          "sensor_88",
+          "sensor_89",
+          "sensor_90",
+          "sensor_91",
+          "sensor_92",
+          "sensor_93",
+          "sensor_94",
+          "sensor_95",
+          "sensor_96",
+          "sensor_97",
+          "sensor_98",
+          "sensor_99",
+          "sensor_100",
+          "sensor_101",
+          "sensor_102",
+          "sensor_103",
+          "sensor_104",
+          "sensor_105",
+          "sensor_106",
+          "sensor_107",
+          "sensor_108",
+          "sensor_109",
+          "sensor_110",
+          "sensor_111",
+          "sensor_112",
+          "sensor_113",
+          "sensor_114",
+          "sensor_115",
+          "sensor_116",
+          "sensor_117",
+          "sensor_118",
+          "sensor_119",
+          "sensor_120",
+          "sensor_121",
+          "sensor_122",
+          "sensor_123",
+          "sensor_124",
+          "sensor_125",
+          "sensor_126",
+        ]
+
+model:
+  Sigma_v_bounds: [null, null]
+  decaying_factor: 0.99
+  device: "cuda"
+  lstm_hidden_sizes: [40, 40, 40]
+
+training:
+  num_epochs: 100
+  early_stopping_criteria: "loglik"
+  patience: 10
+  min_delta: 0.0001
+  warmup_epochs: 0
+  shuffle: true
+
+evaluation:
+  eval_plots: false
+  eval_metrics: true
+  seansonal_period: 52
+  embed_plots: false
