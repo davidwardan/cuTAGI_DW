@@ -109,57 +109,60 @@ def log_model_parameters(model, epoch, total_epochs, logging_frequency=2):
     if (epoch % logging_frequency != 0) and not is_last_epoch:
         return  # Not time to log, skip
 
-    try:
-        log_payload = {}
-        state_dict = model.state_dict()
+    log_payload = {}
+    state_dict = model.state_dict()
 
-        for layer_name, params in state_dict.items():
-            is_lstm = "lstm" in layer_name.lower()
-            gate_names = ("forget", "input", "candidate", "output")
-            param_labels = ("mu_w", "var_w", "mu_b", "var_b")
+    for layer_name, params in state_dict.items():
+        is_lstm = "lstm" in layer_name.lower()
+        gate_names = ("forget", "input", "candidate", "output")
+        param_labels = ("mu_w", "var_w", "mu_b", "var_b")
 
-            for param, label in zip(params, param_labels):
-                if param is None:
-                    continue
+        for param, label in zip(params, param_labels):
+            if param is None:
+                continue
 
-                values = np.asarray(param)
+            values = np.asarray(param)
 
-                if is_lstm:
-                    flat_values = values.reshape(-1)
+            # Skip empty parameters (e.g. bias when bias=False)
+            if values.size == 0:
+                continue
 
-                    # Check divisibility and split for LSTM gates
-                    if flat_values.size > 0 and flat_values.size % 4 == 0:
-                        gate_chunks = np.split(flat_values, 4)
+            # Handle NaNs for safe logging
+            if np.isnan(values).any():
+                values = np.nan_to_num(values, nan=0.0)
 
-                        for gate_name, gate_data in zip(gate_names, gate_chunks):
+            if is_lstm:
+                flat_values = values
 
-                            # Create a hierarchical key for W&B UI
-                            base_key = f"params/{layer_name}/{label}_{gate_name}"
+                # Check divisibility and split for LSTM gates
+                if flat_values.size > 0 and flat_values.size % 4 == 0:
+                    gate_chunks = np.split(flat_values, 4)
 
-                            # Log histogram using proxy function
-                            hist = _create_histogram(gate_data, num_bins=512)
-                            if hist is not None:
-                                log_payload[f"{base_key}"] = hist
+                    for gate_name, gate_data in zip(gate_names, gate_chunks):
 
-                        continue  # Skip the general histogram logging
+                        # params/LSTM.0/mu_w/forget
+                        base_key = f"params/{layer_name}/{label}/{gate_name}"
 
-                    else:
-                        warnings.warn(
-                            f"LSTM parameter {layer_name}/{label} has size "
-                            f"{flat_values.size}, which is not divisible by 4. "
-                            "Logging as a single histogram."
-                        )
+                        # Log histogram using proxy function
+                        hist = _create_histogram(gate_data, num_bins=512)
+                        if hist is not None:
+                            log_payload[f"{base_key}"] = hist
 
-                # Fallback for non-LSTM layers or failed split
-                hist_fallback = _create_histogram(values, num_bins=512)
-                if hist_fallback is not None:
-                    log_payload[f"params/{layer_name}/{label}/hist"] = hist_fallback
+                    continue  # Skip the general histogram logging
 
-        return log_payload
+                else:
+                    warnings.warn(
+                        f"LSTM parameter {layer_name}/{label} has size "
+                        f"{flat_values.size}, which is not divisible by 4. "
+                        "Logging as a single histogram."
+                    )
 
-    except Exception as e:
-        warnings.warn(f"Failed to log model parameters to W&B: {e}")
-        return None
+            # Fallback for non-LSTM layers or failed split
+            hist_fallback = _create_histogram(values, num_bins=512)
+            if hist_fallback is not None:
+                log_payload[f"params/{layer_name}/{label}/hist"] = hist_fallback
+
+    return log_payload
 
 
 __all__ = [

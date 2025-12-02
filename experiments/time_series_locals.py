@@ -2,7 +2,12 @@ import os
 import numpy as np
 from tqdm import tqdm
 from typing import List, Optional
-from experiments.wandb_helpers import create_histogram, finish_run, init_run, log_data
+from experiments.wandb_helpers import (
+    log_model_parameters,
+    init_run,
+    log_data,
+    finish_run,
+)
 import torch
 
 from examples.data_loader import (
@@ -438,13 +443,13 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     v_pred = flat_v[::2]  # even indices
                     var_y = flat_m[1::2]  # odd indices var_v
 
-                s_pred = np.sqrt(v_pred + var_y)
+                s_pred_total = np.sqrt(v_pred + var_y)
 
                 # Compute metrics
                 mask = ~np.isnan(y.flatten())
                 y_masked = y.flatten()[mask]
                 m_pred_masked = m_pred[mask]
-                s_pred_masked = s_pred[mask]
+                s_pred_masked = s_pred_total[mask]
 
                 if y_masked.size > 0:
                     batch_mse = metric.rmse(m_pred_masked, y_masked)
@@ -457,7 +462,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # Store predictions
                 train_states.update(
                     new_mu=m_pred,
-                    new_std=s_pred,
+                    new_std=s_pred_total,
                     indices=indices,
                     time_step=train_time_step,
                 )
@@ -475,29 +480,28 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 )
 
                 # update aleatoric uncertainty if using AGVI
-                if config.use_AGVI:
-                    (
-                        mu_v2bar_post,
-                        _,
-                    ) = update_aleatoric_uncertainty(
-                        mu_z0=m_pred,
-                        var_z0=v_pred,
-                        mu_v2bar=flat_m[1::2],
-                        var_v2bar=flat_v[1::2],
-                        y=y.flatten(),
-                    )
-                    var_y = mu_v2bar_post  # updated aleatoric uncertainty
+                # if config.use_AGVI:
+                #     (
+                #         mu_v2bar_post,
+                #         _,
+                #     ) = update_aleatoric_uncertainty(
+                #         mu_z0=m_pred,
+                #         var_z0=v_pred,
+                #         mu_v2bar=flat_m[1::2],
+                #         var_v2bar=flat_v[1::2],
+                #         y=y.flatten(),
+                #     )
+                #     var_y = mu_v2bar_post  # updated aleatoric uncertainty
 
                 # Update LSTM states for the current batch
                 lstm_states = net.get_lstm_states()
 
-                var_post_total = v_post + var_y
-                var_post_total = np.clip(var_post_total, a_min=1e-6, a_max=2.0)
+                v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
                     new_mu=m_post,
-                    new_var=var_post_total,
+                    new_var=v_post,
                     indices=[0],
                 )
 
@@ -570,14 +574,13 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     v_pred = flat_v[::2]  # even indices
                     var_y = flat_m[1::2]  # odd indices var_v
 
-                v_pred += var_y
-                s_pred = np.sqrt(v_pred)
+                s_pred_total = np.sqrt(v_pred + var_y)
 
                 # Compute metrics
                 mask = ~np.isnan(y.flatten())
                 y_masked = y.flatten()[mask]
                 m_pred_masked = m_pred[mask]
-                s_pred_masked = s_pred[mask]
+                s_pred_masked = s_pred_total[mask]
 
                 if y_masked.size > 0:
                     batch_mse = metric.rmse(m_pred_masked, y_masked)
@@ -590,7 +593,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # Store predictions
                 val_states.update(
                     new_mu=m_pred,
-                    new_std=s_pred,
+                    new_std=s_pred_total,
                     indices=indices,
                     time_step=val_time_step,
                 )
@@ -620,53 +623,26 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
             if wandb_run:
                 # Log metrics
-                log_payload = {
+                metrics_payload = {
                     "epoch": epoch,
                     "train_rmse": train_mse,
                     "train_log_lik": train_log_lik,
                     "val_rmse": val_mse,
                     "val_log_lik": val_log_lik,
                 }
+                if log_payload is None:
+                    log_payload = metrics_payload
+                else:
+                    log_payload.update(metrics_payload)
                 if not config.use_AGVI:
                     log_payload["sigma_v"] = sigma_v
 
-                # Log parameter histograms
-                log_param_freq = 1  # logs each n epochs
-                if (epoch % log_param_freq == 0) or (epoch == config.num_epochs - 1):
-                    try:
-                        state_dict = net.state_dict()
-                        for layer_name, params in state_dict.items():
-                            is_lstm = "lstm" in layer_name.lower()
-                            gate_names = ("forget", "input", "candidate", "output")
-                            param_labels = ("mu_w", "var_w", "mu_b", "var_b")
-                            for param, label in zip(params, param_labels):
-                                if param is None:
-                                    continue
-                                values = np.asarray(param)
-                                if is_lstm:
-                                    flat_values = values.reshape(-1)
-                                    gate_size = flat_values.size // 4
-                                    if gate_size > 0 and flat_values.size % 4 == 0:
-                                        for idx, gate in enumerate(gate_names):
-                                            start = idx * gate_size
-                                            end = start + gate_size
-                                            histogram = create_histogram(
-                                                flat_values[start:end]
-                                            )
-                                            if histogram is not None:
-                                                log_payload[
-                                                    f"params/{layer_name}/{label}_{gate}"
-                                                ] = histogram
-                                        continue
-                                histogram = create_histogram(values)
-                                if histogram is not None:
-                                    log_payload[f"params/{layer_name}/{label}"] = (
-                                        histogram
-                                    )
-                    except Exception as e:
-                        print(
-                            f"Warning: Could not log model parameters to W&B. Error: {e}"
-                        )
+                # log current lstm states
+                # lstm_states_statistics = lstm_state_container.get_statistics()
+                # # iterate over layers
+                # for layer_idx in lstm_states_statistics.keys():
+                #     for stat_name, stat_value in lstm_states_statistics[layer_idx].items():
+                #         log_payload[f"LSTM.{layer_idx}_{stat_name}"] = stat_value
 
                 # Send all logs for this epoch
                 log_data(log_payload, wandb_run=wandb_run)
@@ -764,13 +740,12 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            v_pred += var_y
-            s_pred = np.sqrt(v_pred)
+            s_pred_total = np.sqrt(v_pred + var_y)
 
             # Store predictions
             test_states.update(
                 new_mu=m_pred,
-                new_std=s_pred,
+                new_std=s_pred_total,
                 indices=ts,
                 time_step=test_time_step,
             )
@@ -918,41 +893,28 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             )
 
             # Standardize test with training mean and std
-            train_mean = np.nanmean(yt_train)
-            train_std = np.nanstd(yt_train)
-
-            stand_yt_test = normalizer.standardize(yt_test, train_mean, train_std)
-            stand_ypred_test = normalizer.standardize(ypred_test, train_mean, train_std)
-            stand_spred_test = spred_test / (train_std + 1e-6)
-
-            if np.any(mask_test):
-                y_true = stand_yt_test[mask_test]
-                y_pred = stand_ypred_test[mask_test]
-                s_pred = stand_spred_test[mask_test]
-                max_std = 3.0 * np.std(y_true - y_pred)
-                s_pred = np.where(
-                    s_pred > max_std, np.nan, np.clip(s_pred, 1e-6, max_std)
-                )
-
-                # normalize data
-                test_rmse = metric.rmse(y_pred, y_true)
-                test_log_lik = metric.log_likelihood(y_pred, y_true, s_pred)
-                test_mae = metric.mae(y_pred, y_true)
-
-                denom = np.sum(np.abs(y_true))
-                if denom == 0:
-                    test_p50 = np.nan
-                    test_p90 = np.nan
-                else:
-                    test_p50 = metric.Np50(y_true, y_pred)
-                    test_p90 = metric.Np90(y_true, y_pred, s_pred)
-
+            if config.scale_method == "standard":
+                train_mean = np.nanmean(yt_train)
+                train_std = np.nanstd(yt_train)
             else:
-                test_rmse = np.nan
-                test_log_lik = np.nan
-                test_mae = np.nan
-                test_p50 = np.nan
-                test_p90 = np.nan
+                # manual standardization
+                train_mean = 0.0
+                train_std = 1.0
+
+            stand_y_true = normalizer.standardize(yt_test, train_mean, train_std)
+            stand_y_pred = normalizer.standardize(ypred_test, train_mean, train_std)
+            stand_s_pred = normalizer.standardize_std(spred_test, train_std)
+
+            # normalize data
+            test_rmse = metric.rmse(stand_y_pred, stand_y_true)
+            test_log_lik = metric.log_likelihood(
+                stand_y_pred, stand_y_true, stand_s_pred
+            )
+            test_mae = metric.mae(stand_y_pred, stand_y_true)
+            test_p50 = metric.Np50(
+                stand_y_true, stand_y_pred
+            )  # TODO: check without normalization p50 should be mae
+            test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
 
             # Append to lists
             test_rmse_list.append(test_rmse)
@@ -987,8 +949,12 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [3, 67, 9, 17, 99]  # [1, 42, 235, 1234, 2024]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    # list_of_seeds = [3, 67, 9, 17, 99]  # [1, 42, 235, 1234, 2024]
+    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+
+    list_of_seeds = [1]
+    list_of_experiments = ["train100"]
+
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -1000,7 +966,7 @@ def main(Train=True, Eval=True, log_wandb=True):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_local"
+            experiment_name = f"seed{seed}/{exp}/experiment01_local-loglik"
 
             # Create configuration
             config = Config()
@@ -1010,6 +976,7 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             config.eval_plots = False
             config.device = "cuda" if torch.cuda.is_available() else "cpu"
+            config.early_stopping_criteria = "loglik"
 
             # Convert config object to a dictionary for W&B
             config_dict = {

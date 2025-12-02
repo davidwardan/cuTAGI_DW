@@ -28,11 +28,6 @@ class EmbeddingUpdateTracker:
         # mu_delta shape: (B, embedding_size)
         update_norms = np.linalg.norm(mu_delta, axis=1)
 
-        # Accumulate norms for each series
-        # We need to handle potential duplicate indices in a batch if that ever happens,
-        # though usually batches are unique series or handled sequentially.
-        # Using np.add.at is safe for duplicate indices.
-
         # Filter out -1 indices (padding)
         valid_mask = indices != -1
         valid_indices = indices[valid_mask]
@@ -84,6 +79,30 @@ class EmbeddingUpdateTracker:
         plt.close()
         print(f"Saved embedding update plot to {os.path.join(save_dir, filename)}")
 
+    @staticmethod
+    def track_embedding_coordinates(
+        embeddings,
+        config,
+        coords_history: list,
+    ):
+        """
+        Snapshot embeddings in 2D using PCA and optionally log to W&B.
+
+        Uses embeddings.as_coordinates(n=2) -> (mu_coords, var_coords).
+
+        - coords_history: list to which (num_embeddings, 2) mu_coords arrays are appended.
+        """
+        if embeddings is None:
+            return
+        if not hasattr(embeddings, "as_coordinates"):
+            return
+        if config.total_embedding_size <= 0:
+            return
+
+        # (num_embeddings, 2) for means; we ignore the projected variances for now
+        mu_coords, var_coords = embeddings.as_coordinates(n=2)
+        coords_history.append(mu_coords.copy())
+
 
 class ParameterTracker:
     """
@@ -100,7 +119,11 @@ class ParameterTracker:
         self.current_epoch = 0
 
     def track_parameter(
-        self, layer_name: str, param_type: str, indices: list, label: str
+        self,
+        layer_name: str,
+        param_type: str,
+        label: str,
+        indices: Optional[list] = None,
     ):
         """
         Registers a parameter to track.
@@ -108,8 +131,8 @@ class ParameterTracker:
         Args:
             layer_name: Name of the layer in state_dict (e.g., "LSTM.0", "Linear.2")
             param_type: "weight" or "bias" (corresponds to mu_w/var_w or mu_b/var_b)
-            indices: List of flat indices of the parameter in the array
             label: Unique label for plotting
+            indices: List of flat indices of the parameter in the array. If None, tracks all.
         """
         if isinstance(indices, int):
             indices = [indices]
@@ -162,6 +185,13 @@ class ParameterTracker:
             else:
                 print(f"Warning: Unknown param_type '{param_type}'. Skipping {label}.")
                 continue
+
+            # If indices is None, track all indices
+            if indices is None:
+                indices = list(range(len(vals_mu)))
+                # Update the stored indices so we don't have to regenerate them every time
+                # and so plotting knows what indices were tracked.
+                param_info["indices"] = indices
 
             for idx in indices:
                 if idx < len(vals_mu):

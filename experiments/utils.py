@@ -416,27 +416,21 @@ def build_model(
 
     net = Sequential(*layers)
 
-    # hard set mu_b to 1.0 for all LSTM layers
-    # state_dict = net.state_dict()
-    # for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
-    #     if layer_name.split(".")[0].lower() == "lstm":
-    #         b_gate_size = len(mu_b) // 4
-    #         gate_size = len(mu_w) // 4
+    # shift LSTM biases
+    state_dict = net.state_dict()
+    for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+        if layer_name.split(".")[0].lower() == "lstm":
+            mu_b = np.array(mu_b, dtype=np.float32)
 
-    #         print(f"Adjusting LSTM layer: {layer_name}")
-    #         print(f" - Bias gate size: {b_gate_size}, Weight gate size: {gate_size}")
+            # option 1: shift only the bias for the forget gate which is the first quarter
+            gate_size = len(mu_b) // 4
+            mu_b[:gate_size] += 1.0
 
-    #         # -- bias of forget gate
-    #         # forget is the first quarter
-    #         mu_b = mu_b.copy()
-    #         mu_b[:b_gate_size] = [1.0] * b_gate_size
+            # option2: shift all biases by constant
+            # mu_b += 2.0
 
-    #         # -- weights of forget gate
-    #         mu_w = mu_w.copy()
-    #         mu_w[:gate_size] = mu_w[:gate_size] + [0.05] * gate_size # shift weights to favor forget gate
-
-    #         state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
-    # net.load_state_dict(state_dict)
+            state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+    net.load_state_dict(state_dict)
 
     if init_params is not None:
         # reset_param_variance(net, init_params)
@@ -534,8 +528,6 @@ def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None)
         np.copyto(y, m_pred, where=nan_indices)
 
         # Set variance of missing observations to 0 (or a small eps)
-        # This effectively tells the Kalman filter to trust the prediction
-        # for these points.
         np.copyto(var_y, 0.0, where=nan_indices)
 
     # Clean all inputs to the Kalman filter before using them.
@@ -801,6 +793,8 @@ def reset_param_variance(net, param_dir):
 
 # Similarity / Distance Matrices
 def cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
+    if emb.shape[1] == 1:
+        return np.ones((emb.shape[0], emb.shape[0]), dtype=np.float32)
     emb = np.asarray(emb, dtype=np.float32)
     norms = np.linalg.norm(emb, axis=1, keepdims=True)
     norms = np.maximum(norms, 1e-12)
@@ -809,6 +803,8 @@ def cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
 
 
 def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+    if mu.shape[1] == 1:
+        return np.zeros((mu.shape[0], mu.shape[0]), dtype=np.float32)
     mu = np.asarray(mu, dtype=np.float32)
     var = np.asarray(var, dtype=np.float32)
     if mu.shape != var.shape:
@@ -903,6 +899,22 @@ def plot_series(
 
 
 def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
+    if mu_embedding.shape[1] < 2:
+        plt.figure(figsize=(8, 2))
+        plt.scatter(mu_embedding[:, 0], np.zeros(n_series), c="blue", alpha=0.7)
+        if labels is not None:
+            for i, label in enumerate(labels):
+                plt.text(mu_embedding[i, 0], 0, label)
+        else:
+            for i in range(n_series):
+                plt.text(mu_embedding[i, 0], 0, str(i))
+        plt.yticks([])
+        plt.xlabel("Embedding Dimension 1")
+        plt.grid(True)
+        emb_plot_path = in_dir / out_path
+        plt.savefig(emb_plot_path, dpi=600, bbox_inches="tight")
+        plt.close()
+        return
     pca = PCA(n_components=2)
     mu_emb_2d = pca.fit_transform(mu_embedding)
 

@@ -10,7 +10,7 @@ from experiments.wandb_helpers import (
     log_data,
     finish_run,
 )
-import torch
+from experiments.config import Config
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from experiments.data_loader import GlobalBatchLoader
@@ -52,199 +52,6 @@ mpl.rcParams.update(
         "lines.linewidth": 1,  # Set line width to 1
     }
 )
-
-
-# TODO: to remove
-def track_embedding_coordinates(
-    embeddings,
-    config,
-    coords_history: list,
-):
-    """
-    Snapshot embeddings in 2D using PCA and optionally log to W&B.
-
-    Uses embeddings.as_coordinates(n=2) -> (mu_coords, var_coords).
-
-    - coords_history: list to which (num_embeddings, 2) mu_coords arrays are appended.
-    """
-    if embeddings is None:
-        return
-    if not hasattr(embeddings, "as_coordinates"):
-        return
-    if config.total_embedding_size <= 0:
-        return
-
-    # (num_embeddings, 2) for means; we ignore the projected variances for now
-    mu_coords, var_coords = embeddings.as_coordinates(n=2)
-    coords_history.append(mu_coords.copy())
-
-
-class Config:
-    def __init__(self):
-        # Seed for reproducibility
-        self.seed: int = 1
-
-        # Set data paths
-        self.x_train = "data/hq/train_1.0/split_train_values.csv"
-        self.dates_train = "data/hq/train_1.0/split_train_datetimes.csv"
-        self.x_val = "data/hq/split_val_values.csv"
-        self.dates_val = "data/hq/split_val_datetimes.csv"
-        self.x_test = "data/hq/split_test_values.csv"
-        self.dates_test = "data/hq/split_test_datetimes.csv"
-
-        # Set data_loader parameters
-        self.num_features: int = 2
-        self.time_covariates: list = ["week_of_year"]
-        self.scale_method: str = "standard"
-        self.order_mode: str = "by_window"
-        self.input_seq_len: int = 52
-        self.batch_size: int = 16
-        self.output_col: list = [0]
-        self.ts_to_use: Optional[List[int]] = [i for i in range(127)]  # Use all series
-
-        # 1. For standard (one-per-series) embeddings:
-        self.embedding_size: Optional[int] = None
-        self.embedding_initializer: str = "normal"
-
-        # 2. For mapped (shared) embeddings:
-        self.embedding_map_dir: Optional[str] = None
-        self.embedding_map_sizes = {
-            "dam_id": 3,
-            "dam_type_id": 3,
-            "sensor_type_id": 3,
-            "direction_id": 3,
-            "sensor_id": 3,
-        }
-        self.embedding_map_initializer = {
-            "dam_id": "normal",
-            "dam_type_id": "normal",
-            "sensor_type_id": "normal",
-            "direction_id": "normal",
-            "sensor_id": "normal",
-        }
-        self.embedding_map_labels = {
-            "dam_id": ["DRU", "GOU", "LGA", "LTU", "MAT", "M5"],
-            "dam_type_id": ["Run-of-River", "Reservoir"],
-            "sensor_type_id": ["PIZ", "EXT", "PEN"],
-            "direction_id": ["NA", "X", "Y", "Z"],
-            "sensor_id": [f"sensor_{i}" for i in self.ts_to_use],
-        }
-
-        # Set model parameters
-        self.Sigma_v_bounds: tuple = (None, None)
-        self.decaying_factor: float = 0.99
-        self.device: str = "cuda"
-        self.lstm_hidden_sizes: List[int] = [40, 40]
-
-        # Set training parameters
-        self.num_epochs: int = 100
-        self.early_stopping_criteria: str = "rmse"
-        self.patience: int = 10
-        self.min_delta: float = 1e-4
-        self.warmup_epochs: int = 0
-        self.shuffle: bool = True
-
-        # Set evaluation parameters
-        self.eval_plots: bool = False
-        self.eval_metrics: bool = True
-        self.seansonal_period: int = 52
-        self.embed_plots: bool = False
-
-    @property
-    def x_file(self) -> list:
-        """Dynamically creates the list of x files."""
-        return [self.x_train, self.x_val, self.x_test]
-
-    @property
-    def date_file(self) -> list:
-        """Dynamically creates the list of date files."""
-        return [self.dates_train, self.dates_val, self.dates_test]
-
-    @property
-    def use_AGVI(self) -> bool:
-        """Determines whether to use AGVI based on Sigma_v_bounds."""
-        return self.Sigma_v_bounds[0] is None and self.Sigma_v_bounds[1] is None
-
-    @property
-    def use_mapped_embeddings(self) -> bool:
-        """True if mapped embeddings are configured."""
-        return self.embedding_map_dir is not None
-
-    @property
-    def use_standard_embeddings(self) -> bool:
-        """True if standard (one-per-series) embeddings are configured."""
-        return (
-            not self.use_mapped_embeddings
-            and self.embedding_size is not None
-            and self.embedding_size > 0
-        )
-
-    @property
-    def total_embedding_size(self) -> int:
-        """Calculates the total embedding dimension based on configuration."""
-        if self.use_mapped_embeddings:
-            return sum(self.embedding_map_sizes.values())
-        if self.use_standard_embeddings:
-            return self.embedding_size
-        return 0  # No embeddings
-
-    @property
-    def input_size(self) -> int:
-        """Calculates the total input size for the model."""
-        base_size = self.num_features + self.input_seq_len - 1
-        return base_size + self.total_embedding_size
-
-    @property
-    def nb_ts(self) -> int:
-        """Calculates the number of time series based on ts_to_use."""
-        if self.ts_to_use is not None:
-            return len(self.ts_to_use)
-        return 1
-
-    @property
-    def plot_embeddings(self) -> bool:
-        """
-        Determines whether to plot embeddings.
-        """
-        return self.use_standard_embeddings
-
-    def display(self):
-        print("\nConfiguration:")
-        # Display both regular attributes and properties
-        for name in dir(self):
-            if not name.startswith("_") and not callable(getattr(self, name)):
-                print(f"  {name}: {getattr(self, name)}")
-        print("\n")
-
-    def save(self, path):
-        with open(path, "w") as f:
-            for name in dir(self):
-                if not name.startswith("_") and not callable(getattr(self, name)):
-                    f.write(f"{name}: {getattr(self, name)}\n")
-
-    def wandb_dict(self):
-        """Converts the configuration to a dictionary for W&B logging."""
-        return {
-            "seed": self.seed,
-            "device": self.device,
-            "epochs": self.num_epochs,
-            "batch_size": self.batch_size,
-            "input_seq_len": self.input_seq_len,
-            "time_covariates": self.time_covariates,
-            "scale_method": self.scale_method,
-            "order_mode": self.order_mode,
-            "nb_ts": self.nb_ts,
-            "training_size": self.x_train.split("/")[-2],
-            "use_AGVI": self.use_AGVI,
-            "Sigma_v_bounds": self.Sigma_v_bounds,
-            "decaying_factor": self.decaying_factor,
-            "embedding_type": (
-                "mapped"
-                if self.use_mapped_embeddings
-                else "standard" if self.use_standard_embeddings else "none"
-            ),
-            "embedding_size": self.total_embedding_size,
-        }
 
 
 def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=None):
@@ -355,28 +162,30 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             ).tolist()
 
     # Storage for 2D embedding coordinates per epoch
-    embedding_coords_history: List[np.ndarray] = []
+    # embedding_coords_history: List[np.ndarray] = []
 
     # Initialize embedding update tracker
-    update_tracker = EmbeddingUpdateTracker(num_series=config.nb_ts)
+    # update_tracker = EmbeddingUpdateTracker(num_series=config.nb_ts)
 
     # Initialize parameter tracker
-    param_tracker = ParameterTracker()
-    param_tracker.track_parameter(
-        layer_name="LSTM.0",
-        param_type="weight",
-        indices=list(range(40)),
-        label="LSTM Layer 0 Weights",
-    )
-    param_tracker.track_parameter(
-        layer_name="LSTM.0",
-        param_type="bias",
-        indices=list(range(40)),
-        label="LSTM Layer 0 Biases",
-    )
+    # param_tracker = ParameterTracker()
+    # param_tracker.track_parameter(
+    #     layer_name="LSTM.0",
+    #     param_type="weight",
+    #     indices=list(range(40)),
+    #     label="LSTM Layer 0 Weights",
+    # )
+    # param_tracker.track_parameter(
+    #     layer_name="LSTM.0",
+    #     param_type="bias",
+    #     indices=list(range(40)),
+    #     label="LSTM Layer 0 Biases",
+    # )
 
     # --- Training loop ---
     for epoch in pbar:
+        # embedding acumulator reset
+
         # net.train()
         train_mse = []
         train_log_lik = []
@@ -466,13 +275,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            s_pred = np.sqrt(v_pred + var_y)
+            s_pred_total = np.sqrt(v_pred + var_y)
 
             # Compute metrics
             mask = ~np.isnan(y.flatten())
             y_masked = y.flatten()[mask]
             m_pred_masked = m_pred[mask]
-            s_pred_masked = s_pred[mask]
+            s_pred_masked = s_pred_total[mask]
 
             if y_masked.size > 0:
                 batch_mse = metric.rmse(m_pred_masked, y_masked)
@@ -485,7 +294,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # Store predictions
             train_states.update(
                 new_mu=m_pred.reshape(B, -1),
-                new_std=s_pred.reshape(B, -1),
+                new_std=s_pred_total.reshape(B, -1),
                 indices=indices,
                 time_step=time_steps,
             )
@@ -524,32 +333,31 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 )
 
                 # Track updates
-                update_tracker.update(indices, mu_delta_slice)
+                # update_tracker.update(indices, mu_delta_slice)
 
             # update aleatoric uncertainty if using AGVI
-            if config.use_AGVI:
-                (
-                    mu_v2bar_post,
-                    _,
-                ) = update_aleatoric_uncertainty(
-                    mu_z0=m_pred,
-                    var_z0=v_pred,
-                    mu_v2bar=flat_m[1::2],
-                    var_v2bar=flat_v[1::2],
-                    y=y.flatten(),
-                )
-                var_y = mu_v2bar_post  # updated aleatoric uncertainty
+            # if config.use_AGVI:
+            #     (
+            #         mu_v2bar_post,
+            #         _,
+            #     ) = update_aleatoric_uncertainty(
+            #         mu_z0=m_pred,
+            #         var_z0=v_pred,
+            #         mu_v2bar=flat_m[1::2],
+            #         var_v2bar=flat_v[1::2],
+            #         y=y.flatten(),
+            #     )
+            #     var_y = mu_v2bar_post  # updated aleatoric uncertainty
 
             # Update LSTM states for the current batch
             lstm_state_container.update_states_from_net(indices, net)
 
-            var_post_total = v_post + var_y
-            var_post_total = np.clip(var_post_total, a_min=1e-6, a_max=2.0)
+            v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
             # Update look_back buffer
             look_back_buffer.update(
                 new_mu=m_post.reshape(B, -1)[:, -1],
-                new_var=var_post_total.reshape(B, -1),
+                new_var=v_post.reshape(B, -1),
                 indices=indices,
             )
 
@@ -557,9 +365,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         train_mse = np.mean(train_mse)
         train_log_lik = np.mean(train_log_lik)
 
+        # Apply accumulated embedding updates at the end of the epoch
+        # if embeddings is not None:
+        #     embeddings.apply_accumulated_updates()
+
         # Step tracker
-        update_tracker.step_epoch()
-        param_tracker.step_epoch(net)
+        # update_tracker.step_epoch()
+        # param_tracker.step_epoch(net)
 
         # Validation
         # net.eval()
@@ -634,14 +446,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            v_pred_total = v_pred + var_y
-            s_pred = np.sqrt(v_pred_total)
+            s_pred_total = np.sqrt(v_pred + var_y)
 
             # Compute metrics
             mask = ~np.isnan(y.flatten())
             y_masked = y.flatten()[mask]
             m_pred_masked = m_pred[mask]
-            s_pred_masked = s_pred[mask]
+            s_pred_masked = s_pred_total[mask]
 
             if y_masked.size > 0:
                 batch_mse = metric.rmse(m_pred_masked, y_masked)
@@ -654,7 +465,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # Store predictions
             val_states.update(
                 new_mu=m_pred.reshape(B, -1),
-                new_std=s_pred.reshape(B, -1),
+                new_std=s_pred_total.reshape(B, -1),
                 indices=indices,
                 time_step=time_steps,
             )
@@ -662,7 +473,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # Update look_back buffer
             look_back_buffer.update(
                 new_mu=m_pred.reshape(B, -1)[:, -1],
-                new_var=v_pred_total.reshape(B, -1)[:, -1],
+                new_var=v_pred.reshape(B, -1)[:, -1],
                 indices=indices,
             )
 
@@ -757,22 +568,22 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         elif config.use_standard_embeddings:
             embeddings.save(os.path.join(embedding_dir, "embeddings_final.npz"))
 
-    # Save 2D embedding trajectory if we tracked any
-    if embeddings is not None and len(embedding_coords_history) > 0:
-        coords_arr = np.stack(
-            embedding_coords_history, axis=0
-        )  # (n_epochs_run, n_entities, 2)
-        np.savez(
-            os.path.join(embedding_dir, "embedding_coords_history.npz"),
-            coords=coords_arr,
-        )
+    # # Save 2D embedding trajectory if we tracked any
+    # if embeddings is not None and len(embedding_coords_history) > 0:
+    #     coords_arr = np.stack(
+    #         embedding_coords_history, axis=0
+    #     )  # (n_epochs_run, n_entities, 2)
+    #     np.savez(
+    #         os.path.join(embedding_dir, "embedding_coords_history.npz"),
+    #         coords=coords_arr,
+    #     )
 
-    # Plot embedding updates
-    if embeddings is not None:
-        update_tracker.plot(embedding_dir, filename="embedding_updates_magnitude.png")
+    # # Plot embedding updates
+    # if embeddings is not None:
+    #     update_tracker.plot(embedding_dir, filename="embedding_updates_magnitude.png")
 
-    # Plot parameter evolution
-    param_tracker.plot(output_dir)
+    # # Plot parameter evolution
+    # param_tracker.plot(output_dir)
 
     # --- Testing ---
     # net.eval()
@@ -843,13 +654,12 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             v_pred = flat_v[::2]  # even indices
             var_y = flat_m[1::2]  # odd indices var_v
 
-        v_pred_total = v_pred + var_y
-        s_pred = np.sqrt(v_pred_total)
+        s_pred_total = np.sqrt(v_pred + var_y)
 
         # Store predictions
         test_states.update(
             new_mu=m_pred.reshape(B, -1),
-            new_std=s_pred.reshape(B, -1),
+            new_std=s_pred_total.reshape(B, -1),
             indices=indices,
             time_step=time_steps,
         )
@@ -857,7 +667,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         # Update look_back buffer
         look_back_buffer.update(
             new_mu=m_pred.reshape(B, -1)[:, -1],
-            new_var=v_pred_total.reshape(B, -1)[:, -1],
+            new_var=v_pred.reshape(B, -1)[:, -1],
             indices=indices,
         )
 
@@ -1022,7 +832,9 @@ def eval_global_model(
                 stand_y_pred, stand_y_true, stand_s_pred
             )
             test_mae = metric.mae(stand_y_pred, stand_y_true)
-            test_p50 = metric.Np50(stand_y_true, stand_y_pred)
+            test_p50 = metric.Np50(
+                stand_y_true, stand_y_pred
+            )  # TODO: check without normalization p50 should be mae
             test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
 
             # Append to lists
@@ -1434,8 +1246,12 @@ def eval_global_model(
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [1]
-    list_of_experiments = ["train60"]
+    # list_of_seeds = [1, 3, 9, 17, 42, 67, 99, 235, 1234]
+    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [1996]
+    list_of_experiments = ["train100"]
+    embedding_size = 25
+    embed_initializer = "normal"
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1443,26 +1259,17 @@ def main(Train=True, Eval=True, log_wandb=True):
             print(f"Running experiment: {exp} with seed {seed}")
 
             # Model category
-            model_category = "global"
-            embed_category = "simple embeddings"
+            model_category = f"global-look-{embed_initializer}"
+            embed_category = f"B={embedding_size}"
 
             # Define experiment name
             experiment_name = (
                 f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
             )
 
-            # Create configuration
+            # Load configuration
             config = Config()
-            config.seed = seed
-            config.batch_size = 16
-            config.shuffle = True
-            config.device = "cuda" if torch.cuda.is_available() else "cpu"
-            config.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.eval_plots = False
-            config.embed_plots = False
-            config.embedding_size = 15
-            # config.embedding_map_dir = "data/hq/ts_embedding_map.csv"
+            config.load(f"experiments/configs/time_series_global/{exp}.txt")
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -1503,4 +1310,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, False, False)
+    main(False, True, False)

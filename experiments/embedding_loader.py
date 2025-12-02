@@ -44,7 +44,7 @@ class EmbeddingLayer:
             np.fill_diagonal(self.mu, 1.0)
             self.var = np.ones(self.embedding_dim)
         elif encoding_type == "uniform":
-            self.mu = np.full(self.embedding_dim, 1 / self.embedding_dim[1])
+            self.mu = np.full(self.embedding_dim, 1.0)
             self.var = np.ones(self.embedding_dim)
         elif encoding_type == "sphere":
             radius = 3
@@ -52,12 +52,34 @@ class EmbeddingLayer:
             vecs /= np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12
             self.mu = radius * vecs
             self.var = np.full(self.embedding_dim, 1.0)
+        elif encoding_type == "pca_inspired":
+            # 1. Define the decay rate 
+            alpha = 0.5
+
+            # 2. Get the embedding length (assuming the last dimension is the embedding size)
+            L = self.embedding_dim[-1]
+
+            # 3. Create the variance profile: sigma_k^2 = (k+1)^-alpha
+            k = np.arange(L)
+            variance_profile = (k + 1.0) ** (-alpha)
+
+            # 4. Sample Mean: mu ~ N(0, Sigma)
+            # We generate standard normal noise and scale it by standard deviation (sqrt of var)
+            standard_noise = np.random.randn(*self.embedding_dim)
+            self.mu = standard_noise * np.sqrt(variance_profile)
+
+            # 5. Set Variance
+            self.var = np.tile(variance_profile, (num_embeddings, 1))
         else:
             self.mu = np.full(self.embedding_dim, 1.0, dtype=np.float32)
             self.var = np.ones(self.embedding_dim, dtype=np.float32)
 
         self.mu = self.mu.astype(np.float32)
         self.var = self.var.astype(np.float32)
+
+        # Buffers for accumulating updates
+        self.mu_buffer = None
+        self.var_buffer = None
 
     def __call__(self, idx: np.ndarray) -> tuple:
         """
@@ -78,10 +100,20 @@ class EmbeddingLayer:
         var_delta: np.ndarray,
         lr: float = 1.0,
         skip_update: bool = False,
+        accumulate: bool = False,
     ):
         """
         Applies a delta update to embedding vectors.
         Handles batches and sums updates for repeated indices using np.add.at.
+
+        Args:
+            idx: Indices to update.
+            mu_delta: Update for means.
+            var_delta: Update for variances.
+            lr: Learning rate.
+            skip_update: If True, do nothing.
+            accumulate: If True, add updates to a buffer instead of applying immediately.
+                        Call apply_accumulated_updates() to apply them later.
         """
         if skip_update:
             return
@@ -115,13 +147,40 @@ class EmbeddingLayer:
         mu_delta_filtered = mu_delta[active_mask] * lr
         var_delta_filtered = var_delta[active_mask] * lr
 
-        # Use np.add.at to correctly sum updates for repeated indices
-        np.add.at(self.mu, idx_filtered, mu_delta_filtered)
-        np.add.at(self.var, idx_filtered, var_delta_filtered)
+        if accumulate:
+            # Initialize buffers if needed
+            if self.mu_buffer is None:
+                self.mu_buffer = np.zeros_like(self.mu)
+            if self.var_buffer is None:
+                self.var_buffer = np.zeros_like(self.var)
 
-        np.maximum(
-            self.var, 1e-5, out=self.var
-        )  # prevent variances from going negative
+            # Accumulate updates
+            np.add.at(self.mu_buffer, idx_filtered, mu_delta_filtered)
+            np.add.at(self.var_buffer, idx_filtered, var_delta_filtered)
+        else:
+            # Apply immediately
+            np.add.at(self.mu, idx_filtered, mu_delta_filtered)
+            np.add.at(self.var, idx_filtered, var_delta_filtered)
+
+            np.maximum(
+                self.var, 1e-5, out=self.var
+            )  # prevent variances from going negative
+
+    def apply_accumulated_updates(self):
+        """
+        Applies any updates that have been accumulated in the buffers.
+        Resets buffers to zero after application.
+        """
+        if self.mu_buffer is not None:
+            self.mu += self.mu_buffer
+            self.mu_buffer.fill(0.0)
+
+        if self.var_buffer is not None:
+            self.var += self.var_buffer
+            self.var_buffer.fill(0.0)
+
+        # Ensure variance constraint
+        np.maximum(self.var, 1e-5, out=self.var)
 
     def save(self, out_file: str):
         """Saves embeddings to a .npz file."""
@@ -138,6 +197,9 @@ class EmbeddingLayer:
         self.var = data["var"]
         # Update embedding_dim based on loaded data
         self.embedding_dim = self.mu.shape
+        # Reset buffers on load
+        self.mu_buffer = None
+        self.var_buffer = None
 
     def as_coordinates(self, n: int) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -403,6 +465,7 @@ class MappedTimeSeriesEmbeddings:
         ts_ids: np.ndarray,
         mu_deltas_combined: np.ndarray,
         var_deltas_combined: np.ndarray,
+        accumulate: bool = False,
     ):
         """
         Applies batch updates, delegating summation for shared embeddings
@@ -416,6 +479,7 @@ class MappedTimeSeriesEmbeddings:
                 Shape: (batch_size, total_embedding_dim)
             var_deltas_combined (np.ndarray): Deltas for the combined var vectors.
                 Shape: (batch_size, total_embedding_dim)
+            accumulate (bool): If True, accumulate updates instead of applying immediately.
         """
         ts_ids = np.atleast_1d(ts_ids)
 
@@ -469,7 +533,16 @@ class MappedTimeSeriesEmbeddings:
             cat_indices = batch_map[category].values
 
             # Apply the updates directly
-            embedding_layer.update(cat_indices, mu_delta_cat, var_delta_cat)
+            embedding_layer.update(
+                cat_indices, mu_delta_cat, var_delta_cat, accumulate=accumulate
+            )
+
+    def apply_accumulated_updates(self):
+        """
+        Applies accumulated updates for all managed embedding layers.
+        """
+        for embedding_layer in self.embeddings.values():
+            embedding_layer.apply_accumulated_updates()
 
     def save(self, out_dir_prefix: str):
         """

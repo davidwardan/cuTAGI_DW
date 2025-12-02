@@ -235,7 +235,7 @@ def p50(y: np.ndarray, ypred: np.ndarray) -> float:
     y = np.asarray(y)
     ypred = np.asarray(ypred)
     e = y - ypred
-    return np.nansum(np.abs(e))
+    return np.nansum(np.abs(e)) # TODO: np.nanmean() to match mae
 
 
 def p90(y: np.ndarray, ypred: np.ndarray, spred: np.ndarray) -> float:
