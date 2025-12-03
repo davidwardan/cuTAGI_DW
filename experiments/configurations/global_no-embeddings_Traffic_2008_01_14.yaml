@@ -1,12 +1,12 @@
 seed: 1
 
 data_paths:
-  x_train: "data/traffic/traffic_2008_01_14_train.csv"
-  dates_train: "traffic_2008_01_14_train_datetime.csv"
-  x_val: "data/traffic/traffic_2008_01_14_val.csv"
-  dates_val: "traffic_2008_01_14_val_datetime.csv"
-  x_test: "data/traffic/traffic_2008_01_14_test.csv"
-  dates_test: "traffic_2008_01_14_test_datetime.csv"
+  x_train: "./data/traffic/traffic_2008_01_14_train.csv"
+  dates_train: "./data/traffic/traffic_2008_01_14_train_datetime.csv"
+  x_val: "./data/traffic/traffic_2008_01_14_val.csv"
+  dates_val: "./data/traffic/traffic_2008_01_14_val_datetime.csv"
+  x_test: "./data/traffic/traffic_2008_01_14_test.csv"
+  dates_test: "./data/traffic/traffic_2008_01_14_test_datetime.csv"
 
 data_loader:
   num_features: 3
@@ -16,7 +16,7 @@ data_loader:
   scale_method: "standard"
   order_mode: "by_window"
   input_seq_len: 24
-  batch_size: 16
+  batch_size: 64
   output_col: [0]
   ts_to_use:
     [
@@ -996,7 +996,7 @@ training:
   early_stopping_criteria: "loglik"
   patience: 10
   min_delta: 0.0001
-  warmup_epochs: 0
+  warmup_epochs: 3
   shuffle: true
 
 evaluation:

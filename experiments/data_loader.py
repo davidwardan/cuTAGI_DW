@@ -50,9 +50,13 @@ class TimeSeriesDataBuilder:
         data_file: str, col_to_use: Optional[List[int]] = None
     ) -> np.ndarray:
         """Load CSV -> 2D numpy (T, N). Skips the first row (header)."""
-        df = pd.read_csv(
-            data_file, skiprows=1, delimiter=",", header=None, usecols=col_to_use
-        )
+        try:
+            df = pd.read_csv(
+                data_file, skiprows=1, delimiter=",", header=None, usecols=col_to_use
+            )
+        except:
+            df = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
+
         return df.values
 
     @staticmethod
@@ -165,9 +169,15 @@ class TimeSeriesDataBuilder:
             self.date_time_file, col_to_use=self.ts_to_use
         )
 
-        assert (
-            X_all.shape == DT_all.shape
-        ), "Values CSV and datetime CSV must have identical shapes (T, N)."
+        # if DT_all has only one column duplicate columns to make it same shape X_all
+        if DT_all.shape[1] == 1 and X_all.shape[1] > 1:
+            print("assuming single datetime column for all series, duplicating...")
+            DT_all = np.tile(DT_all.reshape(-1, 1), (1, X_all.shape[1]))
+
+        assert X_all.shape == DT_all.shape, (
+            f"Data and DateTime files must have the same shape. "
+            f"Got {X_all.shape} vs {DT_all.shape}."
+        )
 
         T, N = X_all.shape
         self.max_len = T

@@ -627,10 +627,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             )
 
         # rolling window mechanism for traffic and electricity datasets
-        # if time step > 24 look back buffer should all be set to need_initialization = True
         if config.data_loader.use_rolling_window:
             for i, ts_index in enumerate(indices):
-                if time_steps[i] >= config.data_loader.rolling_window_size:
+                if time_steps[i] % config.data_loader.rolling_window_size == 0:
                     look_back_buffer.needs_initialization[ts_index] = True
 
         # prepare look_back buffer
@@ -1274,7 +1273,7 @@ def eval_global_model(
 def main(Train=True, Eval=True, log_wandb=True):
 
     list_of_seeds = [1]
-    list_of_experiments = ["traffic_2008_01_14"]
+    list_of_experiments = ["Traffic_2008_01_14"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1286,9 +1285,7 @@ def main(Train=True, Eval=True, log_wandb=True):
             embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = (
-                f"seed{seed}/{exp}/{model_category}_{embed_category}"
-            )
+            experiment_name = f"seed{seed}/{exp}/{model_category}_{embed_category}"
 
             # Load configuration
             config = Config.from_yaml(
