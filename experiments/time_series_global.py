@@ -626,6 +626,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 (B * len(config.data_loader.output_col),), sigma_v**2, dtype=np.float32
             )
 
+        # rolling window mechanism for traffic and electricity datasets
+        # if time step > 24 look back buffer should all be set to need_initialization = True
+        if config.data_loader.use_rolling_window:
+            for i, ts_index in enumerate(indices):
+                if time_steps[i] >= config.data_loader.rolling_window_size:
+                    look_back_buffer.needs_initialization[ts_index] = True
+
         # prepare look_back buffer
         # Filter out padded indices (-1) before checking initialization status
         valid_indices_for_init = [i for i in indices if i != -1]
@@ -1266,8 +1273,8 @@ def eval_global_model(
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [1, 3, 17, 42, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [1]
+    list_of_experiments = ["traffic_2008_01_14"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1276,22 +1283,20 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Model category
             model_category = "global"
-            embed_category = "hierarchical-embeddings"
+            embed_category = "no-embeddings"
 
             # Define experiment name
             experiment_name = (
-                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
+                f"seed{seed}/{exp}/{model_category}_{embed_category}"
             )
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
+                f"experiments/configurations/{model_category}_{embed_category}_{exp}.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-            config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -1335,4 +1340,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(False, True, False)
+    main(True, True, False)

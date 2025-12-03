@@ -219,14 +219,14 @@ def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
         ax = fig.gca()
         for model in agg["model_type"].dropna().unique():
             # custom model name
-            if model.lower() == "global_no embedding":
+            if model.lower() == "global_no-embeddings":
                 label = "Global"
-            elif model.lower() == "global_simple embedding":
-                label = "Global + Embed"
-            elif model.lower() == "local_model":
-                label = "Local"
-            elif model.lower() == "global_hierarchical embedding":
-                label = "Global + Hier. Embed"
+            elif model.lower() == "global_simple-embeddings":
+                label = r"Global + $B_{simple}$"
+            elif model.lower() == "locals":
+                label = "Locals"
+            elif model.lower() == "global_hierarchical-embeddings":
+                label = r"Global + $B_{hierarchical}$"
             else:
                 label = model
 
@@ -240,11 +240,35 @@ def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
             )
 
         plt.xlabel("Train size (%)")
-        plt.ylabel(metric)
-        legend = ax.legend(
-            loc="center left", bbox_to_anchor=(1.01, 0.5), ncol=1, frameon=False
+        if metric == "LogLik":
+            plt.ylabel(r"Log-Likelihood $(\uparrow)$")
+        else:
+            plt.ylabel(f"{metric} $(\\downarrow)$")
+        legend_order = [
+            "Locals",
+            "Global",
+            r"Global + $B_{simple}$",
+            r"Global + $B_{hierarchical}$",
+        ]
+        handles, labels = ax.get_legend_handles_labels()
+        order = sorted(
+            range(len(labels)),
+            key=lambda i: (
+                legend_order.index(labels[i])
+                if labels[i] in legend_order
+                else len(legend_order) + i
+            ),
         )
-        legend.set_title("Model")
+        ax.legend(
+            [handles[i] for i in order],
+            [labels[i] for i in order],
+            loc="center left",
+            bbox_to_anchor=(1.01, 0.5),
+            ncol=1,
+            frameon=False,
+        )
+        # show all x ticks
+        ax.set_xticks(sub["train_size"].unique())
         fig.subplots_adjust(right=0.72)
         fig.tight_layout()
         fig.savefig(plots_dir / f"{metric}.svg")

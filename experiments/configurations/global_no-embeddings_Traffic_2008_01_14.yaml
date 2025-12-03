@@ -10,6 +10,8 @@ data_paths:
 
 data_loader:
   num_features: 3
+  rolling_window_size: 24
+  use_rolling_window: true
   time_covariates: ["hour_of_day", "day_of_week"]
   scale_method: "standard"
   order_mode: "by_window"
