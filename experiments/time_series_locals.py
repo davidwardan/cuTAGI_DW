@@ -832,14 +832,16 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             stand_y_pred = normalizer.standardize(ypred_test, train_mean, train_std)
             stand_s_pred = normalizer.standardize_std(spred_test, train_std)
 
-            # normalize data
+            # metrics in standardized space
             test_rmse = metric.rmse(stand_y_pred, stand_y_true)
             test_log_lik = metric.log_likelihood(
                 stand_y_pred, stand_y_true, stand_s_pred
             )
             test_mae = metric.mae(stand_y_pred, stand_y_true)
-            test_p50 = metric.Np50(stand_y_true, stand_y_pred)
-            test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
+
+            # metrics in original space (but normalized)
+            test_p50 = metric.Np50(yt_test, ypred_test)
+            test_p90 = metric.Np90(yt_test, ypred_test, spred_test)
 
             # Append to lists
             test_rmse_list.append(test_rmse)
@@ -874,8 +876,8 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [1]
-    list_of_experiments = ["train100"]
+    list_of_seeds = [1, 3, 17, 42, 99]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -901,7 +903,7 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
             config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.evaluation.eval_plots = True
+            # config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

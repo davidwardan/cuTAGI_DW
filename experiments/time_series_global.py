@@ -837,14 +837,16 @@ def eval_global_model(
             stand_y_pred = normalizer.standardize(ypred_test, train_mean, train_std)
             stand_s_pred = normalizer.standardize_std(spred_test, train_std)
 
-            # normalize data
+            # metrics in standardized space
             test_rmse = metric.rmse(stand_y_pred, stand_y_true)
             test_log_lik = metric.log_likelihood(
                 stand_y_pred, stand_y_true, stand_s_pred
             )
             test_mae = metric.mae(stand_y_pred, stand_y_true)
-            test_p50 = metric.Np50(stand_y_true, stand_y_pred)
-            test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
+
+            # metrics in original space (but normalized)
+            test_p50 = metric.Np50(yt_test, ypred_test)
+            test_p90 = metric.Np90(yt_test, ypred_test, spred_test)
 
             # Append to lists
             test_rmse_list.append(test_rmse)
@@ -1129,7 +1131,7 @@ def eval_global_model(
                     config.embeddings.mapped.embedding_map_dir
                 ).set_index("ts_id")
 
-                if config.ts_to_use is None:
+                if config.data_loader.ts_to_use is None:
                     raise ValueError(
                         "config.ts_to_use is None, cannot stitch embeddings."
                     )
@@ -1274,7 +1276,7 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Model category
             model_category = "global"
-            embed_category = "no-embeddings"
+            embed_category = "hierarchical-embeddings"
 
             # Define experiment name
             experiment_name = (
