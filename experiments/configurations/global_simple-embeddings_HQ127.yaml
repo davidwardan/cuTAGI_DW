@@ -149,7 +149,7 @@ data_loader:
 
 embeddings:
   standard:
-    embedding_size: 15
+    embedding_size: 10
     embedding_initializer: "normal"
 
 model:

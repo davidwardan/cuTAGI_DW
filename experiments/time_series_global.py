@@ -843,9 +843,7 @@ def eval_global_model(
                 stand_y_pred, stand_y_true, stand_s_pred
             )
             test_mae = metric.mae(stand_y_pred, stand_y_true)
-            test_p50 = metric.Np50(
-                stand_y_true, stand_y_pred
-            )
+            test_p50 = metric.Np50(stand_y_true, stand_y_pred)
             test_p90 = metric.Np90(stand_y_true, stand_y_pred, stand_s_pred)
 
             # Append to lists
@@ -940,17 +938,6 @@ def eval_global_model(
                     log_data({f"embeddings/similarity": fig}, wandb_run=wandb_run)
 
                 if config.evaluation.embed_plots:
-                    plot_similarity(
-                        start_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_start.svg",
-                        "Cosine Similarity (Start)",
-                    )
-                    plot_similarity(
-                        final_similarity,
-                        embedding_dir / "embeddings_cosine_similarity_final.svg",
-                        "Cosine Similarity (Final)",
-                    )
-
                     plot_embeddings(
                         start_embeddings_mu,
                         config.nb_ts,
@@ -965,21 +952,37 @@ def eval_global_model(
                         "embeddings/embeddings_mu_pca_final.svg",
                         labels=labels,
                     )
-
-                    plot_similarity(
-                        start_bhattacharyya,
-                        embedding_dir / "embeddings_bhattacharyya_distance_start.svg",
-                        "Bhattacharyya Distance (Start)",
-                        vmin=0.0,
-                        vmax=bhatt_vmax,
-                    )
-                    plot_similarity(
-                        final_bhattacharyya,
-                        embedding_dir / "embeddings_bhattacharyya_distance_final.svg",
-                        "Bhattacharyya Distance (Final)",
-                        vmin=0.0,
-                        vmax=bhatt_vmax,
-                    )
+                    if config.total_embedding_size <= 1:
+                        print(
+                            "  Skipping embedding PCA plots since embedding size <= 1."
+                        )
+                    else:
+                        plot_similarity(
+                            start_similarity,
+                            embedding_dir / "embeddings_cosine_similarity_start.svg",
+                            "Cosine Similarity (Start)",
+                        )
+                        plot_similarity(
+                            final_similarity,
+                            embedding_dir / "embeddings_cosine_similarity_final.svg",
+                            "Cosine Similarity (Final)",
+                        )
+                        plot_similarity(
+                            start_bhattacharyya,
+                            embedding_dir
+                            / "embeddings_bhattacharyya_distance_start.svg",
+                            "Bhattacharyya Distance (Start)",
+                            vmin=0.0,
+                            vmax=bhatt_vmax,
+                        )
+                        plot_similarity(
+                            final_bhattacharyya,
+                            embedding_dir
+                            / "embeddings_bhattacharyya_distance_final.svg",
+                            "Bhattacharyya Distance (Final)",
+                            vmin=0.0,
+                            vmax=bhatt_vmax,
+                        )
             except FileNotFoundError as e:
                 print(
                     f"Warning: Could not plot standard embeddings. File not found: {e}"
@@ -991,7 +994,9 @@ def eval_global_model(
             print("Plotting mapped (categorical) embeddings...")
 
             # Plot per-category embeddings
-            categories = sorted(list(config.embedding_map_sizes.keys()))
+            categories = sorted(
+                list(config.embeddings.mapped.embedding_map_sizes.keys())
+            )
 
             # Store loaded embeddings to use for stitching
             loaded_start_mus = {}
@@ -1021,7 +1026,7 @@ def eval_global_model(
                     loaded_final_vars[category] = final_var
 
                     n_entities = start_mu.shape[0]
-                    labels = config.embedding_map_labels[category]
+                    labels = config.embeddings.mapped.embedding_map_labels[category]
 
                     # Create sub-directory
                     category_plot_dir = embedding_dir / category
@@ -1115,12 +1120,14 @@ def eval_global_model(
             print("Stitching full time series embeddings for plotting...")
             try:
                 # Load and filter map to the series we used, in the correct order
-                if not os.path.exists(config.embedding_map_dir):
+                if not os.path.exists(config.embeddings.mapped.embedding_map_dir):
                     raise FileNotFoundError(
-                        f"Map file not found: {config.embedding_map_dir}"
+                        f"Map file not found: {config.embeddings.mapped.embedding_map_dir}"
                     )
 
-                map_df = pd.read_csv(config.embedding_map_dir).set_index("ts_id")
+                map_df = pd.read_csv(
+                    config.embeddings.mapped.embedding_map_dir
+                ).set_index("ts_id")
 
                 if config.ts_to_use is None:
                     raise ValueError(
@@ -1128,7 +1135,7 @@ def eval_global_model(
                     )
 
                 # Re-order map based on ts_to_use
-                map_df_ordered = map_df.loc[config.ts_to_use]
+                map_df_ordered = map_df.loc[config.data_loader.ts_to_use]
 
                 # Initialize stitched matrices
                 mu_stitched_start = np.zeros(
@@ -1171,7 +1178,7 @@ def eval_global_model(
 
                 # Plot Stitched Embeddings
                 print("Plotting stitched (full) time series embeddings...")
-                labels = [str(ts_id) for ts_id in config.ts_to_use]
+                labels = [str(ts_id) for ts_id in config.data_loader.ts_to_use]
 
                 # Plot Cosine Similarity
                 start_similarity = cosine_similarity_matrix(mu_stitched_start)
@@ -1326,4 +1333,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, True, False)
+    main(False, True, False)

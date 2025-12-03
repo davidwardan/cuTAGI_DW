@@ -703,7 +703,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
             val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
             test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
-        test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
+            test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
 
     # Save results
     np.savez(
@@ -874,8 +874,8 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [1, 3, 17, 42, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [1]
+    list_of_experiments = ["train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -901,6 +901,7 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
             config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -938,4 +939,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, True, False)
+    main(False, True, False)

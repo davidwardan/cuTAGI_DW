@@ -901,17 +901,33 @@ def plot_series(
 
 def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
     if mu_embedding.shape[1] < 2:
-        plt.figure(figsize=(8, 2))
-        plt.scatter(mu_embedding[:, 0], np.zeros(n_series), c="blue", alpha=0.7)
+        n_series = mu_embedding.shape[0]
+        values = mu_embedding[:, 0]
+
+        # We get the indices that would sort the array
+        sorted_indices = np.argsort(values)
+        sorted_values = values[sorted_indices]
+
+        # Prepare sorted labels
         if labels is not None:
-            for i, label in enumerate(labels):
-                plt.text(mu_embedding[i, 0], 0, label)
+            sorted_labels = np.array(labels)[sorted_indices]
         else:
-            for i in range(n_series):
-                plt.text(mu_embedding[i, 0], 0, str(i))
-        plt.yticks([])
-        plt.xlabel("Embedding Dimension 1")
-        plt.grid(True)
+            sorted_labels = [str(i) for i in sorted_indices]
+        # Y positions for each series
+        y_pos = np.arange(n_series)
+
+        # Calculate dynamic height
+        dynamic_height = max(4, n_series * 0.25)
+        plt.figure(figsize=(6, dynamic_height))
+
+        plt.hlines(y=y_pos, xmin=0, xmax=sorted_values, color="skyblue", alpha=0.7)
+        plt.plot(sorted_values, y_pos, "o", color="blue", alpha=0.9)
+        plt.yticks(y_pos, sorted_labels)
+        plt.xlabel("Embedding Value")
+        plt.title("Ranked 1D Embeddings")
+        plt.grid(True, axis="x", linestyle="--", alpha=0.5)
+        plt.axvline(0, color="grey", linewidth=0.8)
+
         emb_plot_path = in_dir / out_path
         plt.savefig(emb_plot_path, bbox_inches="tight")
         plt.close()
