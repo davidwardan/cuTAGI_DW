@@ -232,7 +232,7 @@ class TimeSeriesDataBuilder:
 
                 Xj = self._standard_scale_series(Xj, mu, std)
             elif self.scale_method is not None:
-                raise ValueError(f"Unknown scale_method: {self.scale_method}")
+                print(f"Unknown scale_method: {self.scale_method}")
 
             X_all_norm[: Xj.shape[0], j] = Xj[:, 0]
 
@@ -269,7 +269,7 @@ class TimeSeriesDataBuilder:
 
         all_means = np.nanmean(X_all_norm, axis=0)
         all_stds = np.nanstd(X_all_norm, axis=0)
-        plt.figure(figsize=(min(8, len(all_means) * 0.1), 3))
+        plt.figure(figsize=(min(12, len(all_means) * 0.1), 3))
         plt.errorbar(
             x=np.arange(len(all_means)),
             y=all_means,

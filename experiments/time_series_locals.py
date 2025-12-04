@@ -235,8 +235,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             config.data_loader.time_covariates,
             ts,
         )
-        x_means.append(train_dtl.x_mean[0])
-        x_stds.append(train_dtl.x_std[0])
+        if config.data_loader.scale_method == "standard":
+            x_means.append(train_dtl.x_mean[0])
+            x_stds.append(train_dtl.x_std[0])
 
         # Build model
         net, output_updater = build_model(
@@ -635,6 +636,11 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     dtype=np.float32,
                 )
 
+            # rolling window mechanism for traffic and electricity datasets
+            if config.data_loader.use_rolling_window:
+                if test_time_step % config.data_loader.rolling_window_size == 0:
+                    look_back_buffer.needs_initialization = [True]
+
             # prepare look_back buffer
             if look_back_buffer.needs_initialization[0]:
                 look_back_buffer.initialize(
@@ -825,6 +831,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
                 train_std = np.nanstd(yt_train)
             else:
                 # manual standardization
+                print("Using manual standardization for metrics...")
                 train_mean = 0.0
                 train_std = 1.0
 
@@ -876,8 +883,8 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [1, 3, 17, 42, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [1]
+    list_of_experiments = ["Traffic_2008_01_14"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -892,17 +899,15 @@ def main(Train=True, Eval=True, log_wandb=True):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
+            experiment_name = f"seed{seed}/{exp}/{model_category}"
 
             # Create configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_HQ127.yaml"
+                f"experiments/configurations/{model_category}_{exp}.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-            config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             # config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B

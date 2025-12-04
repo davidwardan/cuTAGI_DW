@@ -17,6 +17,8 @@ class DataLoader(BaseModel):
     time_covariates: List[str] = ["week_of_year"]
     scale_method: str = "standard"
     order_mode: str = "by_window"
+    use_rolling_window: bool = False
+    rolling_window_size: int = 52
     input_seq_len: int = 52
     batch_size: int = 16
     output_col: List[int] = [0]

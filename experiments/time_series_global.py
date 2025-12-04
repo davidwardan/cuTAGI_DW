@@ -1294,6 +1294,8 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
+            config.evaluation.eval_plots = True
+            # config.evaluation.embed_plots = True
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

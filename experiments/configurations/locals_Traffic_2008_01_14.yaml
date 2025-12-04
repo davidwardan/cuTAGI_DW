@@ -16,7 +16,7 @@ data_loader:
   scale_method: none
   order_mode: "by_window"
   input_seq_len: 24
-  batch_size: 16
+  batch_size: 1
   output_col: [0]
   ts_to_use:
     [
@@ -986,10 +986,14 @@ data_loader:
     ]
 
 model:
-  Sigma_v_bounds: [2, 0.01]
+  Sigma_v_bounds: [1, 0.01]
   decaying_factor: 0.2
   device: "cuda"
   lstm_hidden_sizes: [40, 40, 40]
+  init_params: null
+  variance_inject: 0.0
+  variance_threshold: 1.0
+  variance_action: "add"
 
 training:
   num_epochs: 100
@@ -997,10 +1001,9 @@ training:
   patience: 10
   min_delta: 0.0001
   warmup_epochs: 5
-  shuffle: true
+  shuffle: false
 
 evaluation:
-  eval_plots: false
+  eval_plots: true
   eval_metrics: true
   seansonal_period: 24
-  embed_plots: false

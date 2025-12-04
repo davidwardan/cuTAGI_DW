@@ -985,8 +985,13 @@ data_loader:
       962,
     ]
 
+embeddings:
+  standard:
+    embedding_size: 10
+    embedding_initializer: "normal"
+
 model:
-  Sigma_v_bounds: [2, 0.01]
+  Sigma_v_bounds: [1, 0.01]
   decaying_factor: 0.2
   device: "cuda"
   lstm_hidden_sizes: [40, 40, 40]
