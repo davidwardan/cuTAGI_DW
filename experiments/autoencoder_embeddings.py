@@ -17,8 +17,8 @@ CONFIG = {
     # File Paths
     "train_csv": "data/hq/train100/split_train_values.csv",
     "val_csv": "data/hq/split_val_values.csv",
-    "output_plot": "out/embeddings_pca.svg",
-    "output_embedding_file": "out/autoencoder_embeddings.npy",
+    "output_plot": "out/embeddings_pca_attn.svg",
+    "output_embedding_file": "out/autoencoder_embeddings_attn.npy",
     # Model Params
     "seq_len": 52,  # Window size
     "embedding_dim": 10,  # Latent vector size
@@ -28,8 +28,8 @@ CONFIG = {
     "learning_rate": 1e-3,
     "epochs": 100,
     "patience": 10,
-    "teacher_forcing_start": 0.5,  # Start using Ground Truth 50% of the time
-    "generate_dummy_data": False,  # Set True if you don't have files yet
+    "teacher_forcing_start": 0.5,
+    "generate_dummy_data": False,
 }
 
 # Check for GPU
@@ -51,12 +51,9 @@ def create_dummy_csv(filename_train, filename_val):
         for i in range(cols):
             length = np.random.randint(60, 100)
             if i % 2 == 0:
-                # Sine waves
                 ts = np.sin(np.linspace(0, 20, length))
             else:
-                # Linear trends with noise
                 ts = np.linspace(0, 1, length) + np.random.normal(0, 0.1, length)
-            # Pad with NaNs for realism
             ts = np.pad(ts, (0, 100 - length), constant_values=np.nan)
             data[f"series_{i}"] = ts
         return pd.DataFrame(data)
@@ -87,11 +84,9 @@ def prepare_data(df, seq_len):
     all_windows = []
     window_ownership = []
 
-    # SAFETY: Only process numeric columns
     numeric_df = df.select_dtypes(include=[np.number])
 
     for col in numeric_df.columns:
-        # 1. Remove trailing NaNs
         series_values = numeric_df[col].to_numpy(dtype=np.float32, copy=True)
         raw_values = _trim_trailing_nans(series_values)
 
@@ -102,7 +97,6 @@ def prepare_data(df, seq_len):
         if finite_values.size < seq_len:
             continue
 
-        # 2. Standardization (Z-Score)
         mean = finite_values.mean()
         std = finite_values.std()
         if std < 1e-6:
@@ -110,7 +104,6 @@ def prepare_data(df, seq_len):
 
         scaled_series = ((raw_values - mean) / std).astype(np.float32)
 
-        # 3. Sliding Window (skip any window containing NaNs)
         for i in range(len(scaled_series) - seq_len + 1):
             window = scaled_series[i : i + seq_len]
             if np.isnan(window).any():
@@ -122,8 +115,30 @@ def prepare_data(df, seq_len):
 
 
 # ==========================================
-# 3. PYTORCH MODEL (RECURRENT DECODER)
+# 3. PYTORCH MODEL (ATTENTION + RECURRENT + TANH)
 # ==========================================
+
+
+class AttentionPooling(nn.Module):
+    def __init__(self, hidden_dim):
+        super(AttentionPooling, self).__init__()
+        # Weights to compute a score for each timestep
+        self.attention_weights = nn.Linear(hidden_dim, 1)
+
+    def forward(self, lstm_outputs):
+        # lstm_outputs: (Batch, Seq_Len, Hidden_Dim)
+
+        # 1. Score each timestep
+        scores = self.attention_weights(lstm_outputs)  # (Batch, Seq_Len, 1)
+
+        # 2. Softmax to get probabilities
+        weights = torch.softmax(scores, dim=1)
+
+        # 3. Weighted Sum
+        # (Batch, Seq_Len, Hidden) * (Batch, Seq_Len, 1) -> Sum dim 1
+        context_vector = torch.sum(lstm_outputs * weights, dim=1)  # (Batch, Hidden)
+
+        return context_vector, weights
 
 
 class LSTMAutoencoder(nn.Module):
@@ -138,69 +153,59 @@ class LSTMAutoencoder(nn.Module):
         self.encoder_lstm = nn.LSTM(
             input_size=n_features, hidden_size=hidden_dim, batch_first=True
         )
+
+        # Attention Mechanism
+        self.attention = AttentionPooling(hidden_dim)
+
+        # Projection to Embedding
         self.encoder_fc = nn.Linear(hidden_dim, embedding_dim)
+        self.bn_embedding = nn.BatchNorm1d(embedding_dim)
 
         # --- DECODER SETUP ---
-        # Map embedding back to hidden/cell state size for initialization
         self.decoder_fc_hidden = nn.Linear(embedding_dim, hidden_dim)
         self.decoder_fc_cell = nn.Linear(embedding_dim, hidden_dim)
-
-        # LSTM Cell for step-by-step decoding
         self.decoder_cell = nn.LSTMCell(input_size=n_features, hidden_size=hidden_dim)
-
-        # Project hidden state to output value
         self.output_layer = nn.Linear(hidden_dim, n_features)
 
     def forward(self, x, teacher_forcing_ratio=0.0):
-        """
-        x: (Batch, Seq_Len, Features)
-        teacher_forcing_ratio: Probability of using ground truth input.
-        """
         batch_size = x.shape[0]
 
         # 1. ENCODE
-        # output: (batch, seq, hidden), (h_n, c_n)
-        _, (hidden, _) = self.encoder_lstm(x)
+        # encoder_out: (Batch, Seq_Len, Hidden)
+        encoder_out, _ = self.encoder_lstm(x)
 
-        # Take the last layer's hidden state
-        hidden = hidden.squeeze(0)  # (batch, hidden)
+        # Apply Attention Pooling
+        # Collapses Seq_Len dimension by weighted sum
+        context_vector, attn_weights = self.attention(encoder_out)
 
-        # Create Embedding
-        embedding = self.encoder_fc(hidden)  # (batch, embedding_dim)
+        # Project -> BN -> Tanh (Force range [-1, 1])
+        raw_embedding = self.encoder_fc(context_vector)
+        embedding = torch.tanh(self.bn_embedding(raw_embedding))
 
         # 2. DECODE INITIALIZATION
-        # Initialize Decoder Memory from Embedding
         dec_hidden = self.decoder_fc_hidden(embedding)
         dec_cell = self.decoder_fc_cell(embedding)
 
-        # Start Token (Zero vector)
         current_input = torch.zeros((batch_size, self.n_features), device=x.device)
-
         outputs = []
 
         # 3. DECODE LOOP
         for t in range(self.seq_len):
-            # Recurrent Step
             dec_hidden, dec_cell = self.decoder_cell(
                 current_input, (dec_hidden, dec_cell)
             )
 
-            # Prediction
             reconstruction_t = self.output_layer(dec_hidden)
             outputs.append(reconstruction_t.unsqueeze(1))
 
-            # Determine next input (Teacher Forcing vs Autoregression)
             if self.training and np.random.random() < teacher_forcing_ratio:
-                # Use actual ground truth from step t
                 current_input = x[:, t, :]
             else:
-                # Use own prediction
                 current_input = reconstruction_t
 
-        # Combine steps back into sequence
         reconstructed_seq = torch.cat(outputs, dim=1)
 
-        return reconstructed_seq, embedding
+        return reconstructed_seq, embedding, attn_weights
 
 
 # ==========================================
@@ -213,19 +218,16 @@ if __name__ == "__main__":
     if CONFIG["generate_dummy_data"]:
         create_dummy_csv(CONFIG["train_csv"], CONFIG["val_csv"])
 
-    # --- Step 1: Load and Process Data ---
+    # --- Step 1: Load Data ---
     print("Loading Data...")
 
-    # A. Load Training Data
     if not os.path.exists(CONFIG["train_csv"]):
-        # Fallback if file not found
         print(f"File {CONFIG['train_csv']} not found. Generating dummy data...")
         create_dummy_csv(CONFIG["train_csv"], CONFIG["val_csv"])
 
     df_train = pd.read_csv(CONFIG["train_csv"])
     X_train_np, train_names = prepare_data(df_train, CONFIG["seq_len"])
 
-    # B. Load Validation Data
     if not os.path.exists(CONFIG["val_csv"]):
         create_dummy_csv(CONFIG["train_csv"], CONFIG["val_csv"])
 
@@ -237,20 +239,21 @@ if __name__ == "__main__":
     if len(X_train_np) == 0:
         raise ValueError("No training windows generated. Check data format.")
 
-    # Convert to Tensors
     train_tensor = torch.tensor(X_train_np, dtype=torch.float32).to(device)
     val_tensor = torch.tensor(X_val_np, dtype=torch.float32).to(device)
 
-    # Create DataLoaders
+    # Use drop_last=True for BatchNorm safety during training
     train_loader = DataLoader(
         TensorDataset(train_tensor, train_tensor),
         batch_size=CONFIG["batch_size"],
         shuffle=True,
+        drop_last=True,
     )
     val_loader = DataLoader(
         TensorDataset(val_tensor, val_tensor),
         batch_size=CONFIG["batch_size"],
         shuffle=False,
+        drop_last=False,
     )
 
     # --- Step 2: Initialize Model ---
@@ -265,28 +268,24 @@ if __name__ == "__main__":
     optimizer = optim.Adam(model.parameters(), lr=CONFIG["learning_rate"])
 
     # --- Step 3: Training Loop ---
-    print("\nStarting Training with Recurrent Decoder...")
+    print("\nStarting Training (Attention + Recurrent + Tanh)...")
 
     best_val_loss = float("inf")
     patience_counter = 0
     best_model_state = None
 
     for epoch in range(CONFIG["epochs"]):
-        # A. Calculate Teacher Forcing Ratio (Linear Decay)
-        # Starts at CONFIG['teacher_forcing_start'] and goes to 0 by the end
+        # Decay teacher forcing from 0.5 -> 0.0
         tf_ratio = max(
             0.0, CONFIG["teacher_forcing_start"] * (1 - epoch / CONFIG["epochs"])
         )
 
-        # B. TRAINING PHASE
+        # A. TRAINING
         model.train()
         train_loss = 0
         for batch_in, batch_target in train_loader:
             optimizer.zero_grad()
-
-            # Pass teacher_forcing_ratio to forward
-            reconstruction, _ = model(batch_in, teacher_forcing_ratio=tf_ratio)
-
+            reconstruction, _, _ = model(batch_in, teacher_forcing_ratio=tf_ratio)
             loss = criterion(reconstruction, batch_target)
             loss.backward()
             optimizer.step()
@@ -294,13 +293,12 @@ if __name__ == "__main__":
 
         avg_train_loss = train_loss / len(train_loader)
 
-        # C. VALIDATION PHASE (No Teacher Forcing)
+        # B. VALIDATION
         model.eval()
         val_loss = 0
         with torch.no_grad():
             for batch_in, batch_target in val_loader:
-                # Force ratio 0.0 for validation
-                reconstruction, _ = model(batch_in, teacher_forcing_ratio=0.0)
+                reconstruction, _, _ = model(batch_in, teacher_forcing_ratio=0.0)
                 loss = criterion(reconstruction, batch_target)
                 val_loss += loss.item()
 
@@ -312,25 +310,21 @@ if __name__ == "__main__":
             f"Train Loss: {avg_train_loss:.6f} | Val Loss: {avg_val_loss:.6f}"
         )
 
-        # D. EARLY STOPPING CHECK
-        early_stop_delta = 1e-5
-        if (avg_val_loss - best_val_loss) < early_stop_delta:
+        if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
             best_model_state = copy.deepcopy(model.state_dict())
         else:
             patience_counter += 1
             if patience_counter >= CONFIG["patience"]:
-                print(
-                    f"Early stopping triggered! No improvement for {CONFIG['patience']} epochs."
-                )
+                print(f"Early stopping triggered at epoch {epoch+1}.")
                 break
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
         print("\nRestored best model weights.")
 
-    # --- Step 4: Extract Embeddings (From Training Set) ---
+    # --- Step 4: Extract Embeddings ---
     print("Extracting Embeddings...")
     model.eval()
 
@@ -338,23 +332,80 @@ if __name__ == "__main__":
         TensorDataset(train_tensor, train_tensor),
         batch_size=CONFIG["batch_size"],
         shuffle=False,
+        drop_last=False,
     )
 
     embedding_list = []
+    weight_list = []
 
     with torch.no_grad():
         for batch_in, _ in inference_loader:
-            _, batch_embeddings = model(batch_in, teacher_forcing_ratio=0.0)
+            _, batch_embeddings, batch_attn_weights = model(
+                batch_in, teacher_forcing_ratio=0.0
+            )
             embedding_list.append(batch_embeddings.cpu().numpy())
+            weight_list.append(batch_attn_weights.cpu().numpy())
 
     all_embeddings = np.concatenate(embedding_list, axis=0)
+    all_weights = np.concatenate(weight_list, axis=0).squeeze(-1)  # (N, Seq_Len)
 
-    # --- Step 5: Aggregation ---
+    print(
+        f"Embedding Range Check: Min={all_embeddings.min():.4f}, Max={all_embeddings.max():.4f}"
+    )
+    print(
+        f"Attention Weights Check: Min={all_weights.min():.6f}, Max={all_weights.max():.6f}, Mean={all_weights.mean():.6f}"
+    )
+
+    # --- Step 5: Visualization of Attention Maps ---
+    print("Generating Attention Map Visualization...")
+    # Visualize the first 10 samples
+    num_samples_to_plot = 10
+    fig, axes = plt.subplots(
+        num_samples_to_plot, 2, figsize=(15, 3 * num_samples_to_plot)
+    )
+
+    # Ensure axes is always 2D array even if num_samples_to_plot=1
+    if num_samples_to_plot == 1:
+        axes = np.expand_dims(axes, 0)
+
+    indices_to_plot = np.random.choice(
+        len(train_tensor),
+        size=min(num_samples_to_plot, len(train_tensor)),
+        replace=False,
+    )
+    indices_to_plot.sort()  # Sort for consistent order if needed, or just keep random
+
+    for i, idx in enumerate(indices_to_plot):
+        # Original Series
+        original_series = train_tensor[idx].cpu().numpy().flatten()
+        weights = all_weights[idx]
+
+        # Plot Original
+        ax_ts = axes[i, 0]
+        ax_ts.plot(original_series, label="Time Series", color="blue")
+        ax_ts.set_title(f"Sample {idx}: Time Series")
+        ax_ts.grid(True, alpha=0.3)
+
+        # Plot Attention
+        ax_attn = axes[i, 1]
+        ax_attn.plot(weights, label="Attention Weights", color="orange")
+        ax_attn.fill_between(range(len(weights)), weights, alpha=0.3, color="orange")
+        ax_attn.set_title(f"Sample {idx}: Attention Weights")
+        # ax_attn.set_ylim(0, 1.0) # REMOVED: efficient attention might be small values if distributed
+        # Auto-scale but ensure 0 is at bottom
+        ax_attn.set_ylim(bottom=0)
+        ax_attn.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("out/attention_maps_sample.svg")
+    print("Attention maps saved to out/attention_maps_sample.svg")
+
+    # --- Step 6: Aggregation ---
     res_df = pd.DataFrame(all_embeddings)
     res_df["series_name"] = train_names
     final_embeddings_df = res_df.groupby("series_name").mean()
 
-    # --- Step 6: PCA Visualization ---
+    # --- Step 7: PCA Visualization ---
     if len(final_embeddings_df) > 1:
         pca = PCA(n_components=2)
         components = pca.fit_transform(final_embeddings_df.values)
@@ -362,7 +413,6 @@ if __name__ == "__main__":
         plt.figure(figsize=(10, 8))
         plt.scatter(components[:, 0], components[:, 1], c="blue", alpha=0.7)
 
-        # Print Legend (Subset)
         print("\n=== LEGEND: Index to Series Name (First 20) ===")
         for i, series_name in enumerate(final_embeddings_df.index):
             if i < 20:
@@ -375,22 +425,18 @@ if __name__ == "__main__":
             )
 
         plt.title(
-            f"Embeddings (Recurrent Decoder)\nLen: {CONFIG['seq_len']}, Dim: {CONFIG['embedding_dim']}"
+            f"Attention Embeddings (Tanh)\nLen: {CONFIG['seq_len']}, Dim: {CONFIG['embedding_dim']}"
         )
         plt.xlabel("PC 1")
         plt.ylabel("PC 2")
         plt.grid(True, alpha=0.3)
-
-        plt.savefig(CONFIG["output_plot"], bbox_inches="tight")
-        plt.close()
+        plt.savefig(CONFIG["output_plot"])
         print(f"\nPlot saved to {CONFIG['output_plot']}")
-        # plt.show() # Uncomment if running in interactive mode
     else:
         print("Not enough series to perform PCA.")
 
-    # --- Step 7: Save Embeddings ---
+    # --- Step 8: Save ---
     print(f"Saving embeddings to {CONFIG['output_embedding_file']}...")
     np.save(CONFIG["output_embedding_file"], final_embeddings_df.values)
     print("Embeddings saved.")
-
     print("\nDone!")
