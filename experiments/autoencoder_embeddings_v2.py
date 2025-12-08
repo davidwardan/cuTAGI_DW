@@ -19,12 +19,10 @@ CONFIG = {
     "val_csv": "data/hq/split_val_values.csv",
     "output_plot": "out/embeddings_pca_attn.svg",
     "output_embedding_file": "out/autoencoder_embeddings_attn.npy",
-
     # Model Params
-    "seq_len": 52,        # Window size
+    "seq_len": 52,  # Window size
     "embedding_dim": 10,  # Latent vector size
-    "hidden_dim": 40,     # Internal LSTM size
-
+    "hidden_dim": 40,  # Internal LSTM size
     # Training Params
     "batch_size": 128,
     "learning_rate": 1e-3,
@@ -41,6 +39,7 @@ print(f"Using device: {device}")
 # ==========================================
 # 2. DATA PREPARATION UTILS
 # ==========================================
+
 
 def create_dummy_csv(filename_train, filename_val):
     """Generates dummy files if they don't exist."""
@@ -119,6 +118,7 @@ def prepare_data(df, seq_len):
 # 3. PYTORCH MODEL (ATTENTION + RECURRENT + TANH)
 # ==========================================
 
+
 class AttentionPooling(nn.Module):
     def __init__(self, hidden_dim):
         super(AttentionPooling, self).__init__()
@@ -129,16 +129,17 @@ class AttentionPooling(nn.Module):
         # lstm_outputs: (Batch, Seq_Len, Hidden_Dim)
 
         # 1. Score each timestep
-        scores = self.attention_weights(lstm_outputs) # (Batch, Seq_Len, 1)
+        scores = self.attention_weights(lstm_outputs)  # (Batch, Seq_Len, 1)
 
         # 2. Softmax to get probabilities
         weights = torch.softmax(scores, dim=1)
 
         # 3. Weighted Sum
         # (Batch, Seq_Len, Hidden) * (Batch, Seq_Len, 1) -> Sum dim 1
-        context_vector = torch.sum(lstm_outputs * weights, dim=1) # (Batch, Hidden)
+        context_vector = torch.sum(lstm_outputs * weights, dim=1)  # (Batch, Hidden)
 
-        return context_vector
+        return context_vector, weights
+
 
 class LSTMAutoencoder(nn.Module):
     def __init__(self, seq_len, n_features, embedding_dim, hidden_dim):
@@ -175,7 +176,7 @@ class LSTMAutoencoder(nn.Module):
 
         # Apply Attention Pooling
         # Collapses Seq_Len dimension by weighted sum
-        context_vector = self.attention(encoder_out)
+        context_vector, attn_weights = self.attention(encoder_out)
 
         # Project -> BN -> Tanh (Force range [-1, 1])
         raw_embedding = self.encoder_fc(context_vector)
@@ -190,7 +191,9 @@ class LSTMAutoencoder(nn.Module):
 
         # 3. DECODE LOOP
         for t in range(self.seq_len):
-            dec_hidden, dec_cell = self.decoder_cell(current_input, (dec_hidden, dec_cell))
+            dec_hidden, dec_cell = self.decoder_cell(
+                current_input, (dec_hidden, dec_cell)
+            )
 
             reconstruction_t = self.output_layer(dec_hidden)
             outputs.append(reconstruction_t.unsqueeze(1))
@@ -202,7 +205,7 @@ class LSTMAutoencoder(nn.Module):
 
         reconstructed_seq = torch.cat(outputs, dim=1)
 
-        return reconstructed_seq, embedding
+        return reconstructed_seq, embedding, attn_weights
 
 
 # ==========================================
@@ -244,13 +247,13 @@ if __name__ == "__main__":
         TensorDataset(train_tensor, train_tensor),
         batch_size=CONFIG["batch_size"],
         shuffle=True,
-        drop_last=True
+        drop_last=True,
     )
     val_loader = DataLoader(
         TensorDataset(val_tensor, val_tensor),
         batch_size=CONFIG["batch_size"],
         shuffle=False,
-        drop_last=False
+        drop_last=False,
     )
 
     # --- Step 2: Initialize Model ---
@@ -273,14 +276,16 @@ if __name__ == "__main__":
 
     for epoch in range(CONFIG["epochs"]):
         # Decay teacher forcing from 0.5 -> 0.0
-        tf_ratio = max(0.0, CONFIG["teacher_forcing_start"] * (1 - epoch / CONFIG["epochs"]))
+        tf_ratio = max(
+            0.0, CONFIG["teacher_forcing_start"] * (1 - epoch / CONFIG["epochs"])
+        )
 
         # A. TRAINING
         model.train()
         train_loss = 0
         for batch_in, batch_target in train_loader:
             optimizer.zero_grad()
-            reconstruction, _ = model(batch_in, teacher_forcing_ratio=tf_ratio)
+            reconstruction, _, _ = model(batch_in, teacher_forcing_ratio=tf_ratio)
             loss = criterion(reconstruction, batch_target)
             loss.backward()
             optimizer.step()
@@ -293,7 +298,7 @@ if __name__ == "__main__":
         val_loss = 0
         with torch.no_grad():
             for batch_in, batch_target in val_loader:
-                reconstruction, _ = model(batch_in, teacher_forcing_ratio=0.0)
+                reconstruction, _, _ = model(batch_in, teacher_forcing_ratio=0.0)
                 loss = criterion(reconstruction, batch_target)
                 val_loss += loss.item()
 
@@ -327,26 +332,70 @@ if __name__ == "__main__":
         TensorDataset(train_tensor, train_tensor),
         batch_size=CONFIG["batch_size"],
         shuffle=False,
-        drop_last=False
+        drop_last=False,
     )
 
     embedding_list = []
+    weight_list = []
 
     with torch.no_grad():
         for batch_in, _ in inference_loader:
-            _, batch_embeddings = model(batch_in, teacher_forcing_ratio=0.0)
+            _, batch_embeddings, batch_attn_weights = model(
+                batch_in, teacher_forcing_ratio=0.0
+            )
             embedding_list.append(batch_embeddings.cpu().numpy())
+            weight_list.append(batch_attn_weights.cpu().numpy())
 
     all_embeddings = np.concatenate(embedding_list, axis=0)
+    all_weights = np.concatenate(weight_list, axis=0).squeeze(-1)  # (N, Seq_Len)
 
-    print(f"Embedding Range Check: Min={all_embeddings.min():.4f}, Max={all_embeddings.max():.4f}")
+    print(
+        f"Embedding Range Check: Min={all_embeddings.min():.4f}, Max={all_embeddings.max():.4f}"
+    )
 
-    # --- Step 5: Aggregation ---
+    # --- Step 5: Visualization of Attention Maps ---
+    print("Generating Attention Map Visualization...")
+    # Visualize the first 5 samples
+    num_samples_to_plot = 5
+    fig, axes = plt.subplots(
+        num_samples_to_plot, 2, figsize=(15, 3 * num_samples_to_plot)
+    )
+
+    # Ensure axes is always 2D array even if num_samples_to_plot=1
+    if num_samples_to_plot == 1:
+        axes = np.expand_dims(axes, 0)
+
+    indices_to_plot = np.arange(min(num_samples_to_plot, len(train_tensor)))
+
+    for i, idx in enumerate(indices_to_plot):
+        # Original Series
+        original_series = train_tensor[idx].cpu().numpy().flatten()
+        weights = all_weights[idx]
+
+        # Plot Original
+        ax_ts = axes[i, 0]
+        ax_ts.plot(original_series, label="Time Series", color="blue")
+        ax_ts.set_title(f"Sample {idx}: Time Series")
+        ax_ts.grid(True, alpha=0.3)
+
+        # Plot Attention
+        ax_attn = axes[i, 1]
+        ax_attn.plot(weights, label="Attention Weights", color="orange")
+        ax_attn.fill_between(range(len(weights)), weights, alpha=0.3, color="orange")
+        ax_attn.set_title(f"Sample {idx}: Attention Weights")
+        ax_attn.set_ylim(0, 1.0)  # Attention weights sum to 1, valid range
+        ax_attn.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("out/attention_maps_sample.png")
+    print("Attention maps saved to out/attention_maps_sample.png")
+
+    # --- Step 6: Aggregation ---
     res_df = pd.DataFrame(all_embeddings)
     res_df["series_name"] = train_names
     final_embeddings_df = res_df.groupby("series_name").mean()
 
-    # --- Step 6: PCA Visualization ---
+    # --- Step 7: PCA Visualization ---
     if len(final_embeddings_df) > 1:
         pca = PCA(n_components=2)
         components = pca.fit_transform(final_embeddings_df.values)
@@ -376,7 +425,7 @@ if __name__ == "__main__":
     else:
         print("Not enough series to perform PCA.")
 
-    # --- Step 7: Save ---
+    # --- Step 8: Save ---
     print(f"Saving embeddings to {CONFIG['output_embedding_file']}...")
     np.save(CONFIG["output_embedding_file"], final_embeddings_df.values)
     print("Embeddings saved.")
