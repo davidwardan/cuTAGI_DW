@@ -397,9 +397,9 @@ class TimeSeriesDataloader:
                     x = np.concatenate((x, quarter_of_year), axis=1)
 
         # Normalizer
-        # if self.x_mean is None and self.x_std is None:
-        #     self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
-        # x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
+        if self.x_mean is None and self.x_std is None:
+            self.x_mean, self.x_std = Normalizer.compute_mean_std(x)
+        x = Normalizer.standardize(data=x, mu=self.x_mean, std=self.x_std)
 
         # Create rolling windows
         x_rolled, y_rolled = utils.create_rolling_window(

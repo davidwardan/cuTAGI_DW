@@ -13,7 +13,7 @@ data_loader:
   rolling_window_size: 24
   use_rolling_window: true
   time_covariates: ["hour_of_day", "day_of_week"]
-  scale_method: none
+  scale_method: "standard"
   order_mode: "by_window"
   input_seq_len: 24
   batch_size: 16
@@ -986,17 +986,17 @@ data_loader:
     ]
 
 model:
-  Sigma_v_bounds: [2, 0.01]
-  decaying_factor: 0.2
+  Sigma_v_bounds: [2, 0.03]
+  decaying_factor: 0.5
   device: "cuda"
   lstm_hidden_sizes: [40, 40, 40]
 
 training:
   num_epochs: 100
-  early_stopping_criteria: "loglik"
+  early_stopping_criteria: "rmse"
   patience: 10
   min_delta: 0.0001
-  warmup_epochs: 5
+  warmup_epochs: 0
   shuffle: true
 
 evaluation:

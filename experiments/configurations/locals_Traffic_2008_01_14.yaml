@@ -13,7 +13,7 @@ data_loader:
   rolling_window_size: 24
   use_rolling_window: true
   time_covariates: ["hour_of_day", "day_of_week"]
-  scale_method: none
+  scale_method: "standard"
   order_mode: "by_window"
   input_seq_len: 24
   batch_size: 1
@@ -986,7 +986,7 @@ data_loader:
     ]
 
 model:
-  Sigma_v_bounds: [1, 0.01]
+  Sigma_v_bounds: [1, 0.1]
   decaying_factor: 0.2
   device: "cuda"
   lstm_hidden_sizes: [40, 40, 40]
@@ -1004,6 +1004,6 @@ training:
   shuffle: false
 
 evaluation:
-  eval_plots: true
+  eval_plots: false
   eval_metrics: true
   seansonal_period: 24

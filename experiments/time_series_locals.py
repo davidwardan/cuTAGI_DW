@@ -9,6 +9,8 @@ from experiments.wandb_helpers import (
     finish_run,
 )
 import torch
+from pathlib import Path
+import pandas as pd
 
 from experiments.config import Config
 
@@ -732,10 +734,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 def eval_local_models(config, experiment_name: Optional[str] = None):
     """Evaluates forecasts stored in the .npz format."""
 
-    from pathlib import Path
-    from tqdm import tqdm
-    import pandas as pd
-
     input_dir = Path(f"out/{experiment_name}/")
 
     train_states = np.load(input_dir / "train_states.npz")
@@ -946,4 +944,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(False, True, False)
+    main(True, True, False)
