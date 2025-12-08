@@ -16,6 +16,7 @@ class EmbeddingLayer:
         embedding_size: int,
         encoding_type: str = None,
         seed: int = None,
+        init_file: str = None,
     ):
         """
         Initializes the embedding matrix.
@@ -53,7 +54,7 @@ class EmbeddingLayer:
             self.mu = radius * vecs
             self.var = np.full(self.embedding_dim, 1.0)
         elif encoding_type == "pca_inspired":
-            # 1. Define the decay rate 
+            # 1. Define the decay rate
             alpha = 0.5
 
             # 2. Get the embedding length (assuming the last dimension is the embedding size)
@@ -72,6 +73,24 @@ class EmbeddingLayer:
             self.var = np.tile(variance_profile, (num_embeddings, 1))
         else:
             self.mu = np.full(self.embedding_dim, 1.0, dtype=np.float32)
+            self.var = np.ones(self.embedding_dim, dtype=np.float32)
+
+        # 6. Override with file initialization if provided
+        if init_file:
+            if not os.path.exists(init_file):
+                raise FileNotFoundError(f"Initialization file not found: {init_file}")
+            print(f"Loading initialization from {init_file}...")
+            loaded_mu = np.load(init_file)
+
+            # Check shape
+            if loaded_mu.shape != self.embedding_dim:
+                raise ValueError(
+                    f"Shape mismatch in {init_file}. Expected {self.embedding_dim}, "
+                    f"got {loaded_mu.shape}"
+                )
+
+            self.mu = loaded_mu.astype(np.float32)
+            # Set variance to 1 as requested
             self.var = np.ones(self.embedding_dim, dtype=np.float32)
 
         self.mu = self.mu.astype(np.float32)
@@ -248,6 +267,7 @@ class MappedTimeSeriesEmbeddings:
         embedding_sizes: Dict[str, int],
         encoding_types: Optional[Dict[str, str]] = None,
         seed: int = None,
+        init_files: Optional[Dict[str, str]] = None,
     ):
         """
         Initializes the mapped embeddings manager.
@@ -271,6 +291,9 @@ class MappedTimeSeriesEmbeddings:
         if encoding_types is None:
             encoding_types = {}
 
+        if init_files is None:
+            init_files = {}
+
         # Check if all required embedding sizes are provided
         for category in self.embedding_categories:
             if category not in embedding_sizes:
@@ -287,12 +310,14 @@ class MappedTimeSeriesEmbeddings:
             num_embeddings = self.ts_map_info[category]["num_embeddings"]
             embedding_size = embedding_sizes[category]
             encoding_type = encoding_types.get(category, None)  # Default to None
+            init_file = init_files.get(category, None)
 
             self.embeddings[category] = EmbeddingLayer(
                 num_embeddings=num_embeddings,
                 embedding_size=embedding_size,
                 encoding_type=encoding_type,
                 seed=seed,
+                init_file=init_file,
             )
 
     def _load_map(self, map_file_path: str):
