@@ -17,8 +17,8 @@ CONFIG = {
     # File Paths
     "train_csv": "data/hq/train100/split_train_values.csv",
     "val_csv": "data/hq/split_val_values.csv",
-    "output_plot": "embeddings_pca.png",
-    "output_embedding_file": "autoencoder_embeddings.npy",
+    "output_plot": "out/embeddings_pca.svg",
+    "output_embedding_file": "out/autoencoder_embeddings.npy",
     # Model Params
     "seq_len": 52,  # Window size
     "embedding_dim": 15,  # Latent vector size
@@ -313,7 +313,8 @@ if __name__ == "__main__":
         )
 
         # D. EARLY STOPPING CHECK
-        if avg_val_loss < best_val_loss:
+        early_stop_delta = 1e-5
+        if (avg_val_loss - best_val_loss) < early_stop_delta:
             best_val_loss = avg_val_loss
             patience_counter = 0
             best_model_state = copy.deepcopy(model.state_dict())
@@ -380,7 +381,8 @@ if __name__ == "__main__":
         plt.ylabel("PC 2")
         plt.grid(True, alpha=0.3)
 
-        plt.savefig(CONFIG["output_plot"])
+        plt.savefig(CONFIG["output_plot"], bbox_inches="tight")
+        plt.close()
         print(f"\nPlot saved to {CONFIG['output_plot']}")
         # plt.show() # Uncomment if running in interactive mode
     else:

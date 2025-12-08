@@ -946,7 +946,7 @@ def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
             plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], str(i))
     plt.xlabel("Principal Component 1")
     plt.ylabel("Principal Component 2")
-    plt.grid(True)
+    plt.grid(True, alpha=0.3)
     emb_plot_path = in_dir / out_path
     plt.savefig(emb_plot_path, bbox_inches="tight")
     plt.close()
