@@ -91,7 +91,7 @@ class EmbeddingLayer:
 
             self.mu = loaded_mu.astype(np.float32)
             # Set variance to 1 as requested
-            self.var = np.ones(self.embedding_dim, dtype=np.float32)
+            self.var = np.ones(self.embedding_dim, dtype=np.float32) * 0.1
 
         self.mu = self.mu.astype(np.float32)
         self.var = self.var.astype(np.float32)

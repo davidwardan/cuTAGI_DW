@@ -104,6 +104,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             embedding_size=config.embeddings.standard.embedding_size,
             encoding_type=config.embeddings.standard.embedding_initializer,
             seed=config.seed,
+            init_file=config.embeddings.standard.embedding_init_file,
         )
         if not os.path.exists(embedding_dir):
             os.makedirs(embedding_dir, exist_ok=True)
@@ -1273,7 +1274,7 @@ def eval_global_model(
 def main(Train=True, Eval=True, log_wandb=True):
 
     list_of_seeds = [1]
-    list_of_experiments = ["Traffic_2008_01_14"]
+    list_of_experiments = ["train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1282,20 +1283,24 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Model category
             model_category = "global"
-            embed_category = "no-embeddings"
+            embed_category = "simple-embeddings"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/{model_category}_{embed_category}"
+            experiment_name = f"seed{seed}/{exp}/{model_category}_{embed_category}_attn"
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_{exp}.yaml"
+                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
             config.evaluation.eval_plots = True
-            # config.evaluation.embed_plots = True
+            config.evaluation.embed_plots = True
+
+            config.embeddings.standard.embedding_init_file = (
+                "out/autoencoder_embeddings_attn.npy"
+            )
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

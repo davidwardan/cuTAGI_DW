@@ -30,6 +30,7 @@ class DataLoader(BaseModel):
 class StandardEmbeddings(BaseModel):
     embedding_size: Optional[int] = None
     embedding_initializer: str = "normal"
+    embedding_init_file: Optional[str] = None
 
 
 class MappedEmbeddings(BaseModel):

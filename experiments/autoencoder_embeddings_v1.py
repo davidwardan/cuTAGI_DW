@@ -21,7 +21,7 @@ CONFIG = {
     "output_embedding_file": "out/autoencoder_embeddings.npy",
     # Model Params
     "seq_len": 52,  # Window size
-    "embedding_dim": 15,  # Latent vector size
+    "embedding_dim": 10,  # Latent vector size
     "hidden_dim": 40,  # Internal LSTM size
     # Training Params
     "batch_size": 128,
