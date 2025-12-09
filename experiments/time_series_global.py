@@ -568,6 +568,21 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
             break
 
+    else:
+        # If loop finished without early stopping, load the best model found
+        if early_stopping.best_state is not None:
+            print("Training finished. Loading best model from early stopping tracker.")
+            net.load_state_dict(early_stopping.best_state)
+            look_back_buffer = early_stopping.best_look_back_buffer
+            lstm_state_container = early_stopping.best_lstm_state_container
+            train_states = early_stopping.train_states
+            val_states = early_stopping.val_states
+            if not config.use_AGVI:
+                sigma_v = early_stopping.best_sigma_v
+
+            # Restore best embeddings
+            embeddings = early_stopping.best_embeddings
+
     # Save best model
     net.save(os.path.join(output_dir, "param/model.pth"))
 
@@ -782,6 +797,14 @@ def eval_global_model(
     test_p50_list = []
     test_p90_list = []
 
+    # create placeholders for global (micro) metrics
+    all_stand_y_true = []
+    all_stand_y_pred = []
+    all_stand_s_pred = []
+    all_yt_test = []
+    all_ypred_test = []
+    all_spred_test = []
+
     # create wandb metrics to log
     if wandb_run is not None:
         wandb_run.define_metric("rmse", summary="last")
@@ -862,13 +885,40 @@ def eval_global_model(
             test_p50_list.append(test_p50)
             test_p90_list.append(test_p90)
 
+            # Accumulate for micro-average
+            all_stand_y_true.append(stand_y_true)
+            all_stand_y_pred.append(stand_y_pred)
+            all_stand_s_pred.append(stand_s_pred)
+            all_yt_test.append(yt_test)
+            all_ypred_test.append(ypred_test)
+            all_spred_test.append(spred_test)
+
     # Calculate overall metrics
     if config.evaluation.eval_metrics:
-        overall_rmse = np.nanmean(test_rmse_list)
-        overall_log_lik = np.nanmean(test_log_lik_list)
-        overall_mae = np.nanmean(test_mae_list)
-        overall_p50 = np.nanmean(test_p50_list)
-        overall_p90 = np.nanmean(test_p90_list)
+        # Macro averages
+        macro_rmse = np.nanmean(test_rmse_list)
+        macro_log_lik = np.nanmean(test_log_lik_list)
+        macro_mae = np.nanmean(test_mae_list)
+        macro_p50 = np.nanmean(test_p50_list)
+        macro_p90 = np.nanmean(test_p90_list)
+
+        # Micro averages
+        # Concatenate all arrays
+        full_stand_y_true = np.concatenate(all_stand_y_true)
+        full_stand_y_pred = np.concatenate(all_stand_y_pred)
+        full_stand_s_pred = np.concatenate(all_stand_s_pred)
+        full_yt_test = np.concatenate(all_yt_test)
+        full_ypred_test = np.concatenate(all_ypred_test)
+        full_spred_test = np.concatenate(all_spred_test)
+
+        # Calculate metrics on the full concatenated arrays
+        micro_rmse = metric.rmse(full_stand_y_pred, full_stand_y_true)
+        micro_log_lik = metric.log_likelihood(
+            full_stand_y_pred, full_stand_y_true, full_stand_s_pred
+        )
+        micro_mae = metric.mae(full_stand_y_pred, full_stand_y_true)
+        micro_p50 = metric.Np50(full_yt_test, full_ypred_test)
+        micro_p90 = metric.Np90(full_yt_test, full_ypred_test, full_spred_test)
 
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
@@ -880,17 +930,27 @@ def eval_global_model(
                     f"{test_p90_list[i]:.4f}\n"
                 )
             f.write(
-                f"Overall,{overall_rmse:.4f},{overall_log_lik:.4f},"
-                f"{overall_mae:.4f},{overall_p50:.4f},"
-                f"{overall_p90:.4f}\n"
+                f"Macro_Average,{macro_rmse:.4f},{macro_log_lik:.4f},"
+                f"{macro_mae:.4f},{macro_p50:.4f},"
+                f"{macro_p90:.4f}\n"
+            )
+            f.write(
+                f"Micro_Average,{micro_rmse:.4f},{micro_log_lik:.4f},"
+                f"{micro_mae:.4f},{micro_p50:.4f},"
+                f"{micro_p90:.4f}\n"
             )
 
         overall_metrics_payload = {
-            "rmse": overall_rmse,
-            "mae": overall_mae,
-            "log_lik": overall_log_lik,
-            "p50": overall_p50,
-            "p90": overall_p90,
+            "rmse": macro_rmse,
+            "mae": macro_mae,
+            "log_lik": macro_log_lik,
+            "p50": macro_p50,
+            "p90": macro_p90,
+            "micro_rmse": micro_rmse,
+            "micro_mae": micro_mae,
+            "micro_log_lik": micro_log_lik,
+            "micro_p50": micro_p50,
+            "micro_p90": micro_p90,
         }
 
         if wandb_run is not None:
@@ -1344,4 +1404,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, True, False)
+    main(False, True, False)
