@@ -118,6 +118,9 @@ def prepare_input(
     if look_back_var is not None:
         var_x[:input_seq_len] = look_back_var[indices]
 
+    # if any value in x is greater than 2.0 set to zero
+    x = np.where(np.abs(x) > 2, 0.0, x)
+
     return x, var_x
 
 
@@ -216,17 +219,15 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
     # Initalize states
     cap = 2000
-    train_states = States(nb_ts=config.nb_ts, total_time_steps=cap)
-    val_states = States(nb_ts=config.nb_ts, total_time_steps=cap)
-    test_states = States(nb_ts=config.nb_ts, total_time_steps=cap)
+    train_states = States(nb_ts=config.data_loader.nb_ts, total_time_steps=cap)
+    val_states = States(nb_ts=config.data_loader.nb_ts, total_time_steps=cap)
+    test_states = States(nb_ts=config.data_loader.nb_ts, total_time_steps=cap)
 
     # Initialize place holder for scaling factors
-    x_means = []
-    x_stds = []
+    x_means = [None] * config.data_loader.nb_ts
+    x_stds = [None] * config.data_loader.nb_ts
 
-    for ts in np.arange(0, config.nb_ts):
-
-        indices = [ts]
+    for ts in config.ts_to_use:
 
         # Prepare data loaders
         train_dtl, val_dtl, test_dtl = prepare_dtls(
@@ -238,8 +239,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             ts,
         )
         if config.data_loader.scale_method == "standard":
-            x_means.append(train_dtl.x_mean[0])
-            x_stds.append(train_dtl.x_std[0])
+            x_means[ts] = train_dtl.x_mean[0]
+            x_stds[ts] = train_dtl.x_std[0]
 
         # Build model
         net, output_updater = build_model(
@@ -260,9 +261,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             )
 
         # Create progress bar
-        pbar = tqdm(
-            range(config.training.num_epochs), desc=f"Epochs (TS {ts+1}/{config.nb_ts})"
-        )
+        pbar = tqdm(range(config.training.num_epochs), desc=f"Epochs (TS {ts})")
 
         # Initialize early stopping
         early_stopping = EarlyStopping(
@@ -349,16 +348,16 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     )
 
                 # prepare input
-                x, var_x = prepare_input(
-                    x=x,
-                    var_x=None,
-                    look_back_mu=look_back_buffer.mu,
-                    look_back_var=look_back_buffer.var,
-                    indices=[0],
-                )
+                # x, var_x = prepare_input(
+                #     x=x,
+                #     var_x=None,
+                #     look_back_mu=look_back_buffer.mu,
+                #     look_back_var=look_back_buffer.var,
+                #     indices=[0],
+                # )
 
                 # Feedforward
-                m_pred, v_pred = net(x, var_x)
+                m_pred, v_pred = net(x)
 
                 # Specific to AGVI
                 if config.use_AGVI:
@@ -389,7 +388,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 train_states.update(
                     new_mu=m_pred,
                     new_std=s_pred_total,
-                    indices=indices,
+                    indices=[ts],
                     time_step=train_time_step,
                 )
                 train_time_step += 1
@@ -422,7 +421,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # Update LSTM states for the current batch
                 lstm_states = net.get_lstm_states()
 
-                v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
+                # v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
@@ -488,7 +487,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 )
 
                 # Feedforward
-                m_pred, v_pred = net(x, var_x)
+                m_pred, v_pred = net(x)
 
                 # Update LSTM states for the current batch
                 lstm_states = net.get_lstm_states()
@@ -522,7 +521,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 val_states.update(
                     new_mu=m_pred,
                     new_std=s_pred_total,
-                    indices=indices,
+                    indices=[ts],
                     time_step=val_time_step,
                 )
                 val_time_step += 1
@@ -641,7 +640,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             # get current batch size
             B = config.data_loader.batch_size
 
-            # set LSTM states for the current batch
+            # set LSTM states for the current batc h
             net.set_lstm_states(lstm_states)
 
             # prepare obsevation noise matrix
@@ -677,7 +676,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             )
 
             # Feedforward
-            m_pred, v_pred = net(x, var_x)
+            m_pred, v_pred = net(x)
 
             # Update LSTM states for the current batch
             lstm_states = net.get_lstm_states()
@@ -692,12 +691,13 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 var_y = flat_m[1::2]  # odd indices var_v
 
             s_pred_total = np.sqrt(v_pred + var_y)
+            s_pred_total = np.clip(s_pred_total, a_min=1e-6, a_max=5)
 
             # Store predictions
             test_states.update(
                 new_mu=m_pred,
                 new_std=s_pred_total,
-                indices=ts,
+                indices=[ts],
                 time_step=test_time_step,
             )
             test_time_step += 1
@@ -714,7 +714,12 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
     # Run over each time series and re_scale it
     if config.data_loader.scale_method == "standard":
-        for i in range(config.nb_ts):
+        for i in range(config.data_loader.nb_ts):
+
+            # skip if not in ts_to_use
+            if i not in config.ts_to_use:
+                continue
+
             # get mean and std
             mean = x_means[i]
             std = x_stds[i]
@@ -758,21 +763,21 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.data_loader.ts_to_use,
+        usecols=config.ts_to_use,
     ).values
     true_val = pd.read_csv(
         config.x_file[1],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.data_loader.ts_to_use,
+        usecols=config.ts_to_use,
     ).values
     true_test = pd.read_csv(
         config.x_file[2],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.data_loader.ts_to_use,
+        usecols=config.ts_to_use,
     ).values
 
     def _trim_trailing_nans(x: np.ndarray):
@@ -805,26 +810,36 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
     all_spred_test = []
 
     # Iterate over each time series and calculate metrics
-    for i in tqdm(range(config.nb_ts), desc="Evaluating series"):
+    for local_idx, ts_id in tqdm(
+        enumerate(config.ts_to_use),
+        desc="Evaluating series",
+        total=len(config.ts_to_use),
+    ):
 
-        # Get true values
+        # Get true values using the packed local index
         yt_train, yt_val, yt_test = (
-            _trim_trailing_nans(true_train[config.data_loader.input_seq_len :, i]),
-            _trim_trailing_nans(true_val[config.data_loader.input_seq_len :, i]),
-            _trim_trailing_nans(true_test[config.data_loader.input_seq_len :, i]),
+            _trim_trailing_nans(
+                true_train[config.data_loader.input_seq_len :, local_idx]
+            ),
+            _trim_trailing_nans(
+                true_val[config.data_loader.input_seq_len :, local_idx]
+            ),
+            _trim_trailing_nans(
+                true_test[config.data_loader.input_seq_len :, local_idx]
+            ),
         )
         yt_full = np.concatenate([yt_train, yt_val, yt_test])
 
-        # get expected value
-        ypred_train = train_states["mu"][i][: len(yt_train)]
-        ypred_val = val_states["mu"][i][: len(yt_val)]
-        ypred_test = test_states["mu"][i][: len(yt_test)]
+        # get expected value using the global TS ID
+        ypred_train = train_states["mu"][ts_id][: len(yt_train)]
+        ypred_val = val_states["mu"][ts_id][: len(yt_val)]
+        ypred_test = test_states["mu"][ts_id][: len(yt_test)]
         ypred_full = np.concatenate([ypred_train, ypred_val, ypred_test])
 
-        # get std
-        spred_train = train_states["std"][i][: len(yt_train)]
-        spred_val = val_states["std"][i][: len(yt_val)]
-        spred_test = test_states["std"][i][: len(yt_test)]
+        # get std using the global TS ID
+        spred_train = train_states["std"][ts_id][: len(yt_train)]
+        spred_val = val_states["std"][ts_id][: len(yt_val)]
+        spred_test = test_states["std"][ts_id][: len(yt_test)]
         spred_full = np.concatenate([spred_train, spred_val, spred_test])
 
         # Store split indices
@@ -833,7 +848,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
         # --- Plotting ---
         if config.evaluation.eval_plots:
             plot_series(
-                ts_idx=i,
+                ts_idx=ts_id,
                 y_true=yt_full,
                 y_pred=ypred_full,
                 s_pred=spred_full,
@@ -915,9 +930,9 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
             f.write("Series_ID,RMSE,LogLik,MAE,P50,P90\n")
-            for i in range(config.nb_ts):
+            for i in range(len(config.ts_to_use)):
                 f.write(
-                    f"{config.data_loader.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
+                    f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
                     f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
                     f"{test_p90_list[i]:.4f}\n"
                 )
@@ -933,7 +948,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
             )
 
 
-def main(Train=True, Eval=True, log_wandb=True):
+def main(Train=True, Eval=True, log_wandb=False):
 
     list_of_seeds = [1]
     list_of_experiments = ["Traffic_2008_01_14"]
@@ -960,7 +975,7 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-            # config.evaluation.eval_plots = True
+            config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -998,4 +1013,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(True, True, False)
+    main(True, True)

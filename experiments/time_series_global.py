@@ -73,7 +73,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         time_covariates=config.data_loader.time_covariates,
         scale_method=config.data_loader.scale_method,
         order_mode=config.data_loader.order_mode,
-        ts_to_use=config.data_loader.ts_to_use,
+        ts_to_use=config.ts_to_use,
     )
 
     # Embeddings
@@ -100,7 +100,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             f"Using standard EmbeddingLayer. Embedding size: {config.total_embedding_size}"
         )
         embeddings = EmbeddingLayer(
-            num_embeddings=config.nb_ts,
+            num_embeddings=config.data_loader.nb_ts,
             embedding_size=config.embeddings.standard.embedding_size,
             encoding_type=config.embeddings.standard.embedding_initializer,
             seed=config.seed,
@@ -128,9 +128,15 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         net.input_state_update = True
 
     # Initalize states
-    train_states = States(nb_ts=config.nb_ts, total_time_steps=train_data.max_len)
-    val_states = States(nb_ts=config.nb_ts, total_time_steps=val_data.max_len)
-    test_states = States(nb_ts=config.nb_ts, total_time_steps=test_data.max_len)
+    train_states = States(
+        nb_ts=config.data_loader.nb_ts, total_time_steps=train_data.max_len
+    )
+    val_states = States(
+        nb_ts=config.data_loader.nb_ts, total_time_steps=val_data.max_len
+    )
+    test_states = States(
+        nb_ts=config.data_loader.nb_ts, total_time_steps=test_data.max_len
+    )
 
     # Create progress bar
     pbar = tqdm(range(config.training.num_epochs), desc="Epochs")
@@ -171,7 +177,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     # embedding_coords_history: List[np.ndarray] = []
 
     # Initialize embedding update tracker
-    # update_tracker = EmbeddingUpdateTracker(num_series=config.nb_ts)
+    # update_tracker = EmbeddingUpdateTracker(num_series=config.data_loader.nb_ts)
 
     # Initialize parameter tracker
     # param_tracker = ParameterTracker()
@@ -204,14 +210,15 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         # Initialize look-back buffer and LSTM state container
         look_back_buffer = LookBackBuffer(
-            input_seq_len=config.data_loader.input_seq_len, nb_ts=config.nb_ts
+            input_seq_len=config.data_loader.input_seq_len,
+            nb_ts=config.data_loader.nb_ts,
         )
         # Create layer_state_shapes dynamically based on config
         layer_state_shapes = {
             i: size for i, size in enumerate(config.model.lstm_hidden_sizes)
         }
         lstm_state_container = LSTMStateContainer(
-            num_series=config.nb_ts, layer_state_shapes=layer_state_shapes
+            num_series=config.data_loader.nb_ts, layer_state_shapes=layer_state_shapes
         )
 
         # get current sigma_v if not using AGVI
@@ -228,6 +235,11 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             )
 
         for (x, y), ts_id, w_id in train_batch_iter:
+
+            # TODO: only for traffic and electricity datasets
+            look_back_buffer.needs_initialization = [
+                True for _ in range(config.data_loader.nb_ts)
+            ]
 
             # get current batch size and indices
             B = x.shape[0]
@@ -388,7 +400,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         net.reset_lstm_states()
 
         # reset look-back buffer
-        look_back_buffer.needs_initialization = [True for _ in range(config.nb_ts)]
+        look_back_buffer.needs_initialization = [
+            True for _ in range(config.data_loader.nb_ts)
+        ]
 
         val_batch_iter = GlobalBatchLoader.create_data_loader(
             dataset=val_data.dataset,
@@ -617,7 +631,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     net.reset_lstm_states()
 
     # reset look-back buffer
-    look_back_buffer.needs_initialization = [True for _ in range(config.nb_ts)]
+    look_back_buffer.needs_initialization = [
+        True for _ in range(config.data_loader.nb_ts)
+    ]
 
     test_batch_iter = GlobalBatchLoader.create_data_loader(
         dataset=test_data.dataset,
@@ -709,7 +725,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     # Run over each time series and re_scale it
     if config.data_loader.scale_method == "standard":
-        for i in range(config.nb_ts):
+        for i in range(config.data_loader.nb_ts):
             # get mean and std
             mean = train_data.x_mean[i][0]
             std = train_data.x_std[i][0]
@@ -759,21 +775,21 @@ def eval_global_model(
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.data_loader.ts_to_use,
+        usecols=config.ts_to_use,
     ).values
     true_val = pd.read_csv(
         config.x_file[1],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.data_loader.ts_to_use,
+        usecols=config.ts_to_use,
     ).values
     true_test = pd.read_csv(
         config.x_file[2],
         skiprows=1,
         delimiter=",",
         header=None,
-        usecols=config.data_loader.ts_to_use,
+        usecols=config.ts_to_use,
     ).values
 
     def _trim_trailing_nans(x: np.ndarray):
@@ -814,7 +830,7 @@ def eval_global_model(
         wandb_run.define_metric("p90", summary="last")
 
     # Iterate over each time series and calculate metrics
-    for i in tqdm(range(config.nb_ts), desc="Evaluating series"):
+    for i in tqdm(range(config.data_loader.nb_ts), desc="Evaluating series"):
 
         # Get true values
         yt_train, yt_val, yt_test = (
@@ -923,9 +939,9 @@ def eval_global_model(
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
             f.write("Series_ID,RMSE,LogLik,MAE,P50,P90\n")
-            for i in range(config.nb_ts):
+            for i in range(config.data_loader.nb_ts):
                 f.write(
-                    f"{config.data_loader.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
+                    f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
                     f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
                     f"{test_p90_list[i]:.4f}\n"
                 )
@@ -972,7 +988,7 @@ def eval_global_model(
                 final_embeddings_var = final_data["var"]
 
                 # Labels for standard embeddings are the time series IDs
-                labels = [str(ts_id) for ts_id in config.data_loader.ts_to_use]
+                labels = [str(ts_id) for ts_id in config.ts_to_use]
 
                 start_similarity = cosine_similarity_matrix(start_embeddings_mu)
                 final_similarity = cosine_similarity_matrix(final_embeddings_mu)
@@ -1009,14 +1025,14 @@ def eval_global_model(
                 if config.evaluation.embed_plots:
                     plot_embeddings(
                         start_embeddings_mu,
-                        config.nb_ts,
+                        config.data_loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_start.svg",
                         labels=labels,
                     )
                     plot_embeddings(
                         final_embeddings_mu,
-                        config.nb_ts,
+                        config.data_loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_final.svg",
                         labels=labels,
@@ -1198,17 +1214,18 @@ def eval_global_model(
                     config.embeddings.mapped.embedding_map_dir
                 ).set_index("ts_id")
 
-                if config.data_loader.ts_to_use is None:
+                if config.ts_to_use is None:
                     raise ValueError(
                         "config.ts_to_use is None, cannot stitch embeddings."
                     )
 
                 # Re-order map based on ts_to_use
-                map_df_ordered = map_df.loc[config.data_loader.ts_to_use]
+                map_df_ordered = map_df.loc[config.ts_to_use]
 
                 # Initialize stitched matrices
                 mu_stitched_start = np.zeros(
-                    (config.nb_ts, config.total_embedding_size), dtype=np.float32
+                    (config.data_loader.nb_ts, config.total_embedding_size),
+                    dtype=np.float32,
                 )
                 var_stitched_start = np.zeros_like(mu_stitched_start)
                 mu_stitched_final = np.zeros_like(mu_stitched_start)
@@ -1247,7 +1264,7 @@ def eval_global_model(
 
                 # Plot Stitched Embeddings
                 print("Plotting stitched (full) time series embeddings...")
-                labels = [str(ts_id) for ts_id in config.data_loader.ts_to_use]
+                labels = [str(ts_id) for ts_id in config.ts_to_use]
 
                 # Plot Cosine Similarity
                 start_similarity = cosine_similarity_matrix(mu_stitched_start)
@@ -1282,14 +1299,14 @@ def eval_global_model(
                     # Plot PCA
                     plot_embeddings(
                         mu_stitched_start,
-                        config.nb_ts,
+                        config.data_loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_start_stitched.svg",
                         labels=labels,
                     )
                     plot_embeddings(
                         mu_stitched_final,
-                        config.nb_ts,
+                        config.data_loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_final_stitched.svg",
                         labels=labels,
@@ -1331,10 +1348,10 @@ def eval_global_model(
                 )
 
 
-def main(Train=True, Eval=True, log_wandb=True):
+def main(Train=True, Eval=True, log_wandb=False):
 
     list_of_seeds = [1]
-    list_of_experiments = ["train100"]
+    list_of_experiments = ["Traffic_2008_01_14"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1343,24 +1360,19 @@ def main(Train=True, Eval=True, log_wandb=True):
 
             # Model category
             model_category = "global"
-            embed_category = "simple-embeddings"
+            embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/{model_category}_{embed_category}_attn"
+            experiment_name = f"seed{seed}/{exp}/{model_category}_{embed_category}"
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
+                f"experiments/configurations/{model_category}_{embed_category}_{exp}.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
             config.evaluation.eval_plots = True
-            config.evaluation.embed_plots = True
-
-            config.embeddings.standard.embedding_init_file = (
-                "out/autoencoder_embeddings_attn.npy"
-            )
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -1404,4 +1416,4 @@ def main(Train=True, Eval=True, log_wandb=True):
 
 
 if __name__ == "__main__":
-    main(False, True, False)
+    main(True, True)

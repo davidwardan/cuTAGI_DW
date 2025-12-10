@@ -22,9 +22,15 @@ class DataLoader(BaseModel):
     input_seq_len: int = 52
     batch_size: int = 16
     output_col: List[int] = [0]
-    ts_to_use: Optional[List[int]] = Field(
-        default_factory=lambda: [i for i in range(127)]
-    )
+    nb_ts: int = 127
+    ts_to_use: List[int] = []
+
+    @property
+    def ts_to_use(self) -> List[int]:
+        """Returns the list of time series indices to use. If empty, returns all."""
+        if self.data_loader.ts_to_use:
+            return self.data_loader.ts_to_use
+        return list(range(self.data_loader.nb_ts))
 
 
 class StandardEmbeddings(BaseModel):
@@ -100,6 +106,13 @@ class Config(BaseModel):
     evaluation: Optional[Evaluation] = None
 
     @property
+    def ts_to_use(self) -> List[int]:
+        """Returns the list of time series indices to use. If empty, returns all."""
+        if self.data_loader.ts_to_use:
+            return self.data_loader.ts_to_use
+        return list(range(self.data_loader.nb_ts))
+
+    @property
     def x_file(self) -> List[str]:
         """Dynamically creates the list of x files."""
         return [
@@ -159,13 +172,6 @@ class Config(BaseModel):
         """Calculates the total input size for the model."""
         base_size = self.data_loader.num_features + self.data_loader.input_seq_len - 1
         return base_size + self.total_embedding_size
-
-    @property
-    def nb_ts(self) -> int:
-        """Calculates the number of time series based on ts_to_use."""
-        if self.data_loader.ts_to_use is not None:
-            return len(self.data_loader.ts_to_use)
-        return 1
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":

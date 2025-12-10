@@ -460,8 +460,8 @@ def prepare_input(
 
     if look_back_mu is not None:
         x[active_mask, :input_seq_len] = look_back_mu[indices[active_mask]]
-    if look_back_var is not None:
-        var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
+    # if look_back_var is not None:
+    #     var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
 
     if embeddings is not None:
         lookup_indices = indices.copy()
@@ -479,6 +479,9 @@ def prepare_input(
 
     np.nan_to_num(flat_x, copy=False, nan=0.0)
     np.nan_to_num(flat_var, copy=False, nan=0.0)
+
+    # if any value in flat_x is greater than 2.0 set to zero
+    flat_x = np.where(np.abs(flat_x) > 2, 0.0, flat_x)
 
     return flat_x, flat_var
 
