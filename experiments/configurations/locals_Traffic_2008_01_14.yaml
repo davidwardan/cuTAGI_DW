@@ -22,8 +22,8 @@ data_loader:
   ts_to_use: []
 
 model:
-  Sigma_v_bounds: [null, null]
-  decaying_factor: 0.5
+  Sigma_v_bounds: [1, 0.3]
+  decaying_factor: 0.8
   device: "cuda"
   lstm_hidden_sizes: [40, 40, 40]
   init_params: null
@@ -36,7 +36,7 @@ training:
   early_stopping_criteria: "rmse"
   patience: 10
   min_delta: 0.0001
-  warmup_epochs: 0
+  warmup_epochs: 5
   shuffle: false
 
 evaluation:

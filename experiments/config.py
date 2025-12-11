@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Dict, Union
+from typing import Any, List, Optional, Dict
 import yaml
 from pydantic import BaseModel, Field
 
@@ -24,13 +24,6 @@ class DataLoader(BaseModel):
     output_col: List[int] = [0]
     nb_ts: int = 127
     ts_to_use: List[int] = []
-
-    @property
-    def ts_to_use(self) -> List[int]:
-        """Returns the list of time series indices to use. If empty, returns all."""
-        if self.data_loader.ts_to_use:
-            return self.data_loader.ts_to_use
-        return list(range(self.data_loader.nb_ts))
 
 
 class StandardEmbeddings(BaseModel):

@@ -19,7 +19,7 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import time_series_global as tsg
+    from experiments import time_series_global_stateful as tsg
 
     torch = tsg.torch
 

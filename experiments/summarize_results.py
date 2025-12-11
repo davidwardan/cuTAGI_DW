@@ -105,19 +105,49 @@ def _read_metrics_table(file_path: Path) -> pd.DataFrame:
     return df
 
 
-def read_overall_metrics(file_path: Path) -> pd.Series:
-    """Select the 'Overall' row, fallback to last row, and coerce numeric columns."""
+def read_metrics_by_avg_type(file_path: Path) -> dict:
+    """
+    Read metrics for both macroaverage and microaverage rows.
+    Returns a dict: {"macro": pd.Series, "micro": pd.Series}.
+    Falls back to 'overall' or last row if new format not found.
+    """
     df = _read_metrics_table(file_path)
+    keep = [c for c in ["RMSE", "LogLik", "MAE", "P50", "P90"] if c in df.columns]
+
+    def extract_row(row) -> pd.Series:
+        out = {k: pd.to_numeric(row.get(k, np.nan), errors="coerce") for k in keep}
+        return pd.Series(out)
+
+    result = {}
 
     if "Series_ID" in df.columns:
-        mask = df["Series_ID"].str.lower().eq("overall")
-        row = df.loc[mask].iloc[-1] if mask.any() else df.iloc[-1]
-    else:
-        row = df.iloc[-1]
+        series_col = df["Series_ID"].str.lower().str.replace("_", "")
 
-    keep = [c for c in ["RMSE", "LogLik", "MAE", "P50", "P90"] if c in df.columns]
-    out = {k: pd.to_numeric(row.get(k, np.nan), errors="coerce") for k in keep}
-    return pd.Series(out)
+        # Try macroaverage (handles "Macro_Average", "macroaverage", "macro")
+        macro_mask = series_col.eq("macroaverage") | series_col.eq("macro")
+        if macro_mask.any():
+            result["macro"] = extract_row(df.loc[macro_mask].iloc[-1])
+
+        # Try microaverage (handles "Micro_Average", "microaverage", "micro")
+        micro_mask = series_col.eq("microaverage") | series_col.eq("micro")
+        if micro_mask.any():
+            result["micro"] = extract_row(df.loc[micro_mask].iloc[-1])
+
+        # Fallback to 'overall' if neither found
+        if not result:
+            overall_mask = series_col.eq("overall")
+            if overall_mask.any():
+                row = extract_row(df.loc[overall_mask].iloc[-1])
+                result["macro"] = row
+                result["micro"] = row
+
+    # Final fallback: use last row for both
+    if not result:
+        row = extract_row(df.iloc[-1])
+        result["macro"] = row
+        result["micro"] = row
+
+    return result
 
 
 # -----------------------------------------------------------------
@@ -145,20 +175,28 @@ def collect_all(base_dir, debug: bool = False) -> pd.DataFrame:
                 continue
 
         try:
-            overall = read_overall_metrics(metrics_file)
+            metrics_by_type = read_metrics_by_avg_type(metrics_file)
         except Exception as e:
             print(f"[warn] {e}", file=sys.stderr)
             continue
 
         model_type = extract_model_type(exp_dir.name)
-        rec = {"seed": seed, "train_size": train_size, "model_type": model_type}
 
-        for k, v in overall.items():
-            if isinstance(v, (int, float, np.integer, np.floating)) and pd.notna(v):
-                rec[k] = float(v)
+        # Create one record per avg_type (macro/micro)
+        for avg_type, metrics in metrics_by_type.items():
+            rec = {
+                "seed": seed,
+                "train_size": train_size,
+                "model_type": model_type,
+                "avg_type": avg_type,
+            }
 
-        if len(rec) > 3:
-            records.append(rec)
+            for k, v in metrics.items():
+                if isinstance(v, (int, float, np.integer, np.floating)) and pd.notna(v):
+                    rec[k] = float(v)
+
+            if len(rec) > 4:
+                records.append(rec)
 
     return pd.DataFrame.from_records(records) if records else pd.DataFrame()
 
@@ -167,7 +205,7 @@ def aggregate(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    group_cols = ["model_type", "train_size"]
+    group_cols = ["model_type", "train_size", "avg_type"]
     metric_cols = [c for c in df.columns if c not in group_cols + ["seed"]]
     if not metric_cols:
         return pd.DataFrame()
@@ -180,7 +218,11 @@ def aggregate(df: pd.DataFrame) -> pd.DataFrame:
 
     # Flatten columns
     agg.columns = [
-        f"{a}_{b}" if b else a if a not in ["model_type", "train_size"] else a
+        (
+            f"{a}_{b}"
+            if b
+            else a if a not in ["model_type", "train_size", "avg_type"] else a
+        )
         for a, b in agg.columns
     ]
 
@@ -191,7 +233,9 @@ def aggregate(df: pd.DataFrame) -> pd.DataFrame:
             mask = (agg[cnt_col] == 1) & (agg[std_col].isna())
             agg.loc[mask, std_col] = 0.0
 
-    return agg.sort_values(by=["model_type", "train_size"]).reset_index(drop=True)
+    return agg.sort_values(by=["model_type", "train_size", "avg_type"]).reset_index(
+        drop=True
+    )
 
 
 def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
@@ -210,69 +254,115 @@ def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
         )
     )
 
+    # Get unique avg_types (macro, micro)
+    avg_types = (
+        list(agg["avg_type"].dropna().unique()) if "avg_type" in agg.columns else [""]
+    )
+
+    # Precompute shared y-limits for each metric across all avg_types
+    ylim_per_metric = {}
     for metric in metric_bases:
         mean_col, std_col = f"{metric}_mean", f"{metric}_std"
         if mean_col not in agg.columns or std_col not in agg.columns:
             continue
 
-        fig = plt.figure(figsize=(6, 3))
-        ax = fig.gca()
-        for model in agg["model_type"].dropna().unique():
-            # custom model name
-            if model.lower() == "global_no-embeddings":
-                label = "Global"
-            elif model.lower() == "global_simple-embeddings":
-                label = r"Global + $B_{simple}$"
-            elif model.lower() == "locals":
-                label = "Locals"
-            elif model.lower() == "global_hierarchical-embeddings":
-                label = r"Global + $B_{hierarchical}$"
-            else:
-                label = model
+        all_means = agg[mean_col].dropna()
+        all_stds = agg[std_col].fillna(0)
+        if len(all_means) == 0:
+            continue
 
-            sub = agg[agg["model_type"] == model].sort_values("train_size")
-            ax.errorbar(
-                sub["train_size"],
-                sub[mean_col],
-                yerr=sub[std_col].fillna(0),
-                fmt="-o",
-                label=label,
-            )
+        # Compute global min/max considering error bars
+        y_min = (agg[mean_col] - all_stds).min()
+        y_max = (agg[mean_col] + all_stds).max()
+        margin = (y_max - y_min) * 0.1 if y_max > y_min else 0.1
+        ylim_per_metric[metric] = (y_min - margin, y_max + margin)
 
-        plt.xlabel("Train size (%)")
-        if metric == "LogLik":
-            plt.ylabel(r"Log-Likelihood $(\uparrow)$")
+    for avg_type in avg_types:
+        # Filter by avg_type
+        if avg_type:
+            agg_filtered = agg[agg["avg_type"] == avg_type]
+            suffix = f"_{avg_type}"
+            title_suffix = f" ({avg_type.capitalize()})"
         else:
-            plt.ylabel(f"{metric} $(\\downarrow)$")
-        legend_order = [
-            "Locals",
-            "Global",
-            r"Global + $B_{simple}$",
-            r"Global + $B_{hierarchical}$",
-        ]
-        handles, labels = ax.get_legend_handles_labels()
-        order = sorted(
-            range(len(labels)),
-            key=lambda i: (
-                legend_order.index(labels[i])
-                if labels[i] in legend_order
-                else len(legend_order) + i
-            ),
-        )
-        ax.legend(
-            [handles[i] for i in order],
-            [labels[i] for i in order],
-            loc="center left",
-            bbox_to_anchor=(1.01, 0.5),
-            ncol=1,
-            frameon=False,
-        )
-        # show all x ticks
-        ax.set_xticks(sub["train_size"].unique())
-        fig.subplots_adjust(right=0.72)
-        fig.tight_layout()
-        fig.savefig(plots_dir / f"{metric}.svg")
-        plt.close(fig)
+            agg_filtered = agg
+            suffix = ""
+            title_suffix = ""
+
+        for metric in metric_bases:
+            mean_col, std_col = f"{metric}_mean", f"{metric}_std"
+            if (
+                mean_col not in agg_filtered.columns
+                or std_col not in agg_filtered.columns
+            ):
+                continue
+
+            fig = plt.figure(figsize=(6, 3))
+            ax = fig.gca()
+            for model in agg_filtered["model_type"].dropna().unique():
+                # custom model name
+                if model.lower() == "global_no-embeddings":
+                    label = "Global"
+                elif model.lower() == "global_simple-embeddings":
+                    label = r"Global + $B_{simple}$"
+                elif model.lower() == "locals":
+                    label = "Locals"
+                elif model.lower() == "global_hierarchical-embeddings":
+                    label = r"Global + $B_{hierarchical}$"
+                else:
+                    label = model
+
+                sub = agg_filtered[agg_filtered["model_type"] == model].sort_values(
+                    "train_size"
+                )
+                ax.errorbar(
+                    sub["train_size"],
+                    sub[mean_col],
+                    yerr=sub[std_col].fillna(0),
+                    fmt="-o",
+                    label=label,
+                )
+
+            plt.xlabel("Train size (%)")
+            if metric == "LogLik":
+                plt.ylabel(r"Log-Likelihood $(\uparrow)$")
+            else:
+                plt.ylabel(f"{metric} $(\\downarrow)$")
+            plt.title(f"{metric}{title_suffix}")
+
+            # Apply shared y-limits
+            if metric in ylim_per_metric:
+                ax.set_ylim(ylim_per_metric[metric])
+
+            legend_order = [
+                "Locals",
+                "Global",
+                r"Global + $B_{simple}$",
+                r"Global + $B_{hierarchical}$",
+            ]
+            handles, labels = ax.get_legend_handles_labels()
+            order = sorted(
+                range(len(labels)),
+                key=lambda i: (
+                    legend_order.index(labels[i])
+                    if labels[i] in legend_order
+                    else len(legend_order) + i
+                ),
+            )
+            ax.legend(
+                [handles[i] for i in order],
+                [labels[i] for i in order],
+                loc="center left",
+                bbox_to_anchor=(1.01, 0.5),
+                ncol=1,
+                frameon=False,
+            )
+            # show all x ticks
+            if len(sub) > 0:
+                ax.set_xticks(sub["train_size"].unique())
+            fig.subplots_adjust(right=0.72)
+            fig.tight_layout()
+            fig.savefig(plots_dir / f"{metric}{suffix}.svg")
+            plt.close(fig)
 
 
 def main():

@@ -19,7 +19,7 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import time_series_locals as tsl
+    from experiments import time_series_locals_stateful as tsl
 
     torch = tsl.torch
 

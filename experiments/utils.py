@@ -212,6 +212,13 @@ class LSTMStateContainer:
             }
         return stats
 
+    def reset_states(self):
+        for layer_idx, components in self.states.items():
+            components["mu_h"].fill(0.0)
+            components["var_h"].fill(0.0)
+            components["mu_c"].fill(0.0)
+            components["var_c"].fill(0.0)
+
 
 # --- Early Stopping Class ---
 class EarlyStopping:
@@ -364,7 +371,7 @@ def prepare_data(
         stride=1,
         time_covariates=time_covariates,
         scale_method=scale_method,
-        order_mode=order_mode,
+        order_mode="shuffled",
         ts_to_use=ts_to_use,
     )
 
@@ -460,8 +467,8 @@ def prepare_input(
 
     if look_back_mu is not None:
         x[active_mask, :input_seq_len] = look_back_mu[indices[active_mask]]
-    # if look_back_var is not None:
-    #     var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
+    if look_back_var is not None:
+        var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
 
     if embeddings is not None:
         lookup_indices = indices.copy()
@@ -479,9 +486,6 @@ def prepare_input(
 
     np.nan_to_num(flat_x, copy=False, nan=0.0)
     np.nan_to_num(flat_var, copy=False, nan=0.0)
-
-    # if any value in flat_x is greater than 2.0 set to zero
-    flat_x = np.where(np.abs(flat_x) > 2, 0.0, flat_x)
 
     return flat_x, flat_var
 

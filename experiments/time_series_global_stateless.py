@@ -25,11 +25,9 @@ from experiments.utils import (
     cosine_similarity_matrix,
     plot_similarity,
     calculate_updates,
-    update_aleatoric_uncertainty,
     States,
     EarlyStopping,
     LookBackBuffer,
-    LSTMStateContainer,
 )
 from experiments.tracking import EmbeddingUpdateTracker, ParameterTracker
 
@@ -173,30 +171,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 sigma_end + (sigma_start - sigma_end) * weights
             ).tolist()
 
-    # Storage for 2D embedding coordinates per epoch
-    # embedding_coords_history: List[np.ndarray] = []
-
-    # Initialize embedding update tracker
-    # update_tracker = EmbeddingUpdateTracker(num_series=config.data_loader.nb_ts)
-
-    # Initialize parameter tracker
-    # param_tracker = ParameterTracker()
-    # param_tracker.track_parameter(
-    #     layer_name="LSTM.0",
-    #     param_type="weight",
-    #     indices=list(range(40)),
-    #     label="LSTM Layer 0 Weights",
-    # )
-    # param_tracker.track_parameter(
-    #     layer_name="LSTM.0",
-    #     param_type="bias",
-    #     indices=list(range(40)),
-    #     label="LSTM Layer 0 Biases",
-    # )
-
     # --- Training loop ---
     for epoch in pbar:
-        # net.train()
+        net.train()
         train_mse = []
         train_log_lik = []
 
@@ -212,13 +189,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         look_back_buffer = LookBackBuffer(
             input_seq_len=config.data_loader.input_seq_len,
             nb_ts=config.data_loader.nb_ts,
-        )
-        # Create layer_state_shapes dynamically based on config
-        layer_state_shapes = {
-            i: size for i, size in enumerate(config.model.lstm_hidden_sizes)
-        }
-        lstm_state_container = LSTMStateContainer(
-            num_series=config.data_loader.nb_ts, layer_state_shapes=layer_state_shapes
         )
 
         # get current sigma_v if not using AGVI
@@ -236,18 +206,14 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         for (x, y), ts_id, w_id in train_batch_iter:
 
-            # TODO: only for traffic and electricity datasets
-            look_back_buffer.needs_initialization = [
-                True for _ in range(config.data_loader.nb_ts)
-            ]
-
             # get current batch size and indices
             B = x.shape[0]
             indices = ts_id
             time_steps = w_id
 
-            # set LSTM states for the current batch
-            lstm_state_container.set_states_on_net(indices, net)
+            # reset LSTM states for the current batch
+            if epoch != 0:
+                net.reset_lstm_states()
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -350,26 +316,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     var_delta_slice,
                 )
 
-                # Track updates
-                # update_tracker.update(indices, mu_delta_slice)
-
-            # update aleatoric uncertainty if using AGVI
-            # if config.use_AGVI:
-            #     (
-            #         mu_v2bar_post,
-            #         _,
-            #     ) = update_aleatoric_uncertainty(
-            #         mu_z0=m_pred,
-            #         var_z0=v_pred,
-            #         mu_v2bar=flat_m[1::2],
-            #         var_v2bar=flat_v[1::2],
-            #         y=y.flatten(),
-            #     )
-            #     var_y = mu_v2bar_post  # updated aleatoric uncertainty
-
-            # Update LSTM states for the current batch
-            lstm_state_container.update_states_from_net(indices, net)
-
+            # TODO: check if really needed?
             v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
             # Update look_back buffer
@@ -383,21 +330,10 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         train_mse = np.mean(train_mse)
         train_log_lik = np.mean(train_log_lik)
 
-        # Apply accumulated embedding updates at the end of the epoch
-        # if embeddings is not None:
-        #     embeddings.apply_accumulated_updates()
-
-        # Step tracker
-        # update_tracker.step_epoch()
-        # param_tracker.step_epoch(net)
-
         # Validation
-        # net.eval()
+        net.eval()
         val_mse = []
         val_log_lik = []
-
-        # reset LSTM states
-        net.reset_lstm_states()
 
         # reset look-back buffer
         look_back_buffer.needs_initialization = [
@@ -418,8 +354,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             indices = ts_id
             time_steps = w_id
 
-            # set LSTM states for the current batch
-            lstm_state_container.set_states_on_net(indices, net)
+            # reset LSTM states for the current batch
+            net.reset_lstm_states()
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -455,9 +391,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
             # Feedforward
             m_pred, v_pred = net(x, var_x)
-
-            # Update LSTM states for the current batch
-            lstm_state_container.update_states_from_net(indices, net)
 
             # Specific to AGVI
             if config.use_AGVI:
@@ -535,22 +468,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             if not config.use_AGVI:
                 log_payload["sigma_v"] = sigma_v
 
-            # log current lstm states
-            # lstm_states_statistics = lstm_state_container.get_statistics()
-            # # iterate over layers
-            # for layer_idx in lstm_states_statistics.keys():
-            #     for stat_name, stat_value in lstm_states_statistics[layer_idx].items():
-            #         log_payload[f"LSTM.{layer_idx}_{stat_name}"] = stat_value
-
             # Send all logs for this epoch
             log_data(log_payload, wandb_run=wandb_run)
-
-        # --- Track embeddings in 2D for this epoch ---
-        # track_embedding_coordinates(
-        #     embeddings=embeddings,
-        #     config=config,
-        #     coords_history=embedding_coords_history,
-        # )
 
         # Check for early stopping
         val_score = (
@@ -562,7 +481,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             val_score,
             net,
             look_back_buffer,
-            lstm_state_container,
+            None,
             train_states,
             val_states,
             sigma_v if not config.use_AGVI else None,
@@ -571,7 +490,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             print(f"Early stopping at epoch {epoch+1}")
             net.load_state_dict(early_stopping.best_state)
             look_back_buffer = early_stopping.best_look_back_buffer
-            lstm_state_container = early_stopping.best_lstm_state_container
             train_states = early_stopping.train_states
             val_states = early_stopping.val_states
             if not config.use_AGVI:
@@ -588,7 +506,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             print("Training finished. Loading best model from early stopping tracker.")
             net.load_state_dict(early_stopping.best_state)
             look_back_buffer = early_stopping.best_look_back_buffer
-            lstm_state_container = early_stopping.best_lstm_state_container
             train_states = early_stopping.train_states
             val_states = early_stopping.val_states
             if not config.use_AGVI:
@@ -607,28 +524,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         elif config.use_standard_embeddings:
             embeddings.save(os.path.join(embedding_dir, "embeddings_final.npz"))
 
-    # # Save 2D embedding trajectory if we tracked any
-    # if embeddings is not None and len(embedding_coords_history) > 0:
-    #     coords_arr = np.stack(
-    #         embedding_coords_history, axis=0
-    #     )  # (n_epochs_run, n_entities, 2)
-    #     np.savez(
-    #         os.path.join(embedding_dir, "embedding_coords_history.npz"),
-    #         coords=coords_arr,
-    #     )
-
-    # # Plot embedding updates
-    # if embeddings is not None:
-    #     update_tracker.plot(embedding_dir, filename="embedding_updates_magnitude.svg")
-
-    # # Plot parameter evolution
-    # param_tracker.plot(output_dir)
-
     # --- Testing ---
-    # net.eval()
-
-    # reset LSTM states
-    net.reset_lstm_states()
+    net.eval()
 
     # reset look-back buffer
     look_back_buffer.needs_initialization = [
@@ -649,8 +546,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         indices = ts_id
         time_steps = w_id
 
-        # set LSTM states for the current batch
-        lstm_state_container.set_states_on_net(indices, net)
+        # reset LSTM states for the current batch
+        net.reset_lstm_states()
 
         # prepare obsevation noise matrix
         if not config.use_AGVI:
@@ -691,9 +588,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         # Feedforward
         m_pred, v_pred = net(x, var_x)
 
-        # Update LSTM states for the current batch
-        lstm_state_container.update_states_from_net(ts_id, net)
-
         # Specific to AGVI
         if config.use_AGVI:
             flat_m = np.ravel(m_pred)
@@ -720,12 +614,18 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             indices=indices,
         )
 
-    # End of epoch
+    # End of testing
     net.reset_lstm_states()
 
     # Run over each time series and re_scale it
     if config.data_loader.scale_method == "standard":
         for i in range(config.data_loader.nb_ts):
+
+            if i not in config.ts_to_use:
+                continue
+
+            i = config.ts_to_use.index(i)
+
             # get mean and std
             mean = train_data.x_mean[i][0]
             std = train_data.x_std[i][0]
@@ -830,7 +730,9 @@ def eval_global_model(
         wandb_run.define_metric("p90", summary="last")
 
     # Iterate over each time series and calculate metrics
-    for i in tqdm(range(config.data_loader.nb_ts), desc="Evaluating series"):
+    for i in tqdm(config.ts_to_use, desc="Evaluating series"):
+
+        i = config.ts_to_use.index(i)
 
         # Get true values
         yt_train, yt_val, yt_test = (
@@ -939,7 +841,9 @@ def eval_global_model(
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
             f.write("Series_ID,RMSE,LogLik,MAE,P50,P90\n")
-            for i in range(config.data_loader.nb_ts):
+            for i in config.ts_to_use:
+                i = config.ts_to_use.index(i)
+
                 f.write(
                     f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
                     f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
@@ -1350,8 +1254,8 @@ def eval_global_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [1]
-    list_of_experiments = ["Traffic_2008_01_14"]
+    list_of_seeds = [1, 3, 17, 42, 99]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1363,16 +1267,18 @@ def main(Train=True, Eval=True, log_wandb=False):
             embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/{model_category}_{embed_category}"
+            experiment_name = (
+                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
+            )
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_{exp}.yaml"
+                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-            config.evaluation.eval_plots = True
+            config.evaluation.eval_plots = False
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

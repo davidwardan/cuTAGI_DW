@@ -24,7 +24,6 @@ from experiments.utils import (
     build_model,
     plot_series,
     EarlyStopping,
-    update_aleatoric_uncertainty,
     calculate_updates,
     adjust_params,
 )
@@ -117,9 +116,6 @@ def prepare_input(
         x[:input_seq_len] = look_back_mu[indices]
     if look_back_var is not None:
         var_x[:input_seq_len] = look_back_var[indices]
-
-    # if any value in x is greater than 2.0 set to zero
-    x = np.where(np.abs(x) > 2, 0.0, x)
 
     return x, var_x
 
@@ -301,7 +297,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
         # --- Training loop ---
         for epoch in pbar:
-            # net.train()
+            net.train()
             train_mse = []
             train_log_lik = []
 
@@ -325,9 +321,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # get current batch size
                 B = config.data_loader.batch_size
 
-                # set LSTM states for the current batch
+                # reset LSTM states
                 if epoch != 0:
-                    net.set_lstm_states(lstm_states)
+                    net.reset_lstm_states()
 
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
@@ -348,16 +344,16 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     )
 
                 # prepare input
-                # x, var_x = prepare_input(
-                #     x=x,
-                #     var_x=None,
-                #     look_back_mu=look_back_buffer.mu,
-                #     look_back_var=look_back_buffer.var,
-                #     indices=[0],
-                # )
+                x, var_x = prepare_input(
+                    x=x,
+                    var_x=None,
+                    look_back_mu=look_back_buffer.mu,
+                    look_back_var=look_back_buffer.var,
+                    indices=[0],
+                )
 
                 # Feedforward
-                m_pred, v_pred = net(x)
+                m_pred, v_pred = net(x, var_x)
 
                 # Specific to AGVI
                 if config.use_AGVI:
@@ -404,24 +400,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     var_y=var_y,
                 )
 
-                # update aleatoric uncertainty if using AGVI
-                # if config.use_AGVI:
-                #     (
-                #         mu_v2bar_post,
-                #         _,
-                #     ) = update_aleatoric_uncertainty(
-                #         mu_z0=m_pred,
-                #         var_z0=v_pred,
-                #         mu_v2bar=flat_m[1::2],
-                #         var_v2bar=flat_v[1::2],
-                #         y=y.flatten(),
-                #     )
-                #     var_y = mu_v2bar_post  # updated aleatoric uncertainty
-
-                # Update LSTM states for the current batch
-                lstm_states = net.get_lstm_states()
-
-                # v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
+                # TODO: check if really needed
+                v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
@@ -435,7 +415,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             train_log_lik = np.mean(train_log_lik)
 
             # Validation
-            # net.eval()
+            net.eval()
             val_mse = []
             val_log_lik = []
 
@@ -456,8 +436,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # get current batch size
                 B = config.data_loader.batch_size
 
-                # set LSTM states for the current batch
-                net.set_lstm_states(lstm_states)
+                # reset LSTM states
+                net.reset_lstm_states()
 
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
@@ -466,6 +446,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                         sigma_v**2,
                         dtype=np.float32,
                     )
+
+                look_back_buffer.needs_initialization = [True]
 
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
@@ -487,10 +469,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 )
 
                 # Feedforward
-                m_pred, v_pred = net(x)
-
-                # Update LSTM states for the current batch
-                lstm_states = net.get_lstm_states()
+                m_pred, v_pred = net(x, var_x)
 
                 # Specific to AGVI
                 if config.use_AGVI:
@@ -564,13 +543,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 if not config.use_AGVI:
                     log_payload["sigma_v"] = sigma_v
 
-                # log current lstm states
-                # lstm_states_statistics = lstm_state_container.get_statistics()
-                # # iterate over layers
-                # for layer_idx in lstm_states_statistics.keys():
-                #     for stat_name, stat_value in lstm_states_statistics[layer_idx].items():
-                #         log_payload[f"LSTM.{layer_idx}_{stat_name}"] = stat_value
-
                 # Send all logs for this epoch
                 log_data(log_payload, wandb_run=wandb_run)
 
@@ -618,10 +590,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         net.save(os.path.join(output_dir, f"param/model_{ts}.pth"))
 
         # --- Testing ---
-        # net.eval()
-
-        # reset LSTM states
-        net.reset_lstm_states()
+        net.eval()
 
         # reset look-back buffer
         look_back_buffer.needs_initialization = [True]
@@ -640,8 +609,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             # get current batch size
             B = config.data_loader.batch_size
 
-            # set LSTM states for the current batc h
-            net.set_lstm_states(lstm_states)
+            # reset LSTM states
+            net.reset_lstm_states()
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -676,10 +645,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             )
 
             # Feedforward
-            m_pred, v_pred = net(x)
-
-            # Update LSTM states for the current batch
-            lstm_states = net.get_lstm_states()
+            m_pred, v_pred = net(x, var_x)
 
             # Specific to AGVI
             if config.use_AGVI:
@@ -691,7 +657,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 var_y = flat_m[1::2]  # odd indices var_v
 
             s_pred_total = np.sqrt(v_pred + var_y)
-            s_pred_total = np.clip(s_pred_total, a_min=1e-6, a_max=5)
 
             # Store predictions
             test_states.update(
@@ -950,8 +915,8 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [1]
-    list_of_experiments = ["Traffic_2008_01_14"]
+    list_of_seeds = [1, 3, 17, 42, 99]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -966,16 +931,16 @@ def main(Train=True, Eval=True, log_wandb=False):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/{model_category}"
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
 
             # Create configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{exp}.yaml"
+                f"experiments/configurations/{model_category}_HQ127.yaml"
             )
 
             config.seed = seed
-            config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-            config.evaluation.eval_plots = True
+            config.model.device = "cpu"
+            config.evaluation.eval_plots = False
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -1013,4 +978,4 @@ def main(Train=True, Eval=True, log_wandb=False):
 
 
 if __name__ == "__main__":
-    main(True, True)
+    main(False, True)

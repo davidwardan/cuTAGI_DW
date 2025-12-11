@@ -19,7 +19,7 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import time_series_global as tsg
+    from experiments import time_series_global_stateful as tsg
 
     torch = tsg.torch
 
@@ -28,9 +28,7 @@ def _run_experiment(
     embed_category = "hierarchical-embeddings"
 
     # Define experiment name
-    experiment_name = (
-        f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
-    )
+    experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
 
     # Load configuration
     config = Config.from_yaml(
@@ -55,7 +53,6 @@ def _run_experiment(
             config,
             experiment_name=experiment_name,
         )
-
 
 
 def run_experiments(

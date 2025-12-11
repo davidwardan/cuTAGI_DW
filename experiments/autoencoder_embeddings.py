@@ -15,12 +15,12 @@ from typing import Tuple
 # ==========================================
 CONFIG = {
     # File Paths
-    "train_csv": "data/hq/train100/split_train_values.csv",
-    "val_csv": "data/hq/split_val_values.csv",
+    "train_csv": "data/traffic/traffic_2008_01_14_train.csv",
+    "val_csv": "data/traffic/traffic_2008_01_14_val.csv",
     "output_plot": "out/embeddings_pca_attn.svg",
     "output_embedding_file": "out/autoencoder_embeddings_attn.npy",
     # Model Params
-    "seq_len": 52,  # Window size
+    "seq_len": 24,  # Window size
     "embedding_dim": 10,  # Latent vector size
     "hidden_dim": 40,  # Internal LSTM size
     # Training Params

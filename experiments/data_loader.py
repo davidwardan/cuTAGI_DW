@@ -369,6 +369,43 @@ class TimeSeriesDataBuilder:
                 "series_id": S,
                 "window_id": K,
             }
+
+        elif self.order_mode == "shuffled":
+            # Concatenate all windows without any specific ordering
+            # (shuffling happens in the loader)
+            xs, ys = [], []
+            S_parts, K_parts = [], []
+            for j, (xj, yj, kj, sj) in enumerate(rolled_per_ts):
+                if len(yj) == 0:
+                    continue
+                xs.append(xj)
+                ys.append(yj)
+                K_parts.append(kj)
+                S_parts.append(sj)
+
+            if not xs:
+                return {
+                    "value": (
+                        np.empty(
+                            (0, self.input_seq_len + self.num_features - 1),
+                            dtype=np.float32,
+                        ),
+                        np.empty((0, self.output_seq_len), dtype=np.float32),
+                    ),
+                    "series_id": np.empty((0,), dtype=np.int32),
+                    "window_id": np.empty((0,), dtype=np.int32),
+                }
+
+            X = np.concatenate(xs, axis=0).astype(np.float32)
+            Y = np.concatenate(ys, axis=0).astype(np.float32)
+            S = np.concatenate(S_parts, axis=0)
+            K = np.concatenate(K_parts, axis=0)
+
+            return {
+                "value": (X, Y),
+                "series_id": S,
+                "window_id": K,
+            }
         else:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
 
@@ -447,6 +484,50 @@ class GlobalBatchLoader:
                     yield (x_batch, y_batch), s_batch, k_batch
                 else:
                     yield (x_batch_real, y_batch_real), s_batch_real, k_batch_real
+
+    @staticmethod
+    def _loader_shuffled(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        batch_size: int,
+        shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Generator for 'shuffled' mode.
+        - Fully randomizes all windows across all series and time positions.
+        - If shuffle=True, shuffles the entire dataset indices.
+        - Batches may contain windows from different series and different time positions.
+        - Drops the last batch if it's smaller than batch_size.
+        """
+        if len(X) == 0:
+            return
+
+        n_samples = len(X)
+        indices = np.arange(n_samples)
+
+        if shuffle:
+            if rng is not None:
+                rng.shuffle(indices)
+            else:
+                np.random.shuffle(indices)
+
+        # Only iterate up to the last full batch
+        n_full_batches = n_samples // batch_size
+        for i in range(n_full_batches):
+            start = i * batch_size
+            batch_indices = indices[start : start + batch_size]
+
+            x_batch = X[batch_indices]
+            y_batch = Y[batch_indices]
+            s_batch = S[batch_indices]
+            k_batch = K[batch_indices]
+
+            yield (x_batch, y_batch), s_batch, k_batch
 
     @staticmethod
     def _loader_by_series(
@@ -530,6 +611,10 @@ class GlobalBatchLoader:
             )
         elif order_mode == "by_window":
             yield from GlobalBatchLoader._loader_by_window(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "shuffled":
+            yield from GlobalBatchLoader._loader_shuffled(
                 X, Y, S, K, batch_size, shuffle, rng
             )
         else:
