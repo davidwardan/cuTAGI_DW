@@ -34,6 +34,7 @@ class LookBackBuffer:
 
     def update(self, new_mu, new_var, indices):
         # Check for negative indexes
+        indices = np.asarray(indices)
         active_mask = indices >= 0
         indices = indices[active_mask]
         new_mu = new_mu[active_mask]
@@ -334,12 +335,23 @@ class States:
             indices: Array of time series indices to update.
             time_step: Array of time steps to update.
         """
-        # Check for negative indices and skip them
+        indices = np.asarray(indices)
         valid_mask = indices >= 0
+
+        # Handle scalar time_step
+        if np.isscalar(time_step):
+            pass
+        else:
+            time_step = np.asarray(time_step)
+            time_step = time_step[valid_mask]
+
         indices = indices[valid_mask]
-        time_step = time_step[valid_mask]
-        new_mu = new_mu[valid_mask]
-        new_std = new_std[valid_mask]
+
+        # Handle new_mu / new_std if they match indices size
+        if not np.isscalar(new_mu) and len(new_mu) == len(valid_mask):
+            new_mu = new_mu[valid_mask]
+        if not np.isscalar(new_std) and len(new_std) == len(valid_mask):
+            new_std = new_std[valid_mask]
 
         self.mu[indices, time_step] = new_mu.flatten()
         self.std[indices, time_step] = new_std.flatten()
@@ -407,7 +419,13 @@ def prepare_data(
 
 # Define model
 def build_model(
-    input_size, use_AGVI, seed, device, hidden_sizes=[40, 40], init_params=None
+    input_size,
+    use_AGVI,
+    seed,
+    device,
+    hidden_sizes=[40, 40],
+    init_params=None,
+    shift_biases=True,
 ):
     manual_seed(seed)
     layers = []
@@ -425,20 +443,21 @@ def build_model(
     net = Sequential(*layers)
 
     # shift LSTM biases
-    state_dict = net.state_dict()
-    for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
-        if layer_name.split(".")[0].lower() == "lstm":
-            mu_b = np.array(mu_b, dtype=np.float32)
+    if shift_biases:
+        state_dict = net.state_dict()
+        for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+            if layer_name.split(".")[0].lower() == "lstm":
+                mu_b = np.array(mu_b, dtype=np.float32)
 
-            # option 1: shift only the bias for the forget gate which is the first quarter
-            gate_size = len(mu_b) // 4
-            mu_b[:gate_size] += 1.0
+                # option 1: shift only the bias for the forget gate which is the first quarter
+                gate_size = len(mu_b) // 4
+                mu_b[:gate_size] += 1.0
 
-            # option2: shift all biases by constant
-            # mu_b += 2.0
+                # option2: shift all biases by constant
+                # mu_b += 2.0
 
-            state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
-    net.load_state_dict(state_dict)
+                state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+        net.load_state_dict(state_dict)
 
     if init_params is not None:
         # reset_param_variance(net, init_params)

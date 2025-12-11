@@ -23,6 +23,8 @@ import pytagi.metric as metric
 from experiments.utils import (
     build_model,
     plot_series,
+    States,
+    LookBackBuffer,
     EarlyStopping,
     calculate_updates,
     adjust_params,
@@ -118,89 +120,6 @@ def prepare_input(
         var_x[:input_seq_len] = look_back_var[indices]
 
     return x, var_x
-
-
-# Define a class to store the look_back_buffers
-# TODO: use the LookBackBuffer in the utils file instead
-class LookBackBuffer:
-    def __init__(self, input_seq_len, nb_ts):
-        self.mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
-        self.var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
-        self.needs_initialization = [True for _ in range(nb_ts)]
-
-    def initialize(self, initial_mu, initial_var, indices):
-        if not indices:
-            return
-
-        indices = np.asarray(indices, dtype=np.intp)
-        mu = np.asarray(initial_mu, dtype=np.float32)
-        var = np.asarray(initial_var, dtype=np.float32)
-
-        if mu.ndim == 1:
-            mu = np.broadcast_to(mu, (indices.size, mu.shape[0]))
-        elif mu.shape[0] != indices.size:
-            mu = mu[indices]
-
-        if var.ndim == 1:
-            var = np.broadcast_to(var, (indices.size, var.shape[0]))
-        elif var.shape[0] != indices.size:
-            var = var[indices]
-
-        pending_mask = np.fromiter(
-            (self.needs_initialization[idx] for idx in indices),
-            dtype=bool,
-            count=indices.size,
-        )
-        if not pending_mask.any():
-            return
-
-        pending_indices = indices[pending_mask]
-        self.mu[pending_indices] = np.nan_to_num(mu[pending_mask], nan=0.0)
-        self.var[pending_indices] = np.nan_to_num(var[pending_mask], nan=0.0)
-        for idx in pending_indices:
-            self.needs_initialization[idx] = False
-
-    def update(self, new_mu, new_var, indices):
-        self.mu[indices] = np.roll(self.mu[indices], -1, axis=1)
-        self.var[indices] = np.roll(self.var[indices], -1, axis=1)
-
-        # Update the last column with new values
-        self.mu[indices, -1] = new_mu
-        self.var[indices, -1] = new_var
-
-    def __call__(self, indices):
-        return self.mu[indices], self.var[indices]
-
-
-# Define class for storing predictions over all time steps
-# TODO: use the Sates in the utils file instead
-class States:
-    def __init__(self, nb_ts, total_time_steps):
-        """Initializes storage for mean and variance for time series states."""
-        self.mu = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
-        self.std = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
-
-    def update(self, new_mu, new_std, indices, time_step):
-        """
-        Efficiently updates states using vectorized NumPy indexing.
-
-        Args:
-            new_mu: Array of new mean values.
-            new_std: Array of new std values.
-            indices: Array of time series indices to update.
-            time_step: Array of time steps to update.
-        """
-        # This is the optimized part, replacing the slow for-loop.
-        self.mu[indices, time_step] = new_mu.flatten()[0]
-        self.std[indices, time_step] = new_std.flatten()[0]
-
-    def __getitem__(self, idx):
-        """Allows retrieving a full time series' states via my_states[idx]."""
-        return self.mu[idx], self.std[idx]
-
-    def __setitem__(self, idx, value):
-        """Allows setting a full time series' states via my_states[idx] = (mu_array, var_array)."""
-        self.mu[idx], self.std[idx] = value
 
 
 def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=None):
@@ -575,7 +494,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 val_score,
                 net,
                 look_back_buffer,
-                lstm_states,
+                None,
                 train_states,
                 val_states,
                 sigma_v if not config.use_AGVI else None,
@@ -584,7 +503,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 print(f"Early stopping at epoch {epoch+1}")
                 net.load_state_dict(early_stopping.best_state)
                 look_back_buffer = early_stopping.best_look_back_buffer
-                lstm_states = early_stopping.best_lstm_state_container
                 train_states = early_stopping.train_states
                 val_states = early_stopping.val_states
                 if not config.use_AGVI:
@@ -599,7 +517,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 )
                 net.load_state_dict(early_stopping.best_state)
                 look_back_buffer = early_stopping.best_look_back_buffer
-                lstm_states = early_stopping.best_lstm_state_container
                 train_states = early_stopping.train_states
                 val_states = early_stopping.val_states
                 if not config.use_AGVI:
