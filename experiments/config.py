@@ -17,13 +17,16 @@ class DataLoader(BaseModel):
     time_covariates: List[str] = ["week_of_year"]
     scale_method: str = "standard"
     order_mode: str = "by_window"
-    use_rolling_window: bool = False
-    rolling_window_size: int = 52
     input_seq_len: int = 52
     batch_size: int = 16
     output_col: List[int] = [0]
     nb_ts: int = 127
     ts_to_use: List[int] = []
+
+
+class Data(BaseModel):
+    paths: DataPaths = Field(default_factory=DataPaths)
+    loader: DataLoader = Field(default_factory=DataLoader)
 
 
 class StandardEmbeddings(BaseModel):
@@ -62,15 +65,26 @@ class Embeddings(BaseModel):
     mapped: MappedEmbeddings = Field(default_factory=MappedEmbeddings)
 
 
+class Initialization(BaseModel):
+    from_file: Optional[str] = None
+    variance_inject: float = 0.0
+    variance_threshold: float = 1.0
+    variance_action: str = "add"
+
+
 class Model(BaseModel):
     Sigma_v_bounds: tuple = (None, None)
     decaying_factor: float = 0.99
     device: str = "cuda"
-    lstm_hidden_sizes: List[int] = [40, 40]
-    init_params: Optional[str] = None
-    variance_inject: float = 0.0
-    variance_threshold: float = 1.0
-    variance_action: str = "add"
+    hidden_sizes: List[int] = [40, 40]
+    initialization: Initialization = Field(default_factory=Initialization)
+
+
+class Forecasting(BaseModel):
+    recursive_val: bool = True
+    recursive_test: bool = True
+    rolling_window: bool = False
+    rolling_window_size: int = 52
 
 
 class Training(BaseModel):
@@ -81,8 +95,6 @@ class Training(BaseModel):
     warmup_epochs: int = 0
     shuffle: bool = True
     use_look_back_predictions: bool = True
-    val_predict_recursively: bool = True
-    test_predict_recursively: bool = True
 
 
 class Evaluation(BaseModel):
@@ -94,36 +106,36 @@ class Evaluation(BaseModel):
 
 class Config(BaseModel):
     seed: Optional[int] = None
-    data_paths: Optional[DataPaths] = None
-    data_loader: Optional[DataLoader] = None
+    data: Data = Field(default_factory=Data)
     embeddings: Optional[Embeddings] = None
     model: Optional[Model] = None
     training: Optional[Training] = None
+    forecasting: Forecasting = Field(default_factory=Forecasting)
     evaluation: Optional[Evaluation] = None
 
     @property
     def ts_to_use(self) -> List[int]:
         """Returns the list of time series indices to use. If empty, returns all."""
-        if self.data_loader.ts_to_use:
-            return self.data_loader.ts_to_use
-        return list(range(self.data_loader.nb_ts))
+        if self.data.loader.ts_to_use:
+            return self.data.loader.ts_to_use
+        return list(range(self.data.loader.nb_ts))
 
     @property
     def x_file(self) -> List[str]:
         """Dynamically creates the list of x files."""
         return [
-            self.data_paths.x_train,
-            self.data_paths.x_val,
-            self.data_paths.x_test,
+            self.data.paths.x_train,
+            self.data.paths.x_val,
+            self.data.paths.x_test,
         ]
 
     @property
     def date_file(self) -> List[str]:
         """Dynamically creates the list of date files."""
         return [
-            self.data_paths.dates_train,
-            self.data_paths.dates_val,
-            self.data_paths.dates_test,
+            self.data.paths.dates_train,
+            self.data.paths.dates_val,
+            self.data.paths.dates_test,
         ]
 
     @property
@@ -166,7 +178,7 @@ class Config(BaseModel):
     @property
     def input_size(self) -> int:
         """Calculates the total input size for the model."""
-        base_size = self.data_loader.num_features + self.data_loader.input_seq_len - 1
+        base_size = self.data.loader.num_features + self.data.loader.input_seq_len - 1
         return base_size + self.total_embedding_size
 
     @classmethod

@@ -37,8 +37,8 @@ def _run_experiment(
 
     config.seed = seed
     config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-    config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-    config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+    config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
+    config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
     # Display config
     config.display()

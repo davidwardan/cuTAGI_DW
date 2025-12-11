@@ -215,13 +215,13 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
     # Initalize states
     cap = 2000
-    train_states = States(nb_ts=config.data_loader.nb_ts, total_time_steps=cap)
-    val_states = States(nb_ts=config.data_loader.nb_ts, total_time_steps=cap)
-    test_states = States(nb_ts=config.data_loader.nb_ts, total_time_steps=cap)
+    train_states = States(nb_ts=config.data.loader.nb_ts, total_time_steps=cap)
+    val_states = States(nb_ts=config.data.loader.nb_ts, total_time_steps=cap)
+    test_states = States(nb_ts=config.data.loader.nb_ts, total_time_steps=cap)
 
     # Initialize place holder for scaling factors
-    x_means = [None] * config.data_loader.nb_ts
-    x_stds = [None] * config.data_loader.nb_ts
+    x_means = [None] * config.data.loader.nb_ts
+    x_stds = [None] * config.data.loader.nb_ts
 
     for ts in config.ts_to_use:
 
@@ -229,12 +229,12 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         train_dtl, val_dtl, test_dtl = prepare_dtls(
             config.x_file,
             config.date_file,
-            config.data_loader.input_seq_len,
-            config.data_loader.num_features,
-            config.data_loader.time_covariates,
+            config.data.loader.input_seq_len,
+            config.data.loader.num_features,
+            config.data.loader.time_covariates,
             ts,
         )
-        if config.data_loader.scale_method == "standard":
+        if config.data.loader.scale_method == "standard":
             x_means[ts] = train_dtl.x_mean[0]
             x_stds[ts] = train_dtl.x_std[0]
 
@@ -244,16 +244,19 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             use_AGVI=config.use_AGVI,
             seed=config.seed,
             device=config.model.device,
-            init_params=config.model.init_params,
+            init_params=config.model.initialization.from_file,
         )
 
         # Add plasticity
-        if config.model.init_params and config.model.variance_inject != 0.0:
+        if (
+            config.model.initialization.from_file
+            and config.model.initialization.variance_inject != 0.0
+        ):
             adjust_params(
                 net,
-                mode=config.model.variance_action,
-                value=config.model.variance_inject,
-                threshold=config.model.variance_threshold,
+                mode=config.model.initialization.variance_action,
+                value=config.model.initialization.variance_inject,
+                threshold=config.model.initialization.variance_threshold,
             )
 
         # Create progress bar
@@ -302,13 +305,13 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             train_log_lik = []
 
             train_batch_iter = train_dtl.create_data_loader(
-                batch_size=config.data_loader.batch_size,
+                batch_size=config.data.loader.batch_size,
                 shuffle=False,
             )
 
             # Initialize look-back buffer and LSTM state container
             look_back_buffer = LookBackBuffer(
-                input_seq_len=config.data_loader.input_seq_len, nb_ts=1
+                input_seq_len=config.data.loader.input_seq_len, nb_ts=1
             )
 
             # get current sigma_v if not using AGVI
@@ -319,7 +322,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             for x, y in train_batch_iter:
 
                 # get current batch size
-                B = config.data_loader.batch_size
+                B = config.data.loader.batch_size
 
                 # set LSTM states for the current batch
                 if epoch != 0:
@@ -328,7 +331,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
                     var_y = np.full(
-                        (B * len(config.data_loader.output_col),),
+                        (B * len(config.data.loader.output_col),),
                         sigma_v**2,
                         dtype=np.float32,
                     )
@@ -336,9 +339,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
                     look_back_buffer.initialize(
-                        initial_mu=x[: config.data_loader.input_seq_len],
+                        initial_mu=x[: config.data.loader.input_seq_len],
                         initial_var=np.zeros_like(
-                            x[: config.data_loader.input_seq_len], dtype=np.float32
+                            x[: config.data.loader.input_seq_len], dtype=np.float32
                         ),
                         indices=[0],
                     )
@@ -437,7 +440,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             look_back_buffer.needs_initialization = [True]
 
             val_batch_iter = val_dtl.create_data_loader(
-                batch_size=config.data_loader.batch_size,
+                batch_size=config.data.loader.batch_size,
                 shuffle=False,
             )
 
@@ -445,7 +448,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             for x, y in val_batch_iter:
 
                 # get current batch size
-                B = config.data_loader.batch_size
+                B = config.data.loader.batch_size
 
                 # set LSTM states for the current batch
                 net.set_lstm_states(lstm_states)
@@ -453,7 +456,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
                     var_y = np.full(
-                        (B * len(config.data_loader.output_col),),
+                        (B * len(config.data.loader.output_col),),
                         sigma_v**2,
                         dtype=np.float32,
                     )
@@ -461,9 +464,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
                     look_back_buffer.initialize(
-                        initial_mu=x[: config.data_loader.input_seq_len],
+                        initial_mu=x[: config.data.loader.input_seq_len],
                         initial_var=np.zeros_like(
-                            x[: config.data_loader.input_seq_len], dtype=np.float32
+                            x[: config.data.loader.input_seq_len], dtype=np.float32
                         ),
                         indices=[0],
                     )
@@ -474,12 +477,12 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     var_x=None,
                     look_back_mu=(
                         look_back_buffer.mu
-                        if config.training.val_predict_recursively
+                        if config.forecasting.recursive_val
                         else None
                     ),
                     look_back_var=(
                         look_back_buffer.var
-                        if config.training.val_predict_recursively
+                        if config.forecasting.recursive_val
                         else None
                     ),
                     indices=[0],
@@ -619,7 +622,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         look_back_buffer.needs_initialization = [True]
 
         test_batch_iter = test_dtl.create_data_loader(
-            batch_size=config.data_loader.batch_size,
+            batch_size=config.data.loader.batch_size,
             shuffle=False,
         )
 
@@ -630,7 +633,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         ) in test_batch_iter:
 
             # get current batch size
-            B = config.data_loader.batch_size
+            B = config.data.loader.batch_size
 
             # set LSTM states for the current batc h
             net.set_lstm_states(lstm_states)
@@ -638,22 +641,22 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare obsevation noise matrix
             if not config.use_AGVI:
                 var_y = np.full(
-                    (B * len(config.data_loader.output_col),),
+                    (B * len(config.data.loader.output_col),),
                     sigma_v**2,
                     dtype=np.float32,
                 )
 
             # rolling window mechanism for traffic and electricity datasets
-            if config.data_loader.use_rolling_window:
-                if test_time_step % config.data_loader.rolling_window_size == 0:
+            if config.forecasting.rolling_window:
+                if test_time_step % config.forecasting.rolling_window_size == 0:
                     look_back_buffer.needs_initialization = [True]
 
             # prepare look_back buffer
             if look_back_buffer.needs_initialization[0]:
                 look_back_buffer.initialize(
-                    initial_mu=x[: config.data_loader.input_seq_len],
+                    initial_mu=x[: config.data.loader.input_seq_len],
                     initial_var=np.zeros_like(
-                        x[: config.data_loader.input_seq_len], dtype=np.float32
+                        x[: config.data.loader.input_seq_len], dtype=np.float32
                     ),
                     indices=[0],
                 )
@@ -663,14 +666,10 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 x=x,
                 var_x=None,
                 look_back_mu=(
-                    look_back_buffer.mu
-                    if config.training.test_predict_recursively
-                    else None
+                    look_back_buffer.mu if config.forecasting.recursive_test else None
                 ),
                 look_back_var=(
-                    look_back_buffer.var
-                    if config.training.test_predict_recursively
-                    else None
+                    look_back_buffer.var if config.forecasting.recursive_test else None
                 ),
                 indices=[0],
             )
@@ -712,8 +711,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         net.reset_lstm_states()
 
     # Run over each time series and re_scale it
-    if config.data_loader.scale_method == "standard":
-        for i in range(config.data_loader.nb_ts):
+    if config.data.loader.scale_method == "standard":
+        for i in range(config.data.loader.nb_ts):
 
             # skip if not in ts_to_use
             if i not in config.ts_to_use:

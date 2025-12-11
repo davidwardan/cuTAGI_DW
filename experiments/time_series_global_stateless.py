@@ -67,10 +67,10 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     train_data, val_data, test_data = prepare_data(
         x_file=config.x_file,
         date_file=config.date_file,
-        input_seq_len=config.data_loader.input_seq_len,
-        time_covariates=config.data_loader.time_covariates,
-        scale_method=config.data_loader.scale_method,
-        order_mode=config.data_loader.order_mode,
+        input_seq_len=config.data.loader.input_seq_len,
+        time_covariates=config.data.loader.time_covariates,
+        scale_method=config.data.loader.scale_method,
+        order_mode=config.data.loader.order_mode,
         ts_to_use=config.ts_to_use,
     )
 
@@ -98,7 +98,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             f"Using standard EmbeddingLayer. Embedding size: {config.total_embedding_size}"
         )
         embeddings = EmbeddingLayer(
-            num_embeddings=config.data_loader.nb_ts,
+            num_embeddings=config.data.loader.nb_ts,
             embedding_size=config.embeddings.standard.embedding_size,
             encoding_type=config.embeddings.standard.embedding_initializer,
             seed=config.seed,
@@ -118,7 +118,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         use_AGVI=config.use_AGVI,
         seed=config.seed,
         device=config.model.device,
-        hidden_sizes=config.model.lstm_hidden_sizes,
+        hidden_sizes=config.model.hidden_sizes,
     )
 
     # Enable input state updates only if embeddings are being used
@@ -127,13 +127,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     # Initalize states
     train_states = States(
-        nb_ts=config.data_loader.nb_ts, total_time_steps=train_data.max_len
+        nb_ts=config.data.loader.nb_ts, total_time_steps=train_data.max_len
     )
     val_states = States(
-        nb_ts=config.data_loader.nb_ts, total_time_steps=val_data.max_len
+        nb_ts=config.data.loader.nb_ts, total_time_steps=val_data.max_len
     )
     test_states = States(
-        nb_ts=config.data_loader.nb_ts, total_time_steps=test_data.max_len
+        nb_ts=config.data.loader.nb_ts, total_time_steps=test_data.max_len
     )
 
     # Create progress bar
@@ -179,16 +179,16 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         train_batch_iter = GlobalBatchLoader.create_data_loader(
             dataset=train_data.dataset,
-            order_mode=config.data_loader.order_mode,
-            batch_size=config.data_loader.batch_size,
+            order_mode=config.data.loader.order_mode,
+            batch_size=config.data.loader.batch_size,
             shuffle=config.training.shuffle,
             seed=1,  # fixed for all seeds and runs
         )
 
         # Initialize look-back buffer and LSTM state container
         look_back_buffer = LookBackBuffer(
-            input_seq_len=config.data_loader.input_seq_len,
-            nb_ts=config.data_loader.nb_ts,
+            input_seq_len=config.data.loader.input_seq_len,
+            nb_ts=config.data.loader.nb_ts,
         )
 
         # get current sigma_v if not using AGVI
@@ -218,7 +218,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare obsevation noise matrix
             if not config.use_AGVI:
                 var_y = np.full(
-                    (B * len(config.data_loader.output_col),),
+                    (B * len(config.data.loader.output_col),),
                     sigma_v**2,
                     dtype=np.float32,
                 )
@@ -230,9 +230,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
             ):
                 look_back_buffer.initialize(
-                    initial_mu=x[:, : config.data_loader.input_seq_len],
+                    initial_mu=x[:, : config.data.loader.input_seq_len],
                     initial_var=np.zeros_like(
-                        x[:, : config.data_loader.input_seq_len], dtype=np.float32
+                        x[:, : config.data.loader.input_seq_len], dtype=np.float32
                     ),
                     indices=indices,
                 )
@@ -345,13 +345,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         # reset look-back buffer
         look_back_buffer.needs_initialization = [
-            True for _ in range(config.data_loader.nb_ts)
+            True for _ in range(config.data.loader.nb_ts)
         ]
 
         val_batch_iter = GlobalBatchLoader.create_data_loader(
             dataset=val_data.dataset,
-            order_mode=config.data_loader.order_mode,
-            batch_size=config.data_loader.batch_size,
+            order_mode=config.data.loader.order_mode,
+            batch_size=config.data.loader.batch_size,
             shuffle=False,
         )
 
@@ -368,7 +368,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             # prepare obsevation noise matrix
             if not config.use_AGVI:
                 var_y = np.full(
-                    (B * len(config.data_loader.output_col),),
+                    (B * len(config.data.loader.output_col),),
                     sigma_v**2,
                     dtype=np.float32,
                 )
@@ -380,9 +380,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
             ):
                 look_back_buffer.initialize(
-                    initial_mu=x[:, : config.data_loader.input_seq_len],
+                    initial_mu=x[:, : config.data.loader.input_seq_len],
                     initial_var=np.zeros_like(
-                        x[:, : config.data_loader.input_seq_len], dtype=np.float32
+                        x[:, : config.data.loader.input_seq_len], dtype=np.float32
                     ),
                     indices=indices,
                 )
@@ -392,14 +392,10 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 x=x,
                 var_x=None,
                 look_back_mu=(
-                    look_back_buffer.mu
-                    if config.training.val_predict_recursively
-                    else None
+                    look_back_buffer.mu if config.forecasting.recursive_val else None
                 ),
                 look_back_var=(
-                    look_back_buffer.var
-                    if config.training.val_predict_recursively
-                    else None
+                    look_back_buffer.var if config.forecasting.recursive_val else None
                 ),
                 indices=indices,
                 embeddings=embeddings,  # Pass the object directly
@@ -545,13 +541,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     # reset look-back buffer
     look_back_buffer.needs_initialization = [
-        True for _ in range(config.data_loader.nb_ts)
+        True for _ in range(config.data.loader.nb_ts)
     ]
 
     test_batch_iter = GlobalBatchLoader.create_data_loader(
         dataset=test_data.dataset,
-        order_mode=config.data_loader.order_mode,
-        batch_size=config.data_loader.batch_size,
+        order_mode=config.data.loader.order_mode,
+        batch_size=config.data.loader.batch_size,
         shuffle=False,
     )
 
@@ -568,13 +564,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         # prepare obsevation noise matrix
         if not config.use_AGVI:
             var_y = np.full(
-                (B * len(config.data_loader.output_col),), sigma_v**2, dtype=np.float32
+                (B * len(config.data.loader.output_col),), sigma_v**2, dtype=np.float32
             )
 
         # rolling window mechanism for traffic and electricity datasets
-        if config.data_loader.use_rolling_window:
+        if config.forecasting.rolling_window:
             for i, ts_index in enumerate(indices):
-                if time_steps[i] % config.data_loader.rolling_window_size == 0:
+                if time_steps[i] % config.forecasting.rolling_window_size == 0:
                     look_back_buffer.needs_initialization[ts_index] = True
 
         # prepare look_back buffer
@@ -584,9 +580,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
         ):
             look_back_buffer.initialize(
-                initial_mu=x[:, : config.data_loader.input_seq_len],
+                initial_mu=x[:, : config.data.loader.input_seq_len],
                 initial_var=np.zeros_like(
-                    x[:, : config.data_loader.input_seq_len], dtype=np.float32
+                    x[:, : config.data.loader.input_seq_len], dtype=np.float32
                 ),
                 indices=indices,
             )
@@ -596,14 +592,10 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             x=x,
             var_x=None,
             look_back_mu=(
-                look_back_buffer.mu
-                if config.training.test_predict_recursively
-                else None
+                look_back_buffer.mu if config.forecasting.recursive_test else None
             ),
             look_back_var=(
-                look_back_buffer.var
-                if config.training.test_predict_recursively
-                else None
+                look_back_buffer.var if config.forecasting.recursive_test else None
             ),
             indices=indices,
             embeddings=embeddings,  # Pass the object directly
@@ -642,8 +634,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     net.reset_lstm_states()
 
     # Run over each time series and re_scale it
-    if config.data_loader.scale_method == "standard":
-        for i in range(config.data_loader.nb_ts):
+    if config.data.loader.scale_method == "standard":
+        for i in range(config.data.loader.nb_ts):
 
             if i not in config.ts_to_use:
                 continue
@@ -760,9 +752,9 @@ def eval_global_model(
 
         # Get true values
         yt_train, yt_val, yt_test = (
-            _trim_trailing_nans(true_train[config.data_loader.input_seq_len :, i]),
-            _trim_trailing_nans(true_val[config.data_loader.input_seq_len :, i]),
-            _trim_trailing_nans(true_test[config.data_loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_train[config.data.loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_val[config.data.loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_test[config.data.loader.input_seq_len :, i]),
         )
         yt_full = np.concatenate([yt_train, yt_val, yt_test])
 

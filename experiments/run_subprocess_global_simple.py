@@ -28,9 +28,7 @@ def _run_experiment(
     embed_category = "simple-embeddings"
 
     # Define experiment name
-    experiment_name = (
-        f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
-    )
+    experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
 
     # Load configuration
     config = Config.from_yaml(
@@ -39,8 +37,8 @@ def _run_experiment(
 
     config.seed = seed
     config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-    config.data_paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-    config.data_paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+    config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
+    config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
     # Display config
     config.display()
@@ -55,7 +53,6 @@ def _run_experiment(
             config,
             experiment_name=experiment_name,
         )
-
 
 
 def run_experiments(

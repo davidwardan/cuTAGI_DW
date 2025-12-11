@@ -1,45 +1,49 @@
 seed: 1
-
-data_paths:
-  x_train: "./data/traffic/traffic_2008_01_14_train.csv"
-  dates_train: "./data/traffic/traffic_2008_01_14_train_datetime.csv"
-  x_val: "./data/traffic/traffic_2008_01_14_val.csv"
-  dates_val: "./data/traffic/traffic_2008_01_14_val_datetime.csv"
-  x_test: "./data/traffic/traffic_2008_01_14_test.csv"
-  dates_test: "./data/traffic/traffic_2008_01_14_test_datetime.csv"
-
-data_loader:
-  num_features: 3
-  rolling_window_size: 24
-  use_rolling_window: true
-  time_covariates: ["hour_of_day", "day_of_week"]
-  scale_method: None
-  order_mode: "by_window"
-  input_seq_len: 24
-  batch_size: 8
-  output_col: [0]
-  nb_ts: 963
-  ts_to_use: []
-
-embeddings:
-  standard:
-    embedding_size: 10
-    embedding_initializer: "normal"
-
+data:
+  paths:
+    x_train: ./data/traffic/traffic_2008_01_14_train.csv
+    dates_train: ./data/traffic/traffic_2008_01_14_train_datetime.csv
+    x_val: ./data/traffic/traffic_2008_01_14_val.csv
+    dates_val: ./data/traffic/traffic_2008_01_14_val_datetime.csv
+    x_test: ./data/traffic/traffic_2008_01_14_test.csv
+    dates_test: ./data/traffic/traffic_2008_01_14_test_datetime.csv
+  loader:
+    num_features: 3
+    time_covariates:
+    - hour_of_day
+    - day_of_week
+    scale_method: None
+    order_mode: by_window
+    input_seq_len: 24
+    batch_size: 8
+    output_col:
+    - 0
+    nb_ts: 963
+    ts_to_use: []
 model:
-  Sigma_v_bounds: [0.1, 0.02]
+  Sigma_v_bounds:
+  - 0.1
+  - 0.02
   decaying_factor: 0.5
-  device: "cuda"
-  lstm_hidden_sizes: [40, 40, 40]
-
+  device: cuda
+  hidden_sizes:
+  - 40
+  - 40
+  - 40
+forecasting:
+  rolling_window: true
+  rolling_window_size: 24
 training:
   num_epochs: 100
-  early_stopping_criteria: "loglik"
+  early_stopping_criteria: loglik
   patience: 10
   min_delta: 0.0001
   warmup_epochs: 5
   shuffle: false
-
+embeddings:
+  standard:
+    embedding_size: 10
+    embedding_initializer: normal
 evaluation:
   eval_plots: false
   eval_metrics: true

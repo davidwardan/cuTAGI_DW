@@ -1,43 +1,45 @@
 seed: 1
-
-data_paths:
-  x_train: "data/hq/train100/split_train_values.csv"
-  dates_train: "data/hq/train100/split_train_datetimes.csv"
-  x_val: "data/hq/split_val_values.csv"
-  dates_val: "data/hq/split_val_datetimes.csv"
-  x_test: "data/hq/split_test_values.csv"
-  dates_test: "data/hq/split_test_datetimes.csv"
-
-data_loader:
-  num_features: 2
-  time_covariates: ["week_of_year"]
-  scale_method: "standard"
-  order_mode: "by_window"
-  input_seq_len: 52
-  batch_size: 16
-  output_col: [0]
-  ts_to_use: []
-  nb_ts: 127
-
-embeddings:
-  standard:
-    embedding_size: 10
-    embedding_initializer: "normal"
-
+data:
+  paths:
+    x_train: data/hq/train100/split_train_values.csv
+    dates_train: data/hq/train100/split_train_datetimes.csv
+    x_val: data/hq/split_val_values.csv
+    dates_val: data/hq/split_val_datetimes.csv
+    x_test: data/hq/split_test_values.csv
+    dates_test: data/hq/split_test_datetimes.csv
+  loader:
+    num_features: 2
+    time_covariates:
+    - week_of_year
+    scale_method: standard
+    order_mode: by_window
+    input_seq_len: 52
+    batch_size: 16
+    output_col:
+    - 0
+    ts_to_use: []
+    nb_ts: 127
 model:
-  Sigma_v_bounds: [null, null]
+  Sigma_v_bounds:
+  - null
+  - null
   decaying_factor: 0.99
-  device: "cuda"
-  lstm_hidden_sizes: [40, 40, 40]
-
+  device: cuda
+  hidden_sizes:
+  - 40
+  - 40
+  - 40
 training:
   num_epochs: 100
-  early_stopping_criteria: "loglik"
+  early_stopping_criteria: loglik
   patience: 10
   min_delta: 0.0001
   warmup_epochs: 0
   shuffle: true
-
+embeddings:
+  standard:
+    embedding_size: 10
+    embedding_initializer: normal
 evaluation:
   eval_plots: false
   eval_metrics: true
