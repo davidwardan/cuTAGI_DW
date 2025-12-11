@@ -364,8 +364,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         val_batch_iter = GlobalBatchLoader.create_data_loader(
             dataset=val_data.dataset,
-            order_mode=config.data.loader.order_mode,
-            batch_size=config.data.loader.batch_size,
+            order_mode="by_window",
+            batch_size=config.data.loader.nb_ts,
             shuffle=False,
         )
 
@@ -568,8 +568,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
     test_batch_iter = GlobalBatchLoader.create_data_loader(
         dataset=test_data.dataset,
-        order_mode=config.data.loader.order_mode,
-        batch_size=config.data.loader.batch_size,
+        order_mode="by_window",
+        batch_size=config.data.loader.nb_ts,
         shuffle=False,
     )
 

@@ -383,7 +383,7 @@ def prepare_data(
         stride=1,
         time_covariates=time_covariates,
         scale_method=scale_method,
-        order_mode="shuffled",
+        order_mode=order_mode,
         ts_to_use=ts_to_use,
     )
 
@@ -397,7 +397,7 @@ def prepare_data(
         scale_method=scale_method,
         x_mean=train_data.x_mean,
         x_std=train_data.x_std,
-        order_mode=order_mode,
+        order_mode="by_window",
         ts_to_use=ts_to_use,
     )
     test_data = TimeSeriesDataBuilder(
@@ -410,7 +410,7 @@ def prepare_data(
         scale_method=scale_method,
         x_mean=train_data.x_mean,
         x_std=train_data.x_std,
-        order_mode=order_mode,
+        order_mode="by_window",
         ts_to_use=ts_to_use,
     )
 
