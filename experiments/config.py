@@ -80,6 +80,9 @@ class Training(BaseModel):
     min_delta: float = 1e-4
     warmup_epochs: int = 0
     shuffle: bool = True
+    use_look_back_predictions: bool = True
+    val_predict_recursively: bool = True
+    test_predict_recursively: bool = True
 
 
 class Evaluation(BaseModel):

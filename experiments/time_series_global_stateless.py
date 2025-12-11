@@ -241,8 +241,16 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             x, var_x = prepare_input(
                 x=x,
                 var_x=None,
-                look_back_mu=look_back_buffer.mu,
-                look_back_var=look_back_buffer.var,
+                look_back_mu=(
+                    look_back_buffer.mu
+                    if config.training.use_look_back_predictions
+                    else None
+                ),
+                look_back_var=(
+                    look_back_buffer.var
+                    if config.training.use_look_back_predictions
+                    else None
+                ),
                 indices=ts_id,
                 embeddings=embeddings,  # Pass the object directly
             )
@@ -383,8 +391,16 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             x, var_x = prepare_input(
                 x=x,
                 var_x=None,
-                look_back_mu=look_back_buffer.mu,
-                look_back_var=look_back_buffer.var,
+                look_back_mu=(
+                    look_back_buffer.mu
+                    if config.training.val_predict_recursively
+                    else None
+                ),
+                look_back_var=(
+                    look_back_buffer.var
+                    if config.training.val_predict_recursively
+                    else None
+                ),
                 indices=indices,
                 embeddings=embeddings,  # Pass the object directly
             )
@@ -579,8 +595,16 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         x, var_x = prepare_input(
             x=x,
             var_x=None,
-            look_back_mu=look_back_buffer.mu,
-            look_back_var=look_back_buffer.var,
+            look_back_mu=(
+                look_back_buffer.mu
+                if config.training.test_predict_recursively
+                else None
+            ),
+            look_back_var=(
+                look_back_buffer.var
+                if config.training.test_predict_recursively
+                else None
+            ),
             indices=indices,
             embeddings=embeddings,  # Pass the object directly
         )
