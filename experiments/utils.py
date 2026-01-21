@@ -423,7 +423,7 @@ def build_model(
     use_AGVI,
     seed,
     device,
-    hidden_sizes=[40, 40],
+    hidden_sizes=[40, 40, 40],
     init_params=None,
     shift_biases=True,
 ):
@@ -510,32 +510,35 @@ def prepare_input(
 
 
 # Define function to calculate updates
-def calculate_updates(net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None):
+def calculate_updates(
+    net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None, train_mode=True
+):
     """
     Calculates the posterior mean and variance (Kalman update) for the
     output predictions.
     """
-    # calculate updates
-    if use_AGVI:
-        # Update output layer
-        out_updater.update_heteros(
-            output_states=net.output_z_buffer,
-            mu_obs=y,
-            delta_states=net.input_delta_z_buffer,
-        )
-    elif not use_AGVI and var_y is not None:
-        out_updater.update(
-            output_states=net.output_z_buffer,
-            mu_obs=y,
-            var_obs=var_y,
-            delta_states=net.input_delta_z_buffer,
-        )
-    else:
-        raise ValueError("var_y must be provided when not using AGVI")
+    if train_mode:
+        # calculate updates
+        if use_AGVI:
+            # Update output layer
+            out_updater.update_heteros(
+                output_states=net.output_z_buffer,
+                mu_obs=y,
+                delta_states=net.input_delta_z_buffer,
+            )
+        elif not use_AGVI and var_y is not None:
+            out_updater.update(
+                output_states=net.output_z_buffer,
+                mu_obs=y,
+                var_obs=var_y,
+                delta_states=net.input_delta_z_buffer,
+            )
+        else:
+            raise ValueError("var_y must be provided when not using AGVI")
 
-    # Backward + step
-    net.backward()
-    net.step()
+        # Backward + step
+        net.backward()
+        net.step()
 
     # --- Kalman Update Section ---
 
@@ -862,7 +865,7 @@ def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray
 
 # --- Eval Helper Functions ---
 def plot_series(
-    ts_idx, y_true, y_pred, s_pred, out_dir, val_test_indices, std_factor=1
+    ts_idx, y_true, y_pred, s_pred, out_dir, val_test_indices=None, std_factor=1
 ):
     """Plot truth, prediction, and std_factor band for a single series."""
 

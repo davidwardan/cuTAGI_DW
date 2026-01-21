@@ -363,8 +363,11 @@ class TimeSeriesDataloader:
 
         if self.ts_idx is not None:
             x = x[:, self.ts_idx : self.ts_idx + 1]
-            # date_time = date_time[:, self.ts_idx : self.ts_idx + 1]
-            date_time = date_time[:, 0:1]
+            try:
+                date_time = date_time[:, self.ts_idx : self.ts_idx + 1]
+            except:
+                print("Datetime file has only one column.")
+                date_time = date_time[:, 0:1]
 
             # remove trailing NaNs
             x, date_time = self._trim_trailing_nans(x, date_time)
