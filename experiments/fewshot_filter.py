@@ -17,7 +17,7 @@ from experiments.utils import (
     calculate_updates,
     plot_series,
     prepare_input,
-    adjust_params
+    adjust_params,
 )
 
 from experiments.data_loader import (
@@ -48,7 +48,7 @@ mpl.rcParams.update(
 time_covariates = ["week_of_year"]
 num_features = 1 + len(time_covariates)
 input_seq_len = 52
-seed = 99
+seed = 1
 device = "cpu"
 model_input_size = input_seq_len + num_features - 1
 
@@ -61,7 +61,19 @@ date_file = [
 ts_idx = 17  # index of the time series to filter
 
 
-data = TimeSeriesDataBuilder(
+data_train = TimeSeriesDataBuilder(
+    x_file=x_file[0],
+    date_time_file=date_file[0],
+    input_seq_len=input_seq_len,
+    output_seq_len=1,
+    stride=1,
+    time_covariates=time_covariates,
+    scale_method="standard",
+    order_mode="by_window",
+    ts_to_use=[ts_idx],
+)
+
+data_filter = TimeSeriesDataBuilder(
     x_file=x_file[0],
     date_time_file=date_file[0],
     input_seq_len=input_seq_len,
@@ -82,7 +94,7 @@ pretrained_weights_local = (
 )
 
 # Build model
-global_net, _ = build_model(
+global_net, global_output_updater = build_model(
     input_size=model_input_size,
     use_AGVI=True,
     seed=seed,
@@ -91,22 +103,93 @@ global_net, _ = build_model(
     shift_biases=False,
 )
 
-adjust_params(global_net,"add", value=0.001)
+adjust_params(global_net, "add", value=0.01)
 
-local_net, _ = build_model(
-    input_size=model_input_size,
-    hidden_sizes=[40, 40],
-    use_AGVI=True,
-    seed=seed,
-    device=device,
-    init_params=pretrained_weights_local,
-    shift_biases=False,
-)
 
 # Create output directory
-output_dir = f"out/zeroshot/"
+output_dir = f"out/fewshot/"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
+
+
+def train(net, ouput_updater, data, stateless: Optional[bool] = False):
+
+    net.train()
+
+    batch_iter = GlobalBatchLoader.create_data_loader(
+        dataset=data.dataset,
+        order_mode="by_window",
+        batch_size=1,
+        shuffle=False,
+        seed=1,  # fixed for all seeds and runs
+    )
+
+    # Initialize look-back buffer and LSTM state container
+    look_back_buffer = LookBackBuffer(input_seq_len=input_seq_len, nb_ts=1)
+
+    epoch = 0
+    while epoch < 100:
+        for (x, y), _, w_id in batch_iter:
+
+            if w_id.item() == 100:
+                break
+
+            # prepare look_back buffer
+            if look_back_buffer.needs_initialization[0]:
+                look_back_buffer.initialize(
+                    initial_mu=x[:, :input_seq_len],
+                    initial_var=np.zeros_like(x[:, :input_seq_len], dtype=np.float32),
+                    indices=[0],
+                )
+
+            # prepare input
+            x, var_x = prepare_input(
+                x=x,
+                var_x=None,
+                look_back_mu=(look_back_buffer.mu),
+                look_back_var=(look_back_buffer.var),
+                indices=np.array([0]),
+            )
+
+            # Feedforward
+            m_pred, v_pred = net(x, var_x)
+
+            if stateless:
+                net.reset_lstm_states()
+
+            # Specific to AGVI
+            flat_m = np.ravel(m_pred)
+            flat_v = np.ravel(v_pred)
+
+            m_pred = flat_m[::2]  # even indices
+            v_pred = flat_v[::2]  # even indices
+            var_y = flat_m[1::2]  # odd indices var_v
+            var_y = np.clip(var_y, a_min=1e-8, a_max=0.0001) # avoid large values
+
+            # Update
+            m_post, v_post = calculate_updates(
+                net,
+                ouput_updater,
+                m_pred,
+                v_pred,
+                y.flatten(),
+                use_AGVI=True,
+                var_y=var_y,  # scale down aleatoric uncertainty
+                train_mode=True,
+            )
+
+            # Update look_back buffer
+            look_back_buffer.update(
+                new_mu=m_post,
+                new_var=v_post,
+                indices=[0],
+            )
+
+        epoch += 1
+        net.reset_lstm_states()
+
+    net.reset_lstm_states()
+    return net
 
 
 def filter(net, data, stateless: Optional[bool] = False):
@@ -160,7 +243,6 @@ def filter(net, data, stateless: Optional[bool] = False):
 
         # Feedforward
         m_pred, v_pred = net(x, var_x)
-
 
         if stateless:
             net.reset_lstm_states()
@@ -305,25 +387,24 @@ def plot_results(
     )
     plt.tight_layout()
     plt.savefig(
-        os.path.join(output_dir, "zeroshot_filtering.svg"),
+        os.path.join(output_dir, "fewshot_filtering.svg"),
         bbox_inches="tight",
     )
     plt.close()
 
 
-prior_states, posterior_states, y_true, std_y = filter(local_net, data)
+# Fine-tune global model
+global_net = train(global_net, global_output_updater, data_train, stateless=False)
 
-plot_results(
-    prior_states, posterior_states, y_true, std_y, data, output_dir=output_dir + "local"
+prior_states, posterior_states, y_true, std_y = filter(
+    global_net, data_filter, stateless=False
 )
-
-prior_states, posterior_states, y_true, std_y = filter(global_net, data, stateless=False)
 
 plot_results(
     prior_states,
     posterior_states,
     y_true,
     std_y,
-    data,
-    output_dir=output_dir + "global",
+    data_filter,
+    output_dir=output_dir,
 )

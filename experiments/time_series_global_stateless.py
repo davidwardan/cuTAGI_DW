@@ -324,8 +324,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     var_delta_slice,
                 )
 
-            # TODO: check if really needed?
-            v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
             # Update look_back buffer
             look_back_buffer.update(

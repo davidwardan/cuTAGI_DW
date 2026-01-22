@@ -540,65 +540,21 @@ def calculate_updates(
         net.backward()
         net.step()
 
-    # --- Kalman Update Section ---
-
-    # Use a safe epsilon for clipping, not machine epsilon.
-    eps = 1e-8
-
     # manually update states on python API
     nan_indices = np.isnan(y)
     has_nan = bool(np.any(nan_indices))
     if has_nan:
-        # Make copies to avoid modifying the original arrays
         y = np.array(y, copy=True)
         var_y = np.array(var_y, copy=True)
-
-        # TODO: check this logic
-        # Where y is NaN, we treat the prediction as the observation.
         np.copyto(y, m_pred, where=nan_indices)
-
-        # Set variance of missing observations to 0 (or a small eps)
         np.copyto(var_y, 0.0, where=nan_indices)
 
-    # Clean all inputs to the Kalman filter before using them.
-    safe_m_pred = np.nan_to_num(m_pred, nan=0.0)
-    safe_v_pred = np.nan_to_num(v_pred, nan=0.0)
-    safe_y = np.nan_to_num(y, nan=0.0)
-    safe_var_y = np.nan_to_num(var_y, nan=0.0)
-
-    # Clip the observation variance away from zero.
-    # Use a larger max value (e.g., 5.0) just in case.
-    stablized_var_y = np.clip(safe_var_y, eps, 5.0)
-
-    # Clip the *denominator* of the gain calculation.
-    kalman_denominator = safe_v_pred + stablized_var_y
-    stablized_denominator = np.clip(kalman_denominator, a_min=eps, a_max=None)
-
-    # Kalman gain
-    K = safe_v_pred / stablized_denominator
-
-    # Clean the gain just in case 0/0 or inf/inf occurred.
-    K = np.nan_to_num(K, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # Clip gain to [0, 1] range to ensure variance reduction.
-    K = np.clip(K, 0.0, 1.0)
-
-    # Posterior mean
-    m_post = safe_m_pred + K * (safe_y - safe_m_pred)
-
-    # Posterior variance
-    v_post = (1.0 - K) * safe_v_pred
-
-    # Ensure posterior variance is always positive.
-    v_post = np.clip(v_post, a_min=eps, a_max=None)
-
+    # kalman update
+    K = v_pred / (v_pred + var_y)  # Kalman gain
+    m_post = m_pred + K * (y - m_pred)  # posterior mean
+    v_post = (1.0 - K) * v_pred  # posterior variance
     if has_nan:
-        # reset the posterior variance to the prior.
-        np.copyto(v_post, safe_v_pred, where=nan_indices)
-
-    # Final check to ensure no NaNs are returned.
-    m_post = np.nan_to_num(m_post)
-    v_post = np.nan_to_num(v_post)
+        np.copyto(v_post, v_pred, where=nan_indices)
 
     return m_post, v_post
 

@@ -122,8 +122,6 @@ def prepare_input(
     return x, var_x
 
 
-
-
 def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
@@ -334,9 +332,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
                 # Update LSTM states for the current batch
                 lstm_states = net.get_lstm_states()
-
-                # TODO: check if clipping is necessary
-                v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(

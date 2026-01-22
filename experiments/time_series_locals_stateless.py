@@ -330,9 +330,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     var_y=var_y,
                 )
 
-                # TODO: check if really needed
-                v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
-
                 # Update look_back buffer
                 look_back_buffer.update(
                     new_mu=m_post,
