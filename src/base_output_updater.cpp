@@ -216,11 +216,14 @@ Args:
             float var_V2_bar_tilde_pos =
                 var_V2_bar_tilde + k * k * (var_V2_pos - var_V2);
 
-        // Compute deltas for V2_bar
-        float Jv = cov_V2_bar_tilde / var_V2_bar_tilde;
-        delta_mu[col + 1] = Jv * (mu_V2_bar_tilde_pos - mu_V2_bar_tilde);
-        delta_var[col + 1] =
-            Jv * Jv * (var_V2_bar_tilde_pos - var_V2_bar_tilde);
+            // Compute deltas for V2_bar
+            float Jv = cov_V2_bar_tilde / var_V2_bar_tilde;
+            if (isinf(Jv) || isnan(Jv)) Jv = 0.0f;
+
+            delta_mu[col + 1] = Jv * (mu_V2_bar_tilde_pos - mu_V2_bar_tilde);
+            delta_var[col + 1] =
+                Jv * Jv * (var_V2_bar_tilde_pos - var_V2_bar_tilde);
+        }
     }
 }
 
