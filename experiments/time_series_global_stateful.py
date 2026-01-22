@@ -11,7 +11,6 @@ from experiments.wandb_helpers import (
     finish_run,
 )
 from experiments.config import Config
-import torch
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from experiments.data_loader import GlobalBatchLoader
@@ -34,6 +33,7 @@ from experiments.tracking import EmbeddingUpdateTracker, ParameterTracker
 
 
 from pytagi import Normalizer as normalizer
+from pytagi import cuda
 import pytagi.metric as metric
 
 # Plotting defaults
@@ -362,7 +362,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         val_batch_iter = GlobalBatchLoader.create_data_loader(
             dataset=val_data.dataset,
             order_mode="by_window",
-            batch_size=config.data.loader.nb_ts,
+            batch_size=config.data.loader.batch_size,
             shuffle=False,
         )
 
@@ -566,7 +566,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     test_batch_iter = GlobalBatchLoader.create_data_loader(
         dataset=test_data.dataset,
         order_mode="by_window",
-        batch_size=config.data.loader.nb_ts,
+        batch_size=config.data.loader.batch_size,
         shuffle=False,
     )
 
@@ -1315,7 +1315,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             )
 
             config.seed = seed
-            config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
+            config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.evaluation.eval_plots = False
 
             # Convert config object to a dictionary for W&B

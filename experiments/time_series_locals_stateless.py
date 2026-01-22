@@ -8,7 +8,7 @@ from experiments.wandb_helpers import (
     log_data,
     finish_run,
 )
-import torch
+from pytagi import cuda
 from pathlib import Path
 import pandas as pd
 
@@ -876,7 +876,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             )
 
             config.seed = seed
-            config.model.device = "cpu"
+            config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.evaluation.eval_plots = False
 
             # Convert config object to a dictionary for W&B
