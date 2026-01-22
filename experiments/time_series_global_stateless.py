@@ -786,7 +786,7 @@ def eval_global_model(
         if config.evaluation.eval_metrics:
 
             # Standardize test with training mean and std
-            if config.data_loader.scale_method == "standard":
+            if config.data.loader.scale_method == "standard":
                 train_mean = np.nanmean(yt_train)
                 train_std = np.nanstd(yt_train)
             else:

@@ -721,13 +721,13 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
         # Get true values using the packed local index
         yt_train, yt_val, yt_test = (
             _trim_trailing_nans(
-                true_train[config.data_loader.input_seq_len :, local_idx]
+                true_train[config.data.loader.input_seq_len :, local_idx]
             ),
             _trim_trailing_nans(
-                true_val[config.data_loader.input_seq_len :, local_idx]
+                true_val[config.data.loader.input_seq_len :, local_idx]
             ),
             _trim_trailing_nans(
-                true_test[config.data_loader.input_seq_len :, local_idx]
+                true_test[config.data.loader.input_seq_len :, local_idx]
             ),
         )
         yt_full = np.concatenate([yt_train, yt_val, yt_test])
@@ -763,7 +763,7 @@ def eval_local_models(config, experiment_name: Optional[str] = None):
         if config.evaluation.eval_metrics:
 
             # Standardize test with training mean and std
-            if config.data_loader.scale_method == "standard":
+            if config.data.loader.scale_method == "standard":
                 train_mean = np.nanmean(yt_train)
                 train_std = np.nanstd(yt_train)
             else:
