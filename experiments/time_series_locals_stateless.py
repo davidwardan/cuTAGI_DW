@@ -1,7 +1,7 @@
 import os
 import numpy as np
 from tqdm import tqdm
-from typing import List, Optional
+from typing import Optional
 from experiments.wandb_helpers import (
     log_model_parameters,
     init_run,
@@ -14,9 +14,7 @@ import pandas as pd
 
 from experiments.config import Config
 
-from examples.data_loader import (
-    TimeSeriesDataloader,
-)
+from experiments.data_loader import BatchLoader
 from pytagi import Normalizer as normalizer
 import pytagi.metric as metric
 
@@ -28,6 +26,8 @@ from experiments.utils import (
     EarlyStopping,
     calculate_updates,
     adjust_params,
+    prepare_data,
+    prepare_input,
 )
 
 # Plotting defaults
@@ -44,82 +44,6 @@ mpl.rcParams.update(
         "lines.linewidth": 1,  # Set line width to 1
     }
 )
-
-
-# --- Helper functions ---
-# data loaders specific to local models
-def prepare_dtls(
-    x_file,
-    date_file,
-    input_seq_len,
-    num_features,
-    time_covariates,
-    ts,
-):
-    train_dtl = TimeSeriesDataloader(
-        x_file=x_file[0],
-        date_time_file=date_file[0],
-        time_covariates=time_covariates,
-        keep_last_time_cov=True,
-        output_col=[0],
-        input_seq_len=input_seq_len,
-        output_seq_len=1,
-        num_features=num_features,
-        stride=1,
-        ts_idx=ts,
-    )
-
-    val_dtl = TimeSeriesDataloader(
-        x_file=x_file[1],
-        date_time_file=date_file[1],
-        time_covariates=time_covariates,
-        keep_last_time_cov=True,
-        output_col=[0],
-        input_seq_len=input_seq_len,
-        output_seq_len=1,
-        num_features=num_features,
-        stride=1,
-        x_mean=train_dtl.x_mean,
-        x_std=train_dtl.x_std,
-        ts_idx=ts,
-    )
-    test_dtl = TimeSeriesDataloader(
-        x_file=x_file[2],
-        date_time_file=date_file[2],
-        time_covariates=time_covariates,
-        keep_last_time_cov=True,
-        output_col=[0],
-        input_seq_len=input_seq_len,
-        output_seq_len=1,
-        num_features=num_features,
-        stride=1,
-        x_mean=train_dtl.x_mean,
-        x_std=train_dtl.x_std,
-        ts_idx=ts,
-    )
-
-    return train_dtl, val_dtl, test_dtl
-
-
-# prepare input specific to local models
-def prepare_input(
-    x,
-    var_x: Optional[np.ndarray],
-    look_back_mu: Optional[np.ndarray],
-    look_back_var: Optional[np.ndarray],
-    indices,
-):
-    x = np.nan_to_num(x, nan=0.0)
-    if var_x is None:
-        var_x = np.zeros_like(x, dtype=np.float32)
-    input_seq_len = look_back_mu.shape[1]
-
-    if look_back_mu is not None:
-        x[:input_seq_len] = look_back_mu[indices]
-    if look_back_var is not None:
-        var_x[:input_seq_len] = look_back_var[indices]
-
-    return x, var_x
 
 
 def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=None):
@@ -145,17 +69,18 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
     for ts in config.ts_to_use:
 
         # Prepare data loaders
-        train_dtl, val_dtl, test_dtl = prepare_dtls(
-            config.x_file,
-            config.date_file,
-            config.data.loader.input_seq_len,
-            config.data.loader.num_features,
-            config.data.loader.time_covariates,
-            ts,
+        train_data, val_data, test_data = prepare_data(
+            x_file=config.x_file,
+            date_file=config.date_file,
+            input_seq_len=config.data.loader.input_seq_len,
+            time_covariates=config.data.loader.time_covariates,
+            scale_method=config.data.loader.scale_method,
+            order_mode=config.data.loader.order_mode,
+            ts_to_use=config.ts_to_use,
         )
         if config.data.loader.scale_method == "standard":
-            x_means[ts] = train_dtl.x_mean[0]
-            x_stds[ts] = train_dtl.x_std[0]
+            x_means[ts] = train_data.x_mean[0][0]
+            x_stds[ts] = train_data.x_std[0][0]
 
         # Build model
         net, output_updater = build_model(
@@ -223,9 +148,12 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             train_mse = []
             train_log_lik = []
 
-            train_batch_iter = train_dtl.create_data_loader(
+            train_batch_iter = BatchLoader.create_data_loader(
+                dataset=train_data.dataset,
+                order_mode="by_window",
                 batch_size=config.data.loader.batch_size,
                 shuffle=False,
+                seed=1,  # fixed for all seeds and runs
             )
 
             # Initialize look-back buffer and LSTM state container
@@ -237,8 +165,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             if not config.use_AGVI:
                 sigma_v = decaying_sigma_v[epoch]
 
-            train_time_step = 0
-            for x, y in train_batch_iter:
+            for (x, y), _, w_id in train_batch_iter:
 
                 # get current batch size
                 B = config.data.loader.batch_size
@@ -258,9 +185,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
                     look_back_buffer.initialize(
-                        initial_mu=x[: config.data.loader.input_seq_len],
+                        initial_mu=x[:, : config.data.loader.input_seq_len],
                         initial_var=np.zeros_like(
-                            x[: config.data.loader.input_seq_len], dtype=np.float32
+                            x[:, : config.data.loader.input_seq_len], dtype=np.float32
                         ),
                         indices=[0],
                     )
@@ -279,7 +206,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                         if config.training.use_look_back_predictions
                         else None
                     ),
-                    indices=[0],
+                    indices=np.array([0]),
                 )
 
                 # Feedforward
@@ -315,9 +242,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     new_mu=m_pred,
                     new_std=s_pred_total,
                     indices=[ts],
-                    time_step=train_time_step,
+                    time_step=w_id.item(),
                 )
-                train_time_step += 1
 
                 # Update
                 m_post, v_post = calculate_updates(
@@ -352,13 +278,14 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             # reset look-back buffer
             look_back_buffer.needs_initialization = [True]
 
-            val_batch_iter = val_dtl.create_data_loader(
+            val_batch_iter = BatchLoader.create_data_loader(
+                dataset=val_data.dataset,
+                order_mode="by_window",
                 batch_size=config.data.loader.batch_size,
                 shuffle=False,
             )
 
-            val_time_step = 0
-            for x, y in val_batch_iter:
+            for (x, y), _, w_id in val_batch_iter:
 
                 # get current batch size
                 B = config.data.loader.batch_size
@@ -379,9 +306,9 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
                     look_back_buffer.initialize(
-                        initial_mu=x[: config.data.loader.input_seq_len],
+                        initial_mu=x[:, : config.data.loader.input_seq_len],
                         initial_var=np.zeros_like(
-                            x[: config.data.loader.input_seq_len], dtype=np.float32
+                            x[:, : config.data.loader.input_seq_len], dtype=np.float32
                         ),
                         indices=[0],
                     )
@@ -400,7 +327,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                         if config.forecasting.recursive_val
                         else None
                     ),
-                    indices=[0],
+                    indices=np.array([0]),
                 )
 
                 # Feedforward
@@ -436,9 +363,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     new_mu=m_pred,
                     new_std=s_pred_total,
                     indices=[ts],
-                    time_step=val_time_step,
+                    time_step=w_id.item(),
                 )
-                val_time_step += 1
 
                 # Update look_back buffer
                 look_back_buffer.update(
@@ -528,16 +454,14 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
         # reset look-back buffer
         look_back_buffer.needs_initialization = [True]
 
-        test_batch_iter = test_dtl.create_data_loader(
+        test_batch_iter = BatchLoader.create_data_loader(
+            dataset=test_data.dataset,
+            order_mode="by_window",
             batch_size=config.data.loader.batch_size,
             shuffle=False,
         )
 
-        test_time_step = 0
-        for (
-            x,
-            y,
-        ) in test_batch_iter:
+        for (x, y), _, w_id in test_batch_iter:
 
             # get current batch size
             B = config.data.loader.batch_size
@@ -555,15 +479,15 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
 
             # rolling window mechanism for traffic and electricity datasets
             if config.forecasting.rolling_window:
-                if test_time_step % config.forecasting.rolling_window_size == 0:
+                if w_id.item() % config.forecasting.rolling_window_size == 0:
                     look_back_buffer.needs_initialization = [True]
 
             # prepare look_back buffer
             if look_back_buffer.needs_initialization[0]:
                 look_back_buffer.initialize(
-                    initial_mu=x[: config.data.loader.input_seq_len],
+                    initial_mu=x[:, : config.data.loader.input_seq_len],
                     initial_var=np.zeros_like(
-                        x[: config.data.loader.input_seq_len], dtype=np.float32
+                        x[:, : config.data.loader.input_seq_len], dtype=np.float32
                     ),
                     indices=[0],
                 )
@@ -578,7 +502,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 look_back_var=(
                     look_back_buffer.var if config.forecasting.recursive_test else None
                 ),
-                indices=[0],
+                indices=np.array([0]),
             )
 
             # Feedforward
@@ -600,9 +524,8 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                 new_mu=m_pred,
                 new_std=s_pred_total,
                 indices=[ts],
-                time_step=test_time_step,
+                time_step=w_id.item(),
             )
-            test_time_step += 1
 
             # Update look_back buffer
             look_back_buffer.update(
@@ -877,7 +800,6 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
-            config.evaluation.eval_plots = False
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

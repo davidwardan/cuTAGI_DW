@@ -511,7 +511,15 @@ def prepare_input(
 
 # Define function to calculate updates
 def calculate_updates(
-    net, out_updater, m_pred, v_pred, y, use_AGVI, var_y=None, train_mode=True
+    net,
+    out_updater,
+    m_pred,
+    v_pred,
+    y,
+    use_AGVI,
+    var_y=None,
+    train_mode=True,
+    overfit_mu=False,
 ):
     """
     Calculates the posterior mean and variance (Kalman update) for the
@@ -551,8 +559,10 @@ def calculate_updates(
 
     # kalman update
     K = v_pred / (v_pred + var_y)  # Kalman gain
-    m_post = m_pred + K * (y - m_pred)  # posterior mean
     v_post = (1.0 - K) * v_pred  # posterior variance
+    if overfit_mu:
+        K = np.ones_like(K)
+    m_post = m_pred + K * (y - m_pred)  # posterior mean
     if has_nan:
         np.copyto(v_post, v_pred, where=nan_indices)
 

@@ -290,7 +290,7 @@ class TimeSeriesDataBuilder:
         plt.close()
 
         # --- Concatenation Logic ---
-        if self.order_mode == "by_series":
+        if self.order_mode == "by_series" or self.order_mode == "by_series_batch":
             xs, ys = [], []
             S_parts, K_parts = [], []
             for j, (xj, yj, kj, sj) in enumerate(rolled_per_ts):
@@ -410,7 +410,7 @@ class TimeSeriesDataBuilder:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
 
 
-class GlobalBatchLoader:
+class BatchLoader:
     # -- Data Loader Generators ---
     @staticmethod
     def _loader_by_window(
@@ -572,6 +572,133 @@ class GlobalBatchLoader:
                 yield (x_batch, y_batch), s_batch, k_batch
 
     @staticmethod
+    def _loader_by_series_batch(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        batch_size: int,
+        shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Generator for 'by_series_batch' mode.
+        - Batches contain samples from 'batch_size' different series.
+        - Iterates through time for this group of series until all are exhausted.
+        - Padded with NaNs if series lengths differ or if fewer than batch_size series remain.
+        """
+        if len(X) == 0:
+            return
+
+        x_feat_dim = X.shape[1]
+        y_feat_dim = Y.shape[1]
+
+        # Identify unique series
+        # Assumes X, Y, S, K are sorted by series (guaranteed by _process_all)
+        unique_series_ids, series_start_indices = np.unique(S, return_index=True)
+        # Note: np.unique returns sorted unique elements
+
+        # We need to shuffle the series order if requested
+        series_order = np.arange(len(unique_series_ids))
+        if shuffle:
+            if rng is not None:
+                rng.shuffle(series_order)
+            else:
+                np.random.shuffle(series_order)
+
+        ordered_series_ids = unique_series_ids[series_order]
+
+        # Map series_id to its data slice for faster access
+        # Since they are sorted in input arrays, we can just store start/end indices
+        series_slices = {}
+        for i, s_id in enumerate(unique_series_ids):
+            start = series_start_indices[i]
+            end = (
+                series_start_indices[i + 1]
+                if i + 1 < len(unique_series_ids)
+                else len(S)
+            )
+            series_slices[s_id] = (start, end)
+
+        num_series = len(ordered_series_ids)
+
+        for i in range(0, num_series, batch_size):
+            batch_series_ids = ordered_series_ids[i : i + batch_size]
+            current_batch_series_count = len(batch_series_ids)
+
+            # Prepare data access for these series
+            # We need to know the max length to iterate
+            max_len_in_batch = 0
+            series_data_in_batch = []  # List of (X, Y, S, K) for each series in batch
+
+            for s_id in batch_series_ids:
+                start, end = series_slices[s_id]
+                x_s = X[start:end]
+                y_s = Y[start:end]
+                s_s = S[start:end]
+                k_s = K[start:end]
+                dataset_len = len(x_s)
+                max_len_in_batch = max(max_len_in_batch, dataset_len)
+                series_data_in_batch.append(
+                    {"X": x_s, "Y": y_s, "S": s_s, "K": k_s, "len": dataset_len}
+                )
+
+            # Pad the series_data_in_batch if we are at the very end and have fewer series
+            # However, the loop logic handles filling the 'batch'.
+            # We just need to ensure the yielded tensors have shape (batch_size, ...)
+
+            for t in range(max_len_in_batch):
+                # Construct the batch at time step t across the series in this group
+
+                # Check if we need padding for missing series (if last batch is partial)
+                # But here we want to handle padding per series length too.
+
+                x_batch_list = []
+                y_batch_list = []
+                s_batch_list = []
+                k_batch_list = []
+
+                for b_idx in range(batch_size):
+                    # If we have a series for this batch slot
+                    if b_idx < current_batch_series_count:
+                        s_data = series_data_in_batch[b_idx]
+                        if t < s_data["len"]:
+                            x_batch_list.append(s_data["X"][t])
+                            y_batch_list.append(s_data["Y"][t])
+                            s_batch_list.append(s_data["S"][t])
+                            k_batch_list.append(s_data["K"][t])
+                        else:
+                            # This series is finished, pad
+                            # Pad with NaNs/Dummy
+                            x_batch_list.append(
+                                np.full((x_feat_dim,), np.nan, dtype=X.dtype)
+                            )
+                            y_batch_list.append(
+                                np.full((y_feat_dim,), np.nan, dtype=Y.dtype)
+                            )
+                            # For S and K, just repeat the last valid or use -1
+                            # Using -1 for S to indicate padding
+                            s_batch_list.append(-1)
+                            # For K, maybe use the last K or -1? Let's use -1 to be safe or last valid k + steps?
+                            # Usually window_id identifies time. Let's use -1.
+                            k_batch_list.append(-1)
+                    else:
+                        # Padding for completely missing series (last batch of series grouping)
+                        x_batch_list.append(
+                            np.full((x_feat_dim,), np.nan, dtype=X.dtype)
+                        )
+                        y_batch_list.append(
+                            np.full((y_feat_dim,), np.nan, dtype=Y.dtype)
+                        )
+                        s_batch_list.append(-1)
+                        k_batch_list.append(-1)
+
+                yield (np.array(x_batch_list), np.array(y_batch_list)), np.array(
+                    s_batch_list
+                ), np.array(k_batch_list)
+
     def create_data_loader(
         dataset: Dict[str, np.ndarray],
         order_mode: str,
@@ -606,15 +733,19 @@ class GlobalBatchLoader:
 
         # Call the other static methods using the class name
         if order_mode == "by_series":
-            yield from GlobalBatchLoader._loader_by_series(
+            yield from BatchLoader._loader_by_series(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "by_series_batch":
+            yield from BatchLoader._loader_by_series_batch(
                 X, Y, S, K, batch_size, shuffle, rng
             )
         elif order_mode == "by_window":
-            yield from GlobalBatchLoader._loader_by_window(
+            yield from BatchLoader._loader_by_window(
                 X, Y, S, K, batch_size, shuffle, rng
             )
         elif order_mode == "shuffled":
-            yield from GlobalBatchLoader._loader_shuffled(
+            yield from BatchLoader._loader_shuffled(
                 X, Y, S, K, batch_size, shuffle, rng
             )
         else:

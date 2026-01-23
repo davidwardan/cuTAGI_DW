@@ -12,9 +12,9 @@ data:
     time_covariates:
     - week_of_year
     scale_method: standard
-    order_mode: by_window
+    order_mode: by_series_batch
     input_seq_len: 52
-    batch_size: 16
+    batch_size: 32
     output_col:
     - 0
     ts_to_use: []

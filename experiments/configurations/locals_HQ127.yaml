@@ -23,7 +23,7 @@ model:
   Sigma_v_bounds:
   - null
   - null
-  decaying_factor: 0.999
+  decaying_factor: 0.99
   device: cpu
   hidden_sizes:
   - 40

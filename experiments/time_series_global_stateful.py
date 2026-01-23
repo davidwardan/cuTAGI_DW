@@ -2,7 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 from experiments.wandb_helpers import (
     log_model_parameters,
@@ -13,7 +13,7 @@ from experiments.wandb_helpers import (
 from experiments.config import Config
 
 from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
-from experiments.data_loader import GlobalBatchLoader
+from experiments.data_loader import BatchLoader
 from experiments.utils import (
     prepare_data,
     build_model,
@@ -29,8 +29,6 @@ from experiments.utils import (
     LookBackBuffer,
     LSTMStateContainer,
 )
-from experiments.tracking import EmbeddingUpdateTracker, ParameterTracker
-
 
 from pytagi import Normalizer as normalizer
 from pytagi import cuda
@@ -38,7 +36,6 @@ import pytagi.metric as metric
 
 # Plotting defaults
 import matplotlib as mpl
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
 # Update matplotlib parameters in a single dictionary
@@ -76,7 +73,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     )
 
     # Embeddings
-    embeddings = None  # Initialize as None
     embedding_dir = os.path.join(output_dir, "embeddings")
 
     if config.use_mapped_embeddings:
@@ -111,6 +107,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         embeddings.save(os.path.join(embedding_dir, "embeddings_start.npz"))
 
     else:
+        embeddings = None
         print("No embeddings will be used.")
 
     # Build model
@@ -120,6 +117,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         seed=config.seed,
         device=config.model.device,
         hidden_sizes=config.model.hidden_sizes,
+        shift_biases=False,
     )
 
     # Enable input state updates only if embeddings are being used
@@ -178,7 +176,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         train_mse = []
         train_log_lik = []
 
-        train_batch_iter = GlobalBatchLoader.create_data_loader(
+        train_batch_iter = BatchLoader.create_data_loader(
             dataset=train_data.dataset,
             order_mode=config.data.loader.order_mode,
             batch_size=config.data.loader.batch_size,
@@ -191,6 +189,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             input_seq_len=config.data.loader.input_seq_len,
             nb_ts=config.data.loader.nb_ts,
         )
+
         # Create layer_state_shapes dynamically based on config
         layer_state_shapes = {
             i: size for i, size in enumerate(config.model.hidden_sizes)
@@ -259,12 +258,11 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     else None
                 ),
                 indices=ts_id,
-                embeddings=embeddings,  # Pass the object directly
+                embeddings=(embeddings if config.total_embedding_size != 0 else None),
             )
 
             # Feedforward
             m_pred, v_pred = net(x, var_x)
-
             # Specific to AGVI
             if config.use_AGVI:
                 flat_m = np.ravel(m_pred)
@@ -336,7 +334,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=m_post.reshape(B, -1)[:, -1],
+                new_mu=m_post.reshape(B, -1),
                 new_var=v_post.reshape(B, -1),
                 indices=indices,
             )
@@ -344,22 +342,19 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         # End of epoch
         train_mse = np.mean(train_mse)
         train_log_lik = np.mean(train_log_lik)
+        net.reset_lstm_states()
 
         # Validation
         net.eval()
         val_mse = []
         val_log_lik = []
 
-        # reset LSTM states
-        net.reset_lstm_states()
-        lstm_state_container.reset_states()
-
         # reset look-back buffer
         look_back_buffer.needs_initialization = [
             True for _ in range(config.data.loader.nb_ts)
         ]
 
-        val_batch_iter = GlobalBatchLoader.create_data_loader(
+        val_batch_iter = BatchLoader.create_data_loader(
             dataset=val_data.dataset,
             order_mode="by_window",
             batch_size=config.data.loader.batch_size,
@@ -409,7 +404,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     look_back_buffer.var if config.forecasting.recursive_val else None
                 ),
                 indices=indices,
-                embeddings=embeddings,  # Pass the object directly
+                embeddings=(embeddings if config.total_embedding_size != 0 else None),
             )
 
             # Feedforward
@@ -453,8 +448,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=m_pred.reshape(B, -1)[:, -1],
-                new_var=v_pred.reshape(B, -1)[:, -1],
+                new_mu=m_pred.reshape(B, -1),
+                new_var=v_pred.reshape(B, -1),
                 indices=indices,
             )
 
@@ -463,18 +458,13 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         val_log_lik = np.mean(val_log_lik)
 
         # Update progress bar
-        sigma_v_str = (
-            f"{sigma_v:.4f}"
-            if not config.use_AGVI and sigma_v is not None
-            else "N/A (AGVI)"
-        )
         pbar.set_postfix(
             {
                 "Train RMSE": f"{train_mse:.4f}",
                 "Val RMSE": f"{val_mse:.4f}",
                 "Train LogLik": f"{train_log_lik:.4f}",
                 "Val LogLik": f"{val_log_lik:.4f}",
-                "Sigma_v": sigma_v_str,
+                "Sigma_v": f"{sigma_v:.4f}" if not config.use_AGVI else "",
             }
         )
 
@@ -563,7 +553,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         True for _ in range(config.data.loader.nb_ts)
     ]
 
-    test_batch_iter = GlobalBatchLoader.create_data_loader(
+    test_batch_iter = BatchLoader.create_data_loader(
         dataset=test_data.dataset,
         order_mode="by_window",
         batch_size=config.data.loader.batch_size,
@@ -617,7 +607,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 look_back_buffer.var if config.forecasting.recursive_test else None
             ),
             indices=indices,
-            embeddings=embeddings,  # Pass the object directly
+            embeddings=(embeddings if config.total_embedding_size != 0 else None),
         )
 
         # Feedforward
@@ -647,8 +637,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=m_pred.reshape(B, -1)[:, -1],
-            new_var=v_pred.reshape(B, -1)[:, -1],
+            new_mu=m_pred.reshape(B, -1),
+            new_var=v_pred.reshape(B, -1),
             indices=indices,
         )
 
@@ -1316,7 +1306,6 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
-            config.evaluation.eval_plots = False
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
