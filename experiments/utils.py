@@ -47,6 +47,12 @@ class LookBackBuffer:
         self.mu[indices, -1] = new_mu.ravel()
         self.var[indices, -1] = new_var.ravel()
 
+    def reset(self):
+        nb_ts = self.mu.shape[0]
+        self.mu.fill(np.nan)
+        self.var.fill(0.0)
+        self.needs_initialization = [True for _ in range(nb_ts)]
+
     def __call__(self, indices):
         return self.mu[indices], self.var[indices]
 
@@ -225,7 +231,7 @@ class LSTMStateContainer:
 class EarlyStopping:
     def __init__(
         self,
-        criteria="log_lik",
+        criteria="loglik",
         patience=10,
         min_delta=1e-4,
         warmup_epochs=0,
@@ -233,7 +239,7 @@ class EarlyStopping:
         self.criteria = criteria
         self.patience = patience
         self.min_delta = min_delta
-        self.best_score = -np.inf if criteria == "log_lik" else np.inf
+        self.best_score = -np.inf if criteria == "loglik" else np.inf
         self.counter = 0
         self.best_state = None
         self.best_look_back_buffer = None
@@ -256,7 +262,7 @@ class EarlyStopping:
     def _is_improvement(self, current_score):
         if not np.isfinite(current_score):
             return False
-        if self.criteria == "log_lik":
+        if self.criteria == "loglik":
             return current_score > self.best_score + self.min_delta
         return current_score < self.best_score - self.min_delta
 
@@ -482,7 +488,8 @@ def prepare_input(
         var_x = np.zeros_like(x, dtype=np.float32)
 
     active_mask = indices >= 0
-    input_seq_len = look_back_mu.shape[1]
+    if look_back_mu is not None:
+        input_seq_len = look_back_mu.shape[1]
 
     if look_back_mu is not None:
         x[active_mask, :input_seq_len] = look_back_mu[indices[active_mask]]
@@ -525,8 +532,8 @@ def calculate_updates(
     Calculates the posterior mean and variance (Kalman update) for the
     output predictions.
     """
+    # calculate updates
     if train_mode:
-        # calculate updates
         if use_AGVI:
             # Update output layer
             out_updater.update_heteros(
@@ -565,6 +572,9 @@ def calculate_updates(
     m_post = m_pred + K * (y - m_pred)  # posterior mean
     if has_nan:
         np.copyto(v_post, v_pred, where=nan_indices)
+
+    # clip v_post to avoid numerical issues
+    v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
     return m_post, v_post
 

@@ -182,9 +182,7 @@ class EmbeddingLayer:
             np.add.at(self.mu, idx_filtered, mu_delta_filtered)
             np.add.at(self.var, idx_filtered, var_delta_filtered)
 
-            np.maximum(
-                self.var, 1e-5, out=self.var
-            )  # prevent variances from going negative
+            np.clip(self.var, 1e-6, 1.0, out=self.var)
 
     def apply_accumulated_updates(self):
         """
@@ -200,7 +198,7 @@ class EmbeddingLayer:
             self.var_buffer.fill(0.0)
 
         # Ensure variance constraint
-        np.maximum(self.var, 1e-5, out=self.var)
+        np.clip(self.var, 1e-6, 1.0, out=self.var)
 
     def save(self, out_file: str):
         """Saves embeddings to a .npz file."""

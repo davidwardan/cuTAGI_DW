@@ -46,7 +46,7 @@ mpl.rcParams.update(
 )
 
 
-def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=None):
+def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
     output_dir = f"out/{experiment_name}/"
@@ -409,7 +409,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
             # Check for early stopping
             val_score = (
                 val_log_lik
-                if config.training.early_stopping_criteria == "log_lik"
+                if config.training.early_stopping_criteria == "loglik"
                 else val_mse
             )
             if early_stopping(
@@ -447,7 +447,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     sigma_v = early_stopping.best_sigma_v
 
         # Save best model
-        net.save(os.path.join(output_dir, f"param/model_{ts}.pth"))
+        net.save(os.path.join(output_dir, f"param/model_{ts}.bin"))
 
         # --- Testing ---
         net.eval()
@@ -541,7 +541,6 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
                     y.flatten(),
                     use_AGVI=config.use_AGVI,
                     var_y=var_y,
-                    train_mode=False,
                 )
 
             # Update look_back buffer
@@ -592,7 +591,7 @@ def train_local_models(config, experiment_name: Optional[str] = None, wandb_run=
     )
 
 
-def eval_local_models(config, experiment_name: Optional[str] = None):
+def eval_model(config, experiment_name: Optional[str] = None):
     """Evaluates forecasts stored in the .npz format."""
 
     input_dir = Path(f"out/{experiment_name}/")
@@ -820,6 +819,8 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
+            config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
+            config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -843,13 +844,13 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             if Train:
                 # Train model
-                train_local_models(
+                train_model(
                     config, experiment_name=experiment_name, wandb_run=run
                 )
 
             if Eval:
                 # Evaluate model
-                eval_local_models(config, experiment_name=experiment_name)
+                eval_model(config, experiment_name=experiment_name)
 
             # Finish the W&B run
             if log_wandb:

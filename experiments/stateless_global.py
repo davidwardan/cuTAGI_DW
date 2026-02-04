@@ -51,7 +51,7 @@ mpl.rcParams.update(
 )
 
 
-def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=None):
+def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
     output_dir = f"out/{experiment_name}/"
@@ -203,16 +203,16 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 logging_frequency=2,
             )
 
+        m_preds = []
+        std_preds = []
+        y_trues = []
+
         for (x, y), ts_id, w_id in train_batch_iter:
 
             # get current batch size and indices
             B = x.shape[0]
             indices = ts_id
             time_steps = w_id
-
-            # reset LSTM states for the current batch
-            if epoch != 0:
-                net.reset_lstm_states()
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -222,34 +222,12 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     dtype=np.float32,
                 )
 
-            # prepare look_back buffer
-            # Filter out padded indices (-1) before checking initialization status
-            valid_indices_for_init = [i for i in indices if i != -1]
-            if any(
-                look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
-            ):
-                look_back_buffer.initialize(
-                    initial_mu=x[:, : config.data.loader.input_seq_len],
-                    initial_var=np.zeros_like(
-                        x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                    ),
-                    indices=indices,
-                )
-
             # prepare input
             x, var_x = prepare_input(
                 x=x,
                 var_x=None,
-                look_back_mu=(
-                    look_back_buffer.mu
-                    if config.training.use_look_back_predictions
-                    else None
-                ),
-                look_back_var=(
-                    look_back_buffer.var
-                    if config.training.use_look_back_predictions
-                    else None
-                ),
+                look_back_mu=None,
+                look_back_var=None,
                 indices=ts_id,
                 embeddings=embeddings,  # Pass the object directly
             )
@@ -273,13 +251,9 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             m_pred_masked = m_pred[mask]
             s_pred_masked = s_pred_total[mask]
 
-            if y_masked.size > 0:
-                batch_mse = metric.rmse(m_pred_masked, y_masked)
-                batch_log_lik = metric.log_likelihood(
-                    m_pred_masked, y_masked, s_pred_masked
-                )
-                train_mse.append(batch_mse)
-                train_log_lik.append(batch_log_lik)
+            m_preds.append(m_pred_masked)
+            std_preds.append(s_pred_masked)
+            y_trues.append(y_masked)
 
             # Store predictions
             train_states.update(
@@ -322,21 +296,20 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                     var_delta_slice,
                 )
 
-            # Update look_back buffer
-            look_back_buffer.update(
-                new_mu=m_post.reshape(B, -1),
-                new_var=v_post.reshape(B, -1),
-                indices=indices,
-            )
+            # reset LSTM states
+            net.reset_lstm_states()
 
         # End of epoch
-        train_mse = np.mean(train_mse)
-        train_log_lik = np.mean(train_log_lik)
+        train_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+        train_log_lik = metric.log_likelihood(
+            np.concatenate(m_preds), np.concatenate(y_trues), np.concatenate(std_preds)
+        )
 
         # Validation
         net.eval()
-        val_mse = []
-        val_log_lik = []
+        m_preds = []
+        std_preds = []
+        y_trues = []
 
         # reset look-back buffer
         look_back_buffer.needs_initialization = [
@@ -356,9 +329,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             B = x.shape[0]
             indices = ts_id
             time_steps = w_id
-
-            # reset LSTM states for the current batch
-            net.reset_lstm_states()
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -410,19 +380,15 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
 
             s_pred_total = np.sqrt(v_pred + var_y)
 
-            # Compute metrics
+            # Store metrics
             mask = ~np.isnan(y.flatten())
             y_masked = y.flatten()[mask]
             m_pred_masked = m_pred[mask]
             s_pred_masked = s_pred_total[mask]
 
-            if y_masked.size > 0:
-                batch_mse = metric.rmse(m_pred_masked, y_masked)
-                batch_log_lik = metric.log_likelihood(
-                    m_pred_masked, y_masked, s_pred_masked
-                )
-                val_mse.append(batch_mse)
-                val_log_lik.append(batch_log_lik)
+            m_preds.append(m_pred_masked)
+            std_preds.append(s_pred_masked)
+            y_trues.append(y_masked)
 
             # Store predictions
             val_states.update(
@@ -439,9 +405,15 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
                 indices=indices,
             )
 
+            # reset LSTM states
+            net.reset_lstm_states()
+
         # End of epoch
-        val_mse = np.mean(val_mse)
-        val_log_lik = np.mean(val_log_lik)
+        # Calculate micro metrics for early stopping
+        val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+        val_log_lik = metric.log_likelihood(
+            np.concatenate(m_preds), np.concatenate(y_trues), np.concatenate(std_preds)
+        )
 
         # Update progress bar
         pbar.set_postfix(
@@ -476,7 +448,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         # Check for early stopping
         val_score = (
             val_log_lik
-            if config.training.early_stopping_criteria == "log_lik"
+            if config.training.early_stopping_criteria == "loglik"
             else val_mse
         )
         if early_stopping(
@@ -517,7 +489,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             embeddings = early_stopping.best_embeddings
 
     # Save best model
-    net.save(os.path.join(output_dir, "param/model.pth"))
+    net.save(os.path.join(output_dir, "param/model.bin"))
 
     # Save best embeddings based on type
     if embeddings is not None:
@@ -547,9 +519,6 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
         B = x.shape[0]
         indices = ts_id
         time_steps = w_id
-
-        # reset LSTM states for the current batch
-        net.reset_lstm_states()
 
         # prepare obsevation noise matrix
         if not config.use_AGVI:
@@ -620,8 +589,8 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
             indices=indices,
         )
 
-    # End of testing
-    net.reset_lstm_states()
+        # reset LSTM states
+        net.reset_lstm_states()
 
     # Run over each time series and re_scale it
     if config.data.loader.scale_method == "standard":
@@ -662,7 +631,7 @@ def train_global_model(config, experiment_name: Optional[str] = None, wandb_run=
     )
 
 
-def eval_global_model(
+def eval_model(
     config,
     experiment_name: Optional[str] = None,
     wandb_run: Optional[Any] = None,
@@ -935,14 +904,14 @@ def eval_global_model(
                 if config.evaluation.embed_plots:
                     plot_embeddings(
                         start_embeddings_mu,
-                        config.data_loader.nb_ts,
+                        config.data.loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_start.svg",
                         labels=labels,
                     )
                     plot_embeddings(
                         final_embeddings_mu,
-                        config.data_loader.nb_ts,
+                        config.data.loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_final.svg",
                         labels=labels,
@@ -1134,7 +1103,7 @@ def eval_global_model(
 
                 # Initialize stitched matrices
                 mu_stitched_start = np.zeros(
-                    (config.data_loader.nb_ts, config.total_embedding_size),
+                    (config.data.loader.nb_ts, config.total_embedding_size),
                     dtype=np.float32,
                 )
                 var_stitched_start = np.zeros_like(mu_stitched_start)
@@ -1260,7 +1229,10 @@ def eval_global_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [1, 3, 17, 42, 99]
+    # list_of_seeds = [1, 3, 17, 42, 99]
+    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+
+    list_of_seeds = [1]
     list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     # Iterate over experiments and seeds
@@ -1274,7 +1246,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Define experiment name
             experiment_name = (
-                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
+                f"seed{seed}/{exp}/Shuffled_{model_category}_{embed_category}"
             )
 
             # Load configuration
@@ -1284,6 +1256,9 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
+            config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
+            config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.data.loader.order_mode = "shuffled_filtered"  # forced for stateless
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -1311,13 +1286,13 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             if Train:
                 # Train model
-                train_global_model(
+                train_model(
                     config, experiment_name=experiment_name, wandb_run=run
                 )
 
             if Eval:
                 # Evaluate model
-                eval_global_model(
+                eval_model(
                     config, experiment_name=experiment_name, wandb_run=run
                 )
 

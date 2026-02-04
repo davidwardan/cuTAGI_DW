@@ -264,30 +264,30 @@ class TimeSeriesDataBuilder:
             self.x_mean = list(means)
             self.x_std = list(stds)
 
-        # Plot distribution for each time Series
-        pdf_name = self.x_file.split("/")[-1].replace(".csv", "")
+        # # Plot distribution for each time Series
+        # pdf_name = self.x_file.split("/")[-1].replace(".csv", "")
 
-        all_means = np.nanmean(X_all_norm, axis=0)
-        all_stds = np.nanstd(X_all_norm, axis=0)
-        plt.figure(figsize=(min(12, len(all_means) * 0.1), 3))
-        plt.errorbar(
-            x=np.arange(len(all_means)),
-            y=all_means,
-            yerr=all_stds,
-            fmt="o",
-            markersize=3,
-            ecolor="r",
-            capsize=3,
-        )
-        plt.xlabel("Time Series Index")
-        plt.ylabel("Value")
-        plt.title(f"{pdf_name}")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.xlim(-1, len(all_means))
-        plt.ylim(-5, 5)
-        plt.savefig(f"out/dist_{pdf_name}.svg")
-        plt.close()
+        # all_means = np.nanmean(X_all_norm, axis=0)
+        # all_stds = np.nanstd(X_all_norm, axis=0)
+        # plt.figure(figsize=(min(12, len(all_means) * 0.1), 3))
+        # plt.errorbar(
+        #     x=np.arange(len(all_means)),
+        #     y=all_means,
+        #     yerr=all_stds,
+        #     fmt="o",
+        #     markersize=3,
+        #     ecolor="r",
+        #     capsize=3,
+        # )
+        # plt.xlabel("Time Series Index")
+        # plt.ylabel("Value")
+        # plt.title(f"{pdf_name}")
+        # plt.grid(True)
+        # plt.tight_layout()
+        # plt.xlim(-1, len(all_means))
+        # plt.ylim(-5, 5)
+        # plt.savefig(f"out/dist_{pdf_name}.svg")
+        # plt.close()
 
         # --- Concatenation Logic ---
         if self.order_mode == "by_series" or self.order_mode == "by_series_batch":
@@ -384,6 +384,71 @@ class TimeSeriesDataBuilder:
                 S_parts.append(sj)
 
             if not xs:
+                return {
+                    "value": (
+                        np.empty(
+                            (0, self.input_seq_len + self.num_features - 1),
+                            dtype=np.float32,
+                        ),
+                        np.empty((0, self.output_seq_len), dtype=np.float32),
+                    ),
+                    "series_id": np.empty((0,), dtype=np.int32),
+                    "window_id": np.empty((0,), dtype=np.int32),
+                }
+
+            X = np.concatenate(xs, axis=0).astype(np.float32)
+            Y = np.concatenate(ys, axis=0).astype(np.float32)
+            S = np.concatenate(S_parts, axis=0)
+            K = np.concatenate(K_parts, axis=0)
+
+            return {
+                "value": (X, Y),
+                "series_id": S,
+                "window_id": K,
+            }
+        elif self.order_mode == "shuffled_filtered":
+            # Concatenate all windows but filter out those with >50% NaNs in the lookback
+            xs, ys = [], []
+            S_parts, K_parts = [], []
+            for j, (xj, yj, kj, sj) in enumerate(rolled_per_ts):
+                if len(yj) == 0:
+                    continue
+
+                # Check for NaNs in the lookback portion of each window
+                # xj shape: (n_windows, input_seq_len + num_cov)
+                # We care about the target values in the lookback period
+                # The target is the first column if no covariates, or we might need to be careful
+                # xj stores [target, covariates...] per step
+                # Actually, based on _create_rolling_windows:
+                #    xw[i, :input_seq_len] = x_slice  <-- this is the target part
+                #    if num_cov > 0:
+                #        xw[i, input_seq_len:] = cov_last
+
+                # So the lookback part is distinct.
+                # Let's extract the lookback part for all windows in this series
+                lookback_part = xj[:, : self.input_seq_len]
+
+                # Count valid (non-NaN) values per window
+                # is_valid = ~np.isnan(lookback_part)
+                # valid_counts = np.sum(is_valid, axis=1)
+
+                # We want windows where > 50% of lookback is valid
+                # valid_counts > 0.5 * input_seq_len
+
+                valid_mask = np.sum(~np.isnan(lookback_part), axis=1) > (
+                    0.5 * self.input_seq_len
+                )
+
+                if not np.any(valid_mask):
+                    continue
+
+                xs.append(xj[valid_mask])
+                ys.append(yj[valid_mask])
+                K_parts.append(kj[valid_mask])
+                S_parts.append(sj[valid_mask])
+
+            if not xs:
+                print("Warning: No windows satisfied the filtered condition.")
                 return {
                     "value": (
                         np.empty(
@@ -745,6 +810,10 @@ class BatchLoader:
                 X, Y, S, K, batch_size, shuffle, rng
             )
         elif order_mode == "shuffled":
+            yield from BatchLoader._loader_shuffled(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "shuffled_filtered":
             yield from BatchLoader._loader_shuffled(
                 X, Y, S, K, batch_size, shuffle, rng
             )

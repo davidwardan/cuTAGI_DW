@@ -3,6 +3,8 @@ from typing import Iterable, Sequence
 
 from experiments.config import Config
 
+from pytagi import cuda
+
 DEFAULT_SEEDS: Sequence[int] = (1, 3, 17, 42, 99)
 DEFAULT_EXPERIMENTS: Sequence[str] = (
     "train30",
@@ -19,9 +21,7 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import time_series_locals_stateful as tsl
-
-    torch = tsl.torch
+    from experiments import stateful_global as parent_script
 
     # Model category
     model_category = "locals"
@@ -33,7 +33,7 @@ def _run_experiment(
     config = Config.from_yaml(f"experiments/configurations/{model_category}_HQ127.yaml")
 
     config.seed = seed
-    config.model.device = "cuda" if torch.cuda.is_available() else "cpu"
+    config.model.device = "cuda" if cuda.is_available() else "cpu"
     config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
     config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
 
@@ -41,12 +41,12 @@ def _run_experiment(
     config.display()
 
     if train:
-        tsl.train_local_models(
+        parent_script.train_model(
             config,
             experiment_name=experiment_name,
         )
     if evaluate:
-        tsl.eval_local_models(
+        parent_script.eval_model(
             config,
             experiment_name=experiment_name,
         )

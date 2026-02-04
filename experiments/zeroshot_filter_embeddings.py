@@ -22,7 +22,7 @@ from experiments.utils import (
 
 from experiments.data_loader import (
     TimeSeriesDataBuilder,
-    GlobalBatchLoader,
+    BatchLoader,
 )
 
 # Plotting defaults
@@ -48,20 +48,20 @@ mpl.rcParams.update(
 time_covariates = ["week_of_year"]
 num_features = 1 + len(time_covariates)
 input_seq_len = 52
-seed = 1
+seed = 100
 device = "cpu"
 model_input_size = input_seq_len + num_features - 1
 
 x_file = [
-    "data/hq/train100/split_train_values.csv",
+    "data/hq_small/weekly/hq_train_weekly_values_shifted.csv",
 ]
 date_file = [
-    "data/hq/train100/split_train_datetimes.csv",
+    "data/hq_small/weekly/hq_train_weekly_dates_shifted.csv",
 ]
-ts_idx = 17  # index of the time series to filter
+ts_idx = 5  # index of the time series to filter
 
 
-data_train = TimeSeriesDataBuilder(
+data = TimeSeriesDataBuilder(
     x_file=x_file[0],
     date_time_file=date_file[0],
     input_seq_len=input_seq_len,
@@ -73,129 +73,42 @@ data_train = TimeSeriesDataBuilder(
     ts_to_use=[ts_idx],
 )
 
-data_filter = TimeSeriesDataBuilder(
-    x_file=x_file[0],
-    date_time_file=date_file[0],
-    input_seq_len=input_seq_len,
-    output_seq_len=1,
-    stride=1,
-    time_covariates=time_covariates,
-    scale_method="standard",
-    order_mode="by_window",
-    ts_to_use=[ts_idx],
-)
-
-pretrained_weights_global = (
-    "experiments/pretrained_weights/global_noembeddings_seed1.pth"
-)
-
-pretrained_weights_local = (
-    "experiments/pretrained_weights/local_17_noembeddings_seed1.pth"
-)
 
 # Build model
-global_net, global_output_updater = build_model(
-    input_size=model_input_size,
+global_stateful, output_updater1 = build_model(
+    input_size=model_input_size + 10,
     use_AGVI=True,
     seed=seed,
     device=device,
-    init_params=pretrained_weights_global,
+    init_params="out/seed5/train100/BySeries2_global_simple-embeddings/param/model.bin",
     shift_biases=False,
 )
 
-adjust_params(global_net, "add", value=0.01)
+global_stateless, output_updater2 = build_model(
+    input_size=model_input_size + 10,
+    use_AGVI=True,
+    seed=seed,
+    device=device,
+    init_params="out/seed5/train100/Shuffled_stateless_global_simple-embeddings/param/model.bin",
+    shift_biases=False,
+)
+
+adjust_params(global_stateful, "add", value=0.01, which_layer=["LSTM.1", "LSTM.2", "LSTM.3"])
+adjust_params(global_stateless, "add", value=0.01, which_layer=["LSTM.1", "LSTM.2", "LSTM.3"])
 
 
 # Create output directory
-output_dir = f"out/fewshot/"
+output_dir = f"out/zeroshot/"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
 
-def train(net, ouput_updater, data, stateless: Optional[bool] = False):
-
-    net.train()
-
-    batch_iter = GlobalBatchLoader.create_data_loader(
-        dataset=data.dataset,
-        order_mode="by_window",
-        batch_size=1,
-        shuffle=False,
-        seed=1,  # fixed for all seeds and runs
-    )
-
-    # Initialize look-back buffer and LSTM state container
-    look_back_buffer = LookBackBuffer(input_seq_len=input_seq_len, nb_ts=1)
-
-    epoch = 0
-    while epoch < 100:
-        for (x, y), _, w_id in batch_iter:
-
-            if w_id.item() == 100:
-                break
-
-            # prepare look_back buffer
-            if look_back_buffer.needs_initialization[0]:
-                look_back_buffer.initialize(
-                    initial_mu=x[:, :input_seq_len],
-                    initial_var=np.zeros_like(x[:, :input_seq_len], dtype=np.float32),
-                    indices=[0],
-                )
-
-            # prepare input
-            x, var_x = prepare_input(
-                x=x,
-                var_x=None,
-                look_back_mu=(look_back_buffer.mu),
-                look_back_var=(look_back_buffer.var),
-                indices=np.array([0]),
-            )
-
-            # Feedforward
-            m_pred, v_pred = net(x, var_x)
-
-            if stateless:
-                net.reset_lstm_states()
-
-            # Specific to AGVI
-            flat_m = np.ravel(m_pred)
-            flat_v = np.ravel(v_pred)
-
-            m_pred = flat_m[::2]  # even indices
-            v_pred = flat_v[::2]  # even indices
-            var_y = flat_m[1::2]  # odd indices var_v
-            var_y = np.clip(var_y, a_min=1e-8, a_max=0.0001) # avoid large values
-
-            # Update
-            m_post, v_post = calculate_updates(
-                net,
-                ouput_updater,
-                m_pred,
-                v_pred,
-                y.flatten(),
-                use_AGVI=True,
-                var_y=var_y,  # scale down aleatoric uncertainty
-                train_mode=True,
-            )
-
-            # Update look_back buffer
-            look_back_buffer.update(
-                new_mu=m_post,
-                new_var=v_post,
-                indices=[0],
-            )
-
-        epoch += 1
-        net.reset_lstm_states()
-
-    net.reset_lstm_states()
-    return net
-
-
-def filter(net, data, stateless: Optional[bool] = False):
+def filter(
+    net, output_updater, data, use_embeddings=True, stateless: Optional[bool] = False
+):
 
     # Initalize states
-    cap = 853
+    cap = 331
     prior_states = States(nb_ts=1, total_time_steps=cap)
     posterior_states = States(nb_ts=1, total_time_steps=cap)
 
@@ -205,9 +118,9 @@ def filter(net, data, stateless: Optional[bool] = False):
     posterior_states.epistemic = np.full((1, cap), np.nan, dtype=np.float32)
     posterior_states.aleatoric = np.full((1, cap), np.nan, dtype=np.float32)
 
-    net.eval()
+    # net.eval()
 
-    batch_iter = GlobalBatchLoader.create_data_loader(
+    batch_iter = BatchLoader.create_data_loader(
         dataset=data.dataset,
         order_mode="by_window",
         batch_size=1,
@@ -217,6 +130,17 @@ def filter(net, data, stateless: Optional[bool] = False):
 
     # Initialize look-back buffer and LSTM state container
     look_back_buffer = LookBackBuffer(input_seq_len=input_seq_len, nb_ts=1)
+
+    # Embeddings
+    np.random.seed(5)
+    embed_mu = np.random.randn(*(1, 10)) * 0.1
+    embed_var = np.full((1, 10), 1.0) * 0.1
+
+    embed_mu = embed_mu.astype(np.float32).reshape(-1)
+    embed_var = embed_var.astype(np.float32).reshape(-1)
+
+    net.input_state_update = True
+    net.train()
 
     y_true = []
     std_y = []
@@ -241,11 +165,13 @@ def filter(net, data, stateless: Optional[bool] = False):
             indices=np.array([0]),
         )
 
+        # concat embeddings
+        if use_embeddings:
+            x = np.concatenate([x, embed_mu], axis=0)
+            var_x = np.concatenate([var_x, embed_var], axis=0)
+
         # Feedforward
         m_pred, v_pred = net(x, var_x)
-
-        if stateless:
-            net.reset_lstm_states()
 
         # Specific to AGVI
         flat_m = np.ravel(m_pred)
@@ -271,17 +197,30 @@ def filter(net, data, stateless: Optional[bool] = False):
         # Update
         m_post, v_post = calculate_updates(
             net,
-            _,
+            output_updater,
             m_pred,
             v_pred,
             y.flatten(),
             use_AGVI=True,
             var_y=var_y,  # scale down aleatoric uncertainty
             train_mode=False,
+            update_embed=True,
         )
 
-        # TODO: check if clipping is necessary
-        # v_post = np.clip(v_post, a_min=1e-8, a_max=2.0)
+        # Update embeddings if used
+        if embed_mu is not None:
+            mu_delta, var_delta = net.get_input_states()
+
+            mu_delta = mu_delta * var_x
+            var_delta = var_x * var_delta * var_x
+
+            # Get the slice corresponding to all embeddings
+            mu_delta_slice = mu_delta[-10,]
+            var_delta_slice = var_delta[-10,]
+
+            # Update embeddings
+            embed_mu += mu_delta_slice
+            embed_var += var_delta_slice
 
         s_post_epistemic = np.sqrt(v_post)
 
@@ -295,10 +234,13 @@ def filter(net, data, stateless: Optional[bool] = False):
 
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=m_post,
-            new_var=v_post,
+            new_mu=m_post if y is np.nan else y,
+            new_var=np.zeros_like(v_post, dtype=np.float32),
             indices=[0],
         )
+
+        if stateless:
+            net.reset_lstm_states()
 
     return prior_states, posterior_states, np.array(y_true), np.array(std_y)
 
@@ -363,15 +305,15 @@ def plot_results(
     #     alpha=0.3,
     #     label=r"$\mathbb{{E}}[Y']_{t\mid t} \pm \sigma_{epistemic}$",
     # )
-    # # Aleatoric
-    # plt.fill_between(
-    #     np.arange(len(posterior_states.mu.flatten())),
-    #     posterior_states.mu.flatten() - posterior_states.std.flatten() - std_y.flatten(),
-    #     posterior_states.mu.flatten() + posterior_states.std.flatten() + std_y.flatten(),
-    #     color="yellow",
-    #     alpha=0.3,
-    #     label=r"$\mathbb{{E}}[Y']_{t\mid t} \pm \sigma_{total}$",
-    # )
+    # # # Aleatoric
+    # # plt.fill_between(
+    # #     np.arange(len(posterior_states.mu.flatten())),
+    # #     posterior_states.mu.flatten() - posterior_states.std.flatten() - std_y.flatten(),
+    # #     posterior_states.mu.flatten() + posterior_states.std.flatten() + std_y.flatten(),
+    # #     color="yellow",
+    # #     alpha=0.3,
+    # #     label=r"$\mathbb{{E}}[Y']_{t\mid t} \pm \sigma_{total}$",
+    # # )
 
     # plt.plot(
     #     posterior_states.mu.flatten(), label=r"$\mathbb{E}[Y']_{t\mid t}$", color="k"
@@ -386,18 +328,20 @@ def plot_results(
         frameon=False,
     )
     plt.tight_layout()
+
+    # create output directory
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
     plt.savefig(
-        os.path.join(output_dir, "fewshot_filtering.svg"),
+        os.path.join(output_dir, "zeroshot_filtering_embeddings.svg"),
         bbox_inches="tight",
     )
+    plt.show()
     plt.close()
 
 
-# Fine-tune global model
-global_net = train(global_net, global_output_updater, data_train, stateless=False)
-
 prior_states, posterior_states, y_true, std_y = filter(
-    global_net, data_filter, stateless=False
+    global_stateful, output_updater1, data, stateless=False
 )
 
 plot_results(
@@ -405,6 +349,41 @@ plot_results(
     posterior_states,
     y_true,
     std_y,
-    data_filter,
-    output_dir=output_dir,
+    data,
+    output_dir=output_dir + "stateful",
 )
+
+# get metrics for stateful
+rmse = metric.rmse(prior_states.mu.flatten(), y_true.flatten())
+loglik = metric.log_likelihood(
+    prior_states.mu.flatten(),
+    y_true.flatten(),
+    prior_states.std.flatten(),
+)
+print(f"Stateful Global RMSE: {rmse:.4f}")
+print(f"Stateful Global LogLik: {loglik:.4f}")
+
+
+prior_states, posterior_states, y_true, std_y = filter(
+    global_stateless, output_updater2, data, stateless=True
+)
+
+plot_results(
+    prior_states,
+    posterior_states,
+    y_true,
+    std_y,
+    data,
+    output_dir=output_dir + "stateless",
+)
+
+# get metrics for stateless
+rmse = metric.rmse(prior_states.mu.flatten(), y_true.flatten())
+loglik = metric.log_likelihood(
+    prior_states.mu.flatten(),
+    y_true.flatten(),
+    prior_states.std.flatten(),
+)
+print(f"Stateless Global RMSE: {rmse:.4f}")
+print(f"Stateless Global LogLik: {loglik:.4f}")
+
