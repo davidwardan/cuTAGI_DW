@@ -20,6 +20,13 @@ from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 
 # --- Buffer Classes ---
 class LookBackBuffer:
+    """
+    A buffer to store the look-back mean and variance for multiple time series.
+    Args:
+        input_seq_len (int): The length of the input sequence to store.
+        nb_ts (int): The number of time series.
+    """
+
     def __init__(self, input_seq_len, nb_ts):
         self.mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
         self.var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
@@ -78,7 +85,7 @@ class LSTMStateContainer:
         self.layer_state_shapes = layer_state_shapes
         self.states = {}
 
-        np.random.seed(1)
+        np.random.seed(11)
 
         # Initialize NumPy arrays for each layer and state component
         for layer_idx, state_dim in layer_state_shapes.items():
@@ -431,7 +438,7 @@ def build_model(
     device,
     hidden_sizes=[40, 40, 40],
     init_params=None,
-    shift_biases=True,
+    shift_biases=False,
 ):
     manual_seed(seed)
     layers = []
@@ -513,6 +520,9 @@ def prepare_input(
     np.nan_to_num(flat_x, copy=False, nan=0.0)
     np.nan_to_num(flat_var, copy=False, nan=0.0)
 
+    # clip variance
+    flat_var = np.clip(flat_var, a_min=1e-6, a_max=2.0)
+
     return flat_x, flat_var
 
 
@@ -568,8 +578,9 @@ def calculate_updates(
     K = v_pred / (v_pred + var_y)  # Kalman gain
     v_post = (1.0 - K) * v_pred  # posterior variance
     if overfit_mu:
-        K = np.ones_like(K)
-    m_post = m_pred + K * (y - m_pred)  # posterior mean
+        m_post = m_pred + (v_pred / (v_pred + 1e-4)) * (y - m_pred)  # posterior mean
+    else:
+        m_post = m_pred + K * (y - m_pred)  # posterior mean
     if has_nan:
         np.copyto(v_post, v_pred, where=nan_indices)
 
@@ -1009,58 +1020,6 @@ def plot_similarity(
             fontsize=fontsize,
         )
         plt.yticks(tick_positions, ordered_labels, fontsize=fontsize)
-
-    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
-    plt.tight_layout()
-    plt.savefig(out_path, bbox_inches="tight")
-    plt.close()
-
-
-# --- Plotting Functions ---
-def plot_similarity(
-    sim_matrix: np.ndarray,
-    out_path,
-    title: str,
-    labels: Optional[List[str]] = None,
-    *,
-    vmin: float = -1.0,
-    vmax: float = 1.0,
-) -> None:
-    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
-    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
-        raise ValueError("sim_matrix must be a square 2D array")
-
-    if labels is not None:
-        if len(labels) != sim_matrix.shape[0]:
-            raise ValueError("labels must have the same length as sim_matrix size")
-
-    num_series = sim_matrix.shape[0]
-    width = max(8.0, min(num_series * 0.4, 24.0))
-    height = max(6.0, min(num_series * 0.4, 24.0))
-    plt.figure(figsize=(width, height))
-    heatmap = plt.imshow(
-        sim_matrix,
-        cmap="coolwarm",
-        vmin=vmin,
-        vmax=vmax,
-        interpolation="nearest",
-    )
-    plt.title(f"{title} (sorted by similarity)")
-    plt.xlabel("Entity/Series Index")  # Generic label
-    plt.ylabel("Entity/Series Index")  # Generic label
-
-    if num_series > 0:
-        tick_positions = np.arange(num_series, dtype=int)
-        rotation = 45 if num_series <= 20 else 90
-        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
-        plt.xticks(
-            tick_positions,
-            labels,
-            rotation=rotation,
-            ha="right",
-            fontsize=fontsize,
-        )
-        plt.yticks(tick_positions, labels, fontsize=fontsize)
 
     plt.colorbar(heatmap, fraction=0.046, pad=0.04)
     plt.tight_layout()

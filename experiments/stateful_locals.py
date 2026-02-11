@@ -165,6 +165,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             if not config.use_AGVI:
                 sigma_v = decaying_sigma_v[epoch]
 
+            m_preds = []
+            std_preds = []
+            y_trues = []
+
             for (x, y), _, w_id in train_batch_iter:
 
                 # get current batch size
@@ -225,13 +229,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 m_pred_masked = m_pred[mask]
                 s_pred_masked = s_pred_total[mask]
 
-                if y_masked.size > 0:
-                    batch_mse = metric.rmse(m_pred_masked, y_masked)
-                    batch_log_lik = metric.log_likelihood(
-                        m_pred_masked, y_masked, s_pred_masked
-                    )
-                    train_mse.append(batch_mse)
-                    train_log_lik.append(batch_log_lik)
+                m_preds.append(m_pred_masked)
+                std_preds.append(s_pred_masked)
+                y_trues.append(y_masked)
 
                 # Store predictions
                 train_states.update(
@@ -252,28 +252,30 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     var_y=var_y,
                 )
 
-                # Update LSTM states for the current batch
-                lstm_states = net.get_lstm_states()
+                # Where y is available use y otherwuse use m_pred
+                y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+                v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
-                    new_mu=m_post,
-                    new_var=v_post,
+                    new_mu=y_lookback,
+                    new_var=v_lookback,
                     indices=[0],
                 )
 
             # End of epoch
-            train_mse = np.mean(train_mse)
-            train_log_lik = np.mean(train_log_lik)
-            net.reset_lstm_states()
+            train_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+            train_log_lik = metric.log_likelihood(
+                np.concatenate(m_preds),
+                np.concatenate(y_trues),
+                np.concatenate(std_preds),
+            )
 
             # Validation
             net.eval()
-            val_mse = []
-            val_log_lik = []
-
-            # reset look-back buffer
-            look_back_buffer.needs_initialization = [True]
+            m_preds = []
+            std_preds = []
+            y_trues = []
 
             val_batch_iter = BatchLoader.create_data_loader(
                 dataset=val_data.dataset,
@@ -286,9 +288,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
                 # get current batch size
                 B = config.data.loader.batch_size
-
-                # set LSTM states for the current batch
-                net.set_lstm_states(lstm_states)
 
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
@@ -348,13 +347,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 m_pred_masked = m_pred[mask]
                 s_pred_masked = s_pred_total[mask]
 
-                if y_masked.size > 0:
-                    batch_mse = metric.rmse(m_pred_masked, y_masked)
-                    batch_log_lik = metric.log_likelihood(
-                        m_pred_masked, y_masked, s_pred_masked
-                    )
-                    val_mse.append(batch_mse)
-                    val_log_lik.append(batch_log_lik)
+                m_preds.append(m_pred_masked)
+                std_preds.append(s_pred_masked)
+                y_trues.append(y_masked)
 
                 # Store predictions
                 val_states.update(
@@ -372,9 +367,15 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 )
 
             # End of epoch
-            val_mse = np.mean(val_mse)
-            val_log_lik = np.mean(val_log_lik)
             net.reset_lstm_states()
+
+            # Calculate micro metrics for early stopping
+            val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+            val_log_lik = metric.log_likelihood(
+                np.concatenate(m_preds),
+                np.concatenate(y_trues),
+                np.concatenate(std_preds),
+            )
 
             # Update progress bar
             pbar.set_postfix(
@@ -453,7 +454,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         net.eval()
 
         # reset look-back buffer
-        look_back_buffer.needs_initialization = [True]
+        look_back_buffer.reset()
 
         test_batch_iter = BatchLoader.create_data_loader(
             dataset=test_data.dataset,
@@ -531,22 +532,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 time_step=w_id.item(),
             )
 
-            #TODO: remove this
-            # Update
-            m_post, v_post = calculate_updates(
-                    net,
-                    output_updater,
-                    m_pred,
-                    v_pred,
-                    y.flatten(),
-                    use_AGVI=config.use_AGVI,
-                    var_y=var_y,
-                )
-
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=m_post,
-                new_var=v_post,
+                new_mu=m_pred,
+                new_var=v_pred,
                 indices=[0],
             )
 
@@ -794,8 +783,8 @@ def main(Train=True, Eval=True, log_wandb=False):
     # list_of_seeds = [1, 3, 17, 42, 99]
     # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
-    list_of_seeds = [121]
-    list_of_experiments = ["train30"]
+    list_of_seeds = [42]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -810,7 +799,7 @@ def main(Train=True, Eval=True, log_wandb=False):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
+            experiment_name = f"seed{seed}/{exp}/BySeries_{model_category}"
 
             # Create configuration
             config = Config.from_yaml(
@@ -844,9 +833,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             if Train:
                 # Train model
-                train_model(
-                    config, experiment_name=experiment_name, wandb_run=run
-                )
+                train_model(config, experiment_name=experiment_name, wandb_run=run)
 
             if Eval:
                 # Evaluate model

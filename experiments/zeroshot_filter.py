@@ -4,9 +4,6 @@ from typing import Optional
 
 from pathlib import Path
 
-from examples.data_loader import (
-    TimeSeriesDataloader,
-)
 from pytagi import Normalizer as normalizer
 import pytagi.metric as metric
 
@@ -51,21 +48,22 @@ seed = 100
 device = "cpu"
 model_input_size = input_seq_len + num_features - 1
 
-x_file = [
-    "data/hq/train100/split_train_values.csv",
-]
-date_file = [
-    "data/hq/train100/split_train_datetimes.csv",
-]
 # x_file = [
 #     "data/hq/train100/split_train_values.csv",
 # ]
 # date_file = [
 #     "data/hq/train100/split_train_datetimes.csv",
 # ]
+x_file = [
+    "data/hq/train100/split_train_values.csv",
+]
+date_file = [
+    "data/hq/train100/split_train_datetimes.csv",
+]
 
-ts_idx = 17  # index of the time series to filter
+# ts_idx = 17  # index of the time series to filter
 # ts_idx = 3  # index of the time series to filter
+ts_idx = 10  # index of the time series to filter
 
 
 data = TimeSeriesDataBuilder(
@@ -87,8 +85,7 @@ global_stateful, output_updater1 = build_model(
     use_AGVI=True,
     seed=seed,
     device=device,
-    init_params="out/seed1/train100/ByWindow_global_no-embeddings/param/model.bin",
-    # init_params="out/seed5/train100/BySeries_global_no-embeddings/param/model.bin",
+    init_params="out/seed11/train100/BySeries_global_no-embeddings/param/model.bin",
     shift_biases=False,
 )
 
@@ -97,13 +94,13 @@ global_stateless, output_updater2 = build_model(
     use_AGVI=True,
     seed=seed,
     device=device,
-    init_params="out/seed5/train100/Shuffled_global_no-embeddings/param/model.bin",
+    init_params="out/seed11/train100/Shuffled_global_no-embeddings/param/model.bin",
     shift_biases=False,
 )
 
-# adjust_params(
-#     global_stateful, "add", value=0.05, which_layer=["LSTM.1", "LSTM.2", "LSTM.3"]
-# )
+adjust_params(
+    global_stateful, "add", value=0.005, which_layer=["LSTM.1", "LSTM.2", "LSTM.3"]
+)
 # adjust_params(
 #     global_stateless, "add", value=0.05, which_layer=["LSTM.1", "LSTM.2", "LSTM.3"]
 # )
@@ -117,8 +114,9 @@ if not os.path.exists(output_dir):
 def filter(net, output_updater, data, stateless: Optional[bool] = False):
 
     # Initalize states
-    cap = 853
+    # cap = 853
     # cap = 420
+    cap = 250
     prior_states = States(nb_ts=1, total_time_steps=cap)
     posterior_states = States(nb_ts=1, total_time_steps=cap)
 
@@ -159,8 +157,8 @@ def filter(net, output_updater, data, stateless: Optional[bool] = False):
         x, var_x = prepare_input(
             x=x,
             var_x=None,
-            look_back_mu=(look_back_buffer.mu),
-            look_back_var=(look_back_buffer.var),
+            look_back_mu=look_back_buffer.mu,
+            look_back_var=look_back_buffer.var,
             indices=np.array([0]),
         )
 
@@ -210,9 +208,13 @@ def filter(net, output_updater, data, stateless: Optional[bool] = False):
             time_step=w_id.item(),
         )
 
+        # if y is nan use prior as posterior
+        y_lookback = np.where(np.isnan(y.flatten()), m_post, y)
+        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+
         look_back_buffer.update(
-            new_mu=m_pred,
-            new_var=v_pred,
+            new_mu=y_lookback,
+            new_var=v_lookback,
             indices=[0],
         )
 

@@ -502,9 +502,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     net.eval()
 
     # reset look-back buffer
-    look_back_buffer.needs_initialization = [
-        True for _ in range(config.data.loader.nb_ts)
-    ]
+    look_back_buffer.reset()
 
     test_batch_iter = BatchLoader.create_data_loader(
         dataset=test_data.dataset,
@@ -1229,11 +1227,11 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    # list_of_seeds = [1, 3, 17, 42, 99]
+    # list_of_seeds = [11, 42, 27, 3, ]
     # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
-    list_of_seeds = [1]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [42]
+    list_of_experiments = ["train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1242,7 +1240,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Model category
             model_category = "global"
-            embed_category = "no-embeddings"
+            embed_category = "hierarchical-embeddings"
 
             # Define experiment name
             experiment_name = (

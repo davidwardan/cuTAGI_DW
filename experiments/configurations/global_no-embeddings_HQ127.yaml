@@ -12,7 +12,7 @@ data:
     time_covariates:
     - week_of_year
     scale_method: standard
-    order_mode: by_window
+    order_mode: by_series_batch
     input_seq_len: 52
     batch_size: 16
     output_col:
@@ -34,7 +34,7 @@ training:
   early_stopping_criteria: rmse
   patience: 10
   min_delta: 0.0001
-  warmup_epochs: 3
+  warmup_epochs: 0
   shuffle: true
 evaluation:
   eval_plots: true
