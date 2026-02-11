@@ -76,7 +76,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             time_covariates=config.data.loader.time_covariates,
             scale_method=config.data.loader.scale_method,
             order_mode=config.data.loader.order_mode,
-            ts_to_use=config.ts_to_use,
+            ts_to_use=[ts],
         )
         if config.data.loader.scale_method == "standard":
             x_means[ts] = train_data.x_mean[0][0]
@@ -145,8 +145,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         # --- Training loop ---
         for epoch in pbar:
             net.train()
-            train_mse = []
-            train_log_lik = []
 
             train_batch_iter = BatchLoader.create_data_loader(
                 dataset=train_data.dataset,
@@ -165,6 +163,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             if not config.use_AGVI:
                 sigma_v = decaying_sigma_v[epoch]
 
+            m_preds = []
+            std_preds = []
+            y_trues = []
+
             for (x, y), _, w_id in train_batch_iter:
 
                 # get current batch size
@@ -182,30 +184,12 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                         dtype=np.float32,
                     )
 
-                # prepare look_back buffer
-                if look_back_buffer.needs_initialization[0]:
-                    look_back_buffer.initialize(
-                        initial_mu=x[:, : config.data.loader.input_seq_len],
-                        initial_var=np.zeros_like(
-                            x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                        ),
-                        indices=[0],
-                    )
-
                 # prepare input
                 x, var_x = prepare_input(
                     x=x,
                     var_x=None,
-                    look_back_mu=(
-                        look_back_buffer.mu
-                        if config.training.use_look_back_predictions
-                        else None
-                    ),
-                    look_back_var=(
-                        look_back_buffer.var
-                        if config.training.use_look_back_predictions
-                        else None
-                    ),
+                    look_back_mu=None,
+                    look_back_var=None,
                     indices=np.array([0]),
                 )
 
@@ -229,13 +213,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 m_pred_masked = m_pred[mask]
                 s_pred_masked = s_pred_total[mask]
 
-                if y_masked.size > 0:
-                    batch_mse = metric.rmse(m_pred_masked, y_masked)
-                    batch_log_lik = metric.log_likelihood(
-                        m_pred_masked, y_masked, s_pred_masked
-                    )
-                    train_mse.append(batch_mse)
-                    train_log_lik.append(batch_log_lik)
+                m_preds.append(m_pred_masked)
+                std_preds.append(s_pred_masked)
+                y_trues.append(y_masked)
 
                 # Store predictions
                 train_states.update(
@@ -256,27 +236,22 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     var_y=var_y,
                 )
 
-                # Update look_back buffer
-                look_back_buffer.update(
-                    new_mu=m_post,
-                    new_var=v_post,
-                    indices=[0],
-                )
-
             # End of epoch
-            train_mse = np.mean(train_mse)
-            train_log_lik = np.mean(train_log_lik)
+            train_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+            train_log_lik = metric.log_likelihood(
+                np.concatenate(m_preds),
+                np.concatenate(y_trues),
+                np.concatenate(std_preds),
+            )
 
             # Validation
             net.eval()
-            val_mse = []
-            val_log_lik = []
-
-            # reset LSTM states
-            net.reset_lstm_states()
+            m_preds = []
+            std_preds = []
+            y_trues = []
 
             # reset look-back buffer
-            look_back_buffer.needs_initialization = [True]
+            look_back_buffer.reset()
 
             val_batch_iter = BatchLoader.create_data_loader(
                 dataset=val_data.dataset,
@@ -301,8 +276,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                         dtype=np.float32,
                     )
 
-                look_back_buffer.needs_initialization = [True]
-
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
                     look_back_buffer.initialize(
@@ -350,13 +323,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 m_pred_masked = m_pred[mask]
                 s_pred_masked = s_pred_total[mask]
 
-                if y_masked.size > 0:
-                    batch_mse = metric.rmse(m_pred_masked, y_masked)
-                    batch_log_lik = metric.log_likelihood(
-                        m_pred_masked, y_masked, s_pred_masked
-                    )
-                    val_mse.append(batch_mse)
-                    val_log_lik.append(batch_log_lik)
+                m_preds.append(m_pred_masked)
+                std_preds.append(s_pred_masked)
+                y_trues.append(y_masked)
 
                 # Store predictions
                 val_states.update(
@@ -374,8 +343,15 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 )
 
             # End of epoch
-            val_mse = np.mean(val_mse)
-            val_log_lik = np.mean(val_log_lik)
+            net.reset_lstm_states()
+
+            # Calculate micro metrics for early stopping
+            val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+            val_log_lik = metric.log_likelihood(
+                np.concatenate(m_preds),
+                np.concatenate(y_trues),
+                np.concatenate(std_preds),
+            )
 
             # Update progress bar
             pbar.set_postfix(
@@ -452,7 +428,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         net.eval()
 
         # reset look-back buffer
-        look_back_buffer.needs_initialization = [True]
+        look_back_buffer.reset()
 
         test_batch_iter = BatchLoader.create_data_loader(
             dataset=test_data.dataset,
@@ -775,7 +751,7 @@ def eval_model(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [1, 3, 17, 42, 99]
+    list_of_seeds = [11, 42, 27, 3, 99]
     list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
@@ -802,6 +778,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.data.loader.order_mode = "shuffled_filtered"  # forced for stateless
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -825,9 +802,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             if Train:
                 # Train model
-                train_model(
-                    config, experiment_name=experiment_name, wandb_run=run
-                )
+                train_model(config, experiment_name=experiment_name, wandb_run=run)
 
             if Eval:
                 # Evaluate model

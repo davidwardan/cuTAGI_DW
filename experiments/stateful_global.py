@@ -1279,11 +1279,8 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    # list_of_seeds = [1, 3, 17, 42, 99]
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
-
-    list_of_seeds = [42]
-    list_of_experiments = ["train100"]
+    list_of_seeds = [11, 42, 27, 3, 99]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1292,11 +1289,11 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Model category
             model_category = "global"
-            embed_category = "hierarchical-embeddings"
+            embed_category = "no-embeddings"
 
             # Define experiment name
             experiment_name = (
-                f"seed{seed}/{exp}/ByWindow_Obs_{model_category}_{embed_category}"
+                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
             )
 
             # Load configuration

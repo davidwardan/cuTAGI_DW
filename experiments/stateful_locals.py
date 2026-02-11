@@ -76,7 +76,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             time_covariates=config.data.loader.time_covariates,
             scale_method=config.data.loader.scale_method,
             order_mode=config.data.loader.order_mode,
-            ts_to_use=config.ts_to_use,
+            ts_to_use=[ts],
         )
         if config.data.loader.scale_method == "standard":
             x_means[ts] = train_data.x_mean[0][0]
@@ -145,8 +145,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         # --- Training loop ---
         for epoch in pbar:
             net.train()
-            train_mse = []
-            train_log_lik = []
 
             train_batch_iter = BatchLoader.create_data_loader(
                 dataset=train_data.dataset,
@@ -780,10 +778,7 @@ def eval_model(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    # list_of_seeds = [1, 3, 17, 42, 99]
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
-
-    list_of_seeds = [42]
+    list_of_seeds = [11, 42, 27, 3, 99]
     list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     for seed in list_of_seeds:
@@ -799,7 +794,7 @@ def main(Train=True, Eval=True, log_wandb=False):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/BySeries_{model_category}"
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
 
             # Create configuration
             config = Config.from_yaml(
@@ -810,6 +805,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

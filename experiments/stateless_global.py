@@ -312,9 +312,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         y_trues = []
 
         # reset look-back buffer
-        look_back_buffer.needs_initialization = [
-            True for _ in range(config.data.loader.nb_ts)
-        ]
+        look_back_buffer.reset()
 
         val_batch_iter = BatchLoader.create_data_loader(
             dataset=val_data.dataset,
@@ -1227,11 +1225,8 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    # list_of_seeds = [11, 42, 27, 3, ]
-    # list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
-
-    list_of_seeds = [42]
-    list_of_experiments = ["train100"]
+    list_of_seeds = [11, 42, 27, 3, 99]
+    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1240,11 +1235,11 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Model category
             model_category = "global"
-            embed_category = "hierarchical-embeddings"
+            embed_category = "no-embeddings"
 
             # Define experiment name
             experiment_name = (
-                f"seed{seed}/{exp}/Shuffled_{model_category}_{embed_category}"
+                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
             )
 
             # Load configuration
@@ -1284,15 +1279,11 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             if Train:
                 # Train model
-                train_model(
-                    config, experiment_name=experiment_name, wandb_run=run
-                )
+                train_model(config, experiment_name=experiment_name, wandb_run=run)
 
             if Eval:
                 # Evaluate model
-                eval_model(
-                    config, experiment_name=experiment_name, wandb_run=run
-                )
+                eval_model(config, experiment_name=experiment_name, wandb_run=run)
 
             # Finish the W&B run
             if log_wandb:

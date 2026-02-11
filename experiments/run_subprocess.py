@@ -5,7 +5,7 @@ from experiments.config import Config
 
 from pytagi import cuda
 
-DEFAULT_SEEDS: Sequence[int] = (1, 3, 17, 42, 99)
+DEFAULT_SEEDS: Sequence[int] = (11, 42, 27, 3, 99)
 DEFAULT_EXPERIMENTS: Sequence[str] = (
     "train30",
     "train40",
@@ -21,7 +21,7 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import stateful_global as parent_script
+    from experiments import stateful_locals as parent_script
 
     # Model category
     model_category = "locals"
