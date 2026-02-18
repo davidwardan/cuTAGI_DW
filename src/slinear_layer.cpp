@@ -59,31 +59,31 @@ void smooth_zo(int num_timestep, int input_size, int output_size,
     int idx_h, idx_w;
     bool print_clip_z = true;
 
+    // Only smooth the first output (k=0), which is the actual Z^{O}.
+    const int k = 0;
     for (int i = num_timestep - 1; i >= 0; i--) {
-        for (int k = 0; k <= output_size - 1; ++k) {
-            float mu_zo = 0.0f;
-            float var_zo = 0.0f;
-            for (int j = 0; j <= input_size - 1; ++j) {
-                idx_h = i * input_size + k * output_size + j;
-                idx_w = k * output_size + j;
-                mu_zo += mu_h_smooths_prev_slstm[idx_h] * mu_w[idx_w];
-                var_zo += var_h_smooths_prev_slstm[idx_h] * var_w[idx_w] +
-                          var_h_smooths_prev_slstm[idx_h] * mu_w[idx_w] *
-                              mu_w[idx_w] +
-                          var_w[idx_w] * mu_h_smooths_prev_slstm[idx_h] *
-                              mu_h_smooths_prev_slstm[idx_h];
-            }
-            mu_zo_smooths[i] = mu_zo + mu_b[k];
-            var_zo_smooths[i] = var_zo + var_b[k];
-            if (var_zo_smooths[i] < 0 && print_clip_z) {
-                LOG(LogLevel::WARNING,
-                    "Negative variance clipped for z output at SLinear at time "
-                    "step " +
-                        std::to_string(i));
-                print_clip_z = false;
-            }
-            var_zo_smooths[i] = var_zo_smooths[i] < 0 ? eps : var_zo_smooths[i];
+        float mu_zo = 0.0f;
+        float var_zo = 0.0f;
+        for (int j = 0; j <= input_size - 1; ++j) {
+            idx_h = i * input_size + j;
+            idx_w = j;
+            mu_zo += mu_h_smooths_prev_slstm[idx_h] * mu_w[idx_w];
+            var_zo +=
+                var_h_smooths_prev_slstm[idx_h] * var_w[idx_w] +
+                var_h_smooths_prev_slstm[idx_h] * mu_w[idx_w] * mu_w[idx_w] +
+                var_w[idx_w] * mu_h_smooths_prev_slstm[idx_h] *
+                    mu_h_smooths_prev_slstm[idx_h];
         }
+        mu_zo_smooths[i] = mu_zo + mu_b[k];
+        var_zo_smooths[i] = var_zo + var_b[k];
+        if (var_zo_smooths[i] < 0 && print_clip_z) {
+            LOG(LogLevel::WARNING,
+                "Negative variance clipped for z output at SLinear at time "
+                "step " +
+                    std::to_string(i));
+            print_clip_z = false;
+        }
+        var_zo_smooths[i] = var_zo_smooths[i] < 0 ? eps : var_zo_smooths[i];
     }
 }
 

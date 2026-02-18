@@ -818,7 +818,18 @@ Sequential::get_outputs_smoother()
 /*
  */
 {
-    auto last_layer = dynamic_cast<SLinear *>(this->layers.back().get());
+    // Find the SLinear layer (it may not be the last layer)
+    SLinear *last_layer = nullptr;
+    for (auto it = this->layers.rbegin(); it != this->layers.rend(); ++it) {
+        if ((*it)->get_layer_type() == LayerType::SLinear) {
+            last_layer = dynamic_cast<SLinear *>(it->get());
+            break;
+        }
+    }
+    if (last_layer == nullptr) {
+        LOG(LogLevel::ERROR, "No SLinear layer found for smoother output");
+    }
+
     auto py_mu_zo_smooths = pybind11::array_t<float>(
         last_layer->smooth_states.mu_zo_smooths.size(),
         last_layer->smooth_states.mu_zo_smooths.data());
