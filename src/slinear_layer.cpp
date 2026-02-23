@@ -56,34 +56,49 @@ void smooth_zo(int num_timestep, int input_size, int output_size,
  */
 {
     const float eps = 1e-5f;
-    int idx_h, idx_w;
+    int idx_h, idx_w, idx_z;
     bool print_clip_z = true;
 
-    // Only smooth the first output (k=0), which is the actual Z^{O}.
-    const int k = 0;
-    for (int i = num_timestep - 1; i >= 0; i--) {
-        float mu_zo = 0.0f;
-        float var_zo = 0.0f;
-        for (int j = 0; j <= input_size - 1; ++j) {
-            idx_h = i * input_size + j;
-            idx_w = j;
-            mu_zo += mu_h_smooths_prev_slstm[idx_h] * mu_w[idx_w];
-            var_zo +=
-                var_h_smooths_prev_slstm[idx_h] * var_w[idx_w] +
-                var_h_smooths_prev_slstm[idx_h] * mu_w[idx_w] * mu_w[idx_w] +
-                var_w[idx_w] * mu_h_smooths_prev_slstm[idx_h] *
-                    mu_h_smooths_prev_slstm[idx_h];
+    const size_t expected_size = static_cast<size_t>(output_size) * num_timestep;
+    if (mu_zo_smooths.size() != expected_size) {
+        mu_zo_smooths.resize(expected_size, 0.0f);
+    }
+    if (var_zo_smooths.size() != expected_size) {
+        var_zo_smooths.resize(expected_size, 0.0f);
+    }
+
+    // Output-major layout: [out0_t0, ..., out0_tT, out1_t0, ..., outK_tT].
+    for (int k = 0; k < output_size; ++k) {
+        const float mu_bias = k < static_cast<int>(mu_b.size()) ? mu_b[k] : 0.0f;
+        const float var_bias =
+            k < static_cast<int>(var_b.size()) ? var_b[k] : 0.0f;
+        for (int i = num_timestep - 1; i >= 0; --i) {
+            float mu_zo = 0.0f;
+            float var_zo = 0.0f;
+            for (int j = 0; j <= input_size - 1; ++j) {
+                idx_h = i * input_size + j;
+                idx_w = k * input_size + j;
+                mu_zo += mu_h_smooths_prev_slstm[idx_h] * mu_w[idx_w];
+                var_zo +=
+                    var_h_smooths_prev_slstm[idx_h] * var_w[idx_w] +
+                    var_h_smooths_prev_slstm[idx_h] * mu_w[idx_w] * mu_w[idx_w] +
+                    var_w[idx_w] * mu_h_smooths_prev_slstm[idx_h] *
+                        mu_h_smooths_prev_slstm[idx_h];
+            }
+            idx_z = k * num_timestep + i;
+            mu_zo_smooths[idx_z] = mu_zo + mu_bias;
+            var_zo_smooths[idx_z] = var_zo + var_bias;
+            if (var_zo_smooths[idx_z] < 0 && print_clip_z) {
+                LOG(LogLevel::WARNING,
+                    "Negative variance clipped for z output at SLinear at "
+                    "output " +
+                        std::to_string(k) + " and time step " +
+                        std::to_string(i));
+                print_clip_z = false;
+            }
+            var_zo_smooths[idx_z] =
+                var_zo_smooths[idx_z] < 0 ? eps : var_zo_smooths[idx_z];
         }
-        mu_zo_smooths[i] = mu_zo + mu_b[k];
-        var_zo_smooths[i] = var_zo + var_b[k];
-        if (var_zo_smooths[i] < 0 && print_clip_z) {
-            LOG(LogLevel::WARNING,
-                "Negative variance clipped for z output at SLinear at time "
-                "step " +
-                    std::to_string(i));
-            print_clip_z = false;
-        }
-        var_zo_smooths[i] = var_zo_smooths[i] < 0 ? eps : var_zo_smooths[i];
     }
 }
 
@@ -112,9 +127,10 @@ void SLinear::forward(BaseHiddenStates &input_states,
     this->set_cap_factor_udapte(batch_size);
 
     // Initialize smoothing hidden states for SLinear layer
-    if (this->smooth_states.num_timesteps !=
-        smooth_input_states->num_timesteps) {
-        this->smooth_states.set_num_states(smooth_input_states->num_timesteps);
+    if (this->smooth_states.num_outputs != this->output_size ||
+        this->smooth_states.num_timesteps != smooth_input_states->num_timesteps) {
+        this->smooth_states.set_num_states(this->output_size,
+                                           smooth_input_states->num_timesteps);
     }
 
     // Forward pass

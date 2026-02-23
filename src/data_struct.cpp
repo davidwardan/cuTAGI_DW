@@ -341,18 +341,20 @@ void BaseLSTMStates::reset_zeros()
 // Smoother for Slinear layer
 ////////////////////////////////////////////////////////////////////////////////
 SmoothSLinear::SmoothSLinear() {}
-SmoothSLinear::SmoothSLinear(size_t num_timesteps)
-    : num_timesteps(num_timesteps)
+SmoothSLinear::SmoothSLinear(size_t num_outputs, size_t num_timesteps)
+    : num_outputs(num_outputs),
+      num_timesteps(num_timesteps)
 /*
  */
 {
     this->reset_zeros();
 }
 
-void SmoothSLinear::set_num_states(size_t num_timesteps)
+void SmoothSLinear::set_num_states(size_t num_outputs, size_t num_timesteps)
 /*
  */
 {
+    this->num_outputs = num_outputs;
     this->num_timesteps = num_timesteps;
     this->reset_zeros();
 }
@@ -380,13 +382,13 @@ void SmoothSLinear::reset_zeros()
     for (auto& val : var_zo_posts) val = 0;
 
     // Resize and reset mu_zo_smooths
-    if (mu_zo_smooths.size() != num_timesteps)
-        mu_zo_smooths.resize(num_timesteps);
+    if (mu_zo_smooths.size() != num_outputs * num_timesteps)
+        mu_zo_smooths.resize(num_outputs * num_timesteps);
     for (auto& val : mu_zo_smooths) val = 0;
 
     // Resize and reset var_zo_smooths
-    if (var_zo_smooths.size() != num_timesteps)
-        var_zo_smooths.resize(num_timesteps);
+    if (var_zo_smooths.size() != num_outputs * num_timesteps)
+        var_zo_smooths.resize(num_outputs * num_timesteps);
     for (auto& val : var_zo_smooths) val = 0;
 }
 

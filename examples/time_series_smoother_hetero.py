@@ -119,9 +119,22 @@ def main(num_epochs: int = 50, batch_size: int = 1, sigma_v: float = 1):
             mu_sequence = np.append(mu_sequence, m_pred)
             mu_sequence = mu_sequence[-input_seq_len:]
 
-        # Smoother
-        mu_zo_smooth, var_zo_smooth = net.smoother()
-        zo_smooth_std = np.array(var_zo_smooth) ** 0.5
+        # Smoother returns flattened output-major arrays:
+        # [out0_t0..out0_tT, out1_t0..out1_tT, ...].
+        mu_zo_smooth_flat, var_zo_smooth_flat = net.smoother()
+        num_timesteps = len(y_train)
+        num_outputs = len(mu_zo_smooth_flat) // num_timesteps
+        mu_zo_smooth_all = np.asarray(mu_zo_smooth_flat).reshape(
+            num_outputs, num_timesteps
+        )
+        var_zo_smooth_all = np.asarray(var_zo_smooth_flat).reshape(
+            num_outputs, num_timesteps
+        )
+
+        # Output 0 corresponds to the smoothed target mean path.
+        mu_zo_smooth = mu_zo_smooth_all[0]
+        var_zo_smooth = var_zo_smooth_all[0]
+        zo_smooth_std = np.sqrt(var_zo_smooth)
         mu_sequence = np.ones(input_seq_len, dtype=np.float32)
 
         # Figures for each epoch for debugging
