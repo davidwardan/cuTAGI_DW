@@ -104,6 +104,13 @@ class Evaluation(BaseModel):
     embed_plots: bool = False
 
 
+class LookbackSearch(BaseModel):
+    enabled: bool = False
+    candidate_values: List[int] = []
+    metric: str = "rmse"
+    evaluate_best_on_test: bool = True
+
+
 class Config(BaseModel):
     seed: Optional[int] = None
     data: Data = Field(default_factory=Data)
@@ -112,6 +119,7 @@ class Config(BaseModel):
     training: Optional[Training] = None
     forecasting: Forecasting = Field(default_factory=Forecasting)
     evaluation: Optional[Evaluation] = None
+    lookback_search: LookbackSearch = Field(default_factory=LookbackSearch)
 
     @property
     def ts_to_use(self) -> List[int]:
