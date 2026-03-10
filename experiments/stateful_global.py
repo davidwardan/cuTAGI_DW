@@ -66,6 +66,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         x_file=config.x_file,
         date_file=config.date_file,
         input_seq_len=config.data.loader.input_seq_len,
+        carry_split_context=config.data.loader.carry_split_context,
         time_covariates=config.data.loader.time_covariates,
         scale_method=config.data.loader.scale_method,
         order_mode=config.data.loader.order_mode,
@@ -755,15 +756,19 @@ def eval_model(
         wandb_run.define_metric("p90", summary="last")
 
     # Iterate over each time series and calculate metrics
+    train_offset = config.split_target_offset("train")
+    val_offset = config.split_target_offset("val")
+    test_offset = config.split_target_offset("test")
+
     for i in tqdm(config.ts_to_use, desc="Evaluating series"):
 
         i = config.ts_to_use.index(i)
 
         # Get true values
         yt_train, yt_val, yt_test = (
-            _trim_trailing_nans(true_train[config.data.loader.input_seq_len :, i]),
-            _trim_trailing_nans(true_val[config.data.loader.input_seq_len :, i]),
-            _trim_trailing_nans(true_test[config.data.loader.input_seq_len :, i]),
+            _trim_trailing_nans(true_train[train_offset:, i]),
+            _trim_trailing_nans(true_val[val_offset:, i]),
+            _trim_trailing_nans(true_test[test_offset:, i]),
         )
         yt_full = np.concatenate([yt_train, yt_val, yt_test])
 

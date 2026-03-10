@@ -16,6 +16,8 @@ class TimeSeriesDataBuilder:
         input_seq_len: int,
         output_seq_len: int,
         stride: int,
+        history_x_file: Optional[str] = None,
+        history_date_time_file: Optional[str] = None,
         order_mode: str = "by_window",
         scale_method: Optional[str] = None,
         x_mean: Optional[
@@ -27,6 +29,8 @@ class TimeSeriesDataBuilder:
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
+        self.history_x_file = history_x_file
+        self.history_date_time_file = history_date_time_file
         self.input_seq_len = input_seq_len
         self.output_seq_len = output_seq_len
         self.stride = stride
@@ -163,6 +167,26 @@ class TimeSeriesDataBuilder:
         X_scaled = Normalizer.standardize(X, mu=mu, std=std)
         return X_scaled
 
+    def _prepend_history_context(
+        self,
+        x: np.ndarray,
+        dt: np.ndarray,
+        history_x: Optional[np.ndarray],
+        history_dt: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepends up to input_seq_len rows of history for cross-split lookback."""
+        if history_x is None or history_dt is None or self.input_seq_len <= 0:
+            return x, dt
+
+        history_x, history_dt = self._trim_trailing_nans(history_x, history_dt)
+        if history_x.size == 0:
+            return x, dt
+
+        prefix_len = min(len(history_x), self.input_seq_len)
+        x = np.concatenate([history_x[-prefix_len:], x], axis=0)
+        dt = np.concatenate([history_dt[-prefix_len:], dt], axis=0)
+        return x.astype(np.float32), np.asarray(dt, dtype="datetime64[ns]")
+
     def _process_all(self) -> Dict[str, np.ndarray]:
         X_all = self._load_data_from_csv(self.x_file, col_to_use=self.ts_to_use)
         DT_all = self._load_data_from_csv(
@@ -173,6 +197,24 @@ class TimeSeriesDataBuilder:
         if DT_all.shape[1] == 1 and X_all.shape[1] > 1:
             print("assuming single datetime column for all series, duplicating...")
             DT_all = np.tile(DT_all.reshape(-1, 1), (1, X_all.shape[1]))
+
+        X_hist_all = None
+        DT_hist_all = None
+        if self.history_x_file is not None and self.history_date_time_file is not None:
+            X_hist_all = self._load_data_from_csv(
+                self.history_x_file, col_to_use=self.ts_to_use
+            )
+            DT_hist_all = self._load_data_from_csv(
+                self.history_date_time_file, col_to_use=self.ts_to_use
+            )
+
+            if DT_hist_all.shape[1] == 1 and X_hist_all.shape[1] > 1:
+                DT_hist_all = np.tile(DT_hist_all.reshape(-1, 1), (1, X_hist_all.shape[1]))
+
+            if X_hist_all.shape[1] != X_all.shape[1] or DT_hist_all.shape[1] != DT_all.shape[1]:
+                raise ValueError(
+                    "History split must contain the same series columns as the current split."
+                )
 
         assert X_all.shape == DT_all.shape, (
             f"Data and DateTime files must have the same shape. "
@@ -190,6 +232,9 @@ class TimeSeriesDataBuilder:
         for j in range(N):
             xj, dtj = X_all[:, j], DT_all[:, j]
             xj, dtj = self._trim_trailing_nans(xj, dtj)
+            history_xj = None if X_hist_all is None else X_hist_all[:, j]
+            history_dtj = None if DT_hist_all is None else DT_hist_all[:, j]
+            xj, dtj = self._prepend_history_context(xj, dtj, history_xj, history_dtj)
             series_idx = ts_indices[j]
             covs = self._time_covariates_from_datetime_column(dtj)
 
@@ -234,7 +279,9 @@ class TimeSeriesDataBuilder:
             elif self.scale_method is not None:
                 print(f"Unknown scale_method: {self.scale_method}")
 
-            X_all_norm[: Xj.shape[0], j] = Xj[:, 0]
+            norm_len = min(Xj.shape[0], X_all_norm.shape[0])
+            if norm_len > 0:
+                X_all_norm[:norm_len, j] = Xj[-norm_len:, 0]
 
             x_rolled, y_rolled, window_ids = self._create_rolling_windows(
                 Xj,

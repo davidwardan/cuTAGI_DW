@@ -59,13 +59,14 @@ def _compute_validation_metrics(
     all_stand_y_pred = []
     all_stand_s_pred = []
 
+    train_offset = config.split_target_offset("train")
+    val_offset = config.split_target_offset("val")
+
     for ts_idx in tqdm(config.ts_to_use, desc="Scoring validation series", leave=False):
         local_idx = config.ts_to_use.index(ts_idx)
 
-        yt_train = _trim_trailing_nans(
-            true_train[config.data.loader.input_seq_len :, local_idx]
-        )
-        yt_val = _trim_trailing_nans(true_val[config.data.loader.input_seq_len :, local_idx])
+        yt_train = _trim_trailing_nans(true_train[train_offset:, local_idx])
+        yt_val = _trim_trailing_nans(true_val[val_offset:, local_idx])
 
         if len(yt_val) == 0:
             continue

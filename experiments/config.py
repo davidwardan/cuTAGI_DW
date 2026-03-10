@@ -18,6 +18,7 @@ class DataLoader(BaseModel):
     scale_method: str = "standard"
     order_mode: str = "by_window"
     input_seq_len: int = 52
+    carry_split_context: bool = False
     batch_size: int = 16
     output_col: List[int] = [0]
     nb_ts: int = 127
@@ -188,6 +189,17 @@ class Config(BaseModel):
         """Calculates the total input size for the model."""
         base_size = self.data.loader.num_features + self.data.loader.input_seq_len - 1
         return base_size + self.total_embedding_size
+
+    def split_target_offset(self, split: str) -> int:
+        """Returns how many leading rows in a split are context-only."""
+        split_name = split.lower()
+        if split_name == "train":
+            return self.data.loader.input_seq_len
+        if split_name in {"val", "validation", "test"}:
+            if self.data.loader.carry_split_context:
+                return 0
+            return self.data.loader.input_seq_len
+        raise ValueError(f"Unknown split '{split}'. Expected train, val, or test.")
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":

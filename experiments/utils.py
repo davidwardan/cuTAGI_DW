@@ -383,6 +383,7 @@ def prepare_data(
     x_file,
     date_file,
     input_seq_len,
+    carry_split_context,
     time_covariates,
     scale_method,
     order_mode,
@@ -403,6 +404,8 @@ def prepare_data(
     val_data = TimeSeriesDataBuilder(
         x_file=x_file[1],
         date_time_file=date_file[1],
+        history_x_file=x_file[0] if carry_split_context else None,
+        history_date_time_file=date_file[0] if carry_split_context else None,
         input_seq_len=input_seq_len,
         output_seq_len=1,
         stride=1,
@@ -416,6 +419,8 @@ def prepare_data(
     test_data = TimeSeriesDataBuilder(
         x_file=x_file[2],
         date_time_file=date_file[2],
+        history_x_file=x_file[1] if carry_split_context else None,
+        history_date_time_file=date_file[1] if carry_split_context else None,
         input_seq_len=input_seq_len,
         output_seq_len=1,
         stride=1,
