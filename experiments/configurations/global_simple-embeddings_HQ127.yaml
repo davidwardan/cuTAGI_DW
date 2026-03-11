@@ -34,7 +34,7 @@ training:
   early_stopping_criteria: rmse
   patience: 10
   min_delta: 0.0001
-  warmup_epochs: 0
+  warmup_epochs: 3
   shuffle: true
 embeddings:
   standard:

@@ -503,10 +503,10 @@ def prepare_input(
     if look_back_mu is not None:
         input_seq_len = look_back_mu.shape[1]
 
-    if look_back_mu is not None:
-        x[active_mask, :input_seq_len] = look_back_mu[indices[active_mask]]
-    if look_back_var is not None:
-        var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
+        if look_back_mu is not None:
+            x[active_mask, :input_seq_len] = look_back_mu[indices[active_mask]]
+        if look_back_var is not None:
+            var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
 
     if embeddings is not None:
         lookup_indices = indices.copy()

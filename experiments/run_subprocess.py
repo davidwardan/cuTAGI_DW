@@ -5,7 +5,7 @@ from experiments.config import Config
 
 from pytagi import cuda
 
-DEFAULT_SEEDS: Sequence[int] = (11, 42, 27, 3, 99)
+DEFAULT_SEEDS: Sequence[int] = [11]
 DEFAULT_EXPERIMENTS: Sequence[str] = (
     "train30",
     "train40",
@@ -21,21 +21,26 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import stateful_locals as parent_script
+    from experiments import stateless_locals as parent_script
 
     # Model category
     model_category = "locals"
+    # embed_category = "no-embeddings"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
+    experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}-shuffled"
 
     # Load configuration
-    config = Config.from_yaml(f"experiments/configurations/{model_category}_HQ127.yaml")
+    config = Config.from_yaml(
+        f"experiments/configurations/{model_category}_HQ127.yaml"
+    )
 
     config.seed = seed
     config.model.device = "cuda" if cuda.is_available() else "cpu"
     config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
     config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+    config.data.loader.order_mode = "shuffled_filtered"
+    config.evaluation.eval_plots = True
 
     # Display config
     config.display()
@@ -56,7 +61,7 @@ def run_experiments(
     seeds: Iterable[int] = DEFAULT_SEEDS,
     experiments: Iterable[str] = DEFAULT_EXPERIMENTS,
     *,
-    train: bool = True,
+    train: bool = False,
     evaluate: bool = True,
 ) -> None:
     ctx = mp.get_context("spawn")

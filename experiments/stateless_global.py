@@ -397,10 +397,26 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 time_step=time_steps,
             )
 
+            # Fake Update
+            m_post, v_post = calculate_updates(
+                net,
+                output_updater,
+                m_pred,
+                v_pred,
+                y.flatten(),
+                use_AGVI=config.use_AGVI,
+                var_y=var_y,
+                train_mode=False,  # Important to prevent actual parameter updates
+            )
+
+            # Where y is available use y otherwuse use m_pred
+            y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=m_pred.reshape(B, -1),
-                new_var=v_pred.reshape(B, -1),
+                new_mu=y_lookback.reshape(B, -1),
+                new_var=v_lookback.reshape(B, -1),
                 indices=indices,
             )
 
@@ -579,10 +595,26 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             time_step=time_steps,
         )
 
+        # Fake Update
+        m_post, v_post = calculate_updates(
+            net,
+            output_updater,
+            m_pred,
+            v_pred,
+            y.flatten(),
+            use_AGVI=config.use_AGVI,
+            var_y=var_y,
+            train_mode=False,  # Important to prevent actual parameter updates
+        )
+
+        # Where y is available use y otherwuse use m_pred
+        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=m_pred.reshape(B, -1),
-            new_var=v_pred.reshape(B, -1),
+            new_mu=y_lookback.reshape(B, -1),
+            new_var=v_lookback.reshape(B, -1),
             indices=indices,
         )
 
@@ -1230,8 +1262,8 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [11, 42, 27, 3, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [42]
+    list_of_experiments = ["train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1244,7 +1276,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Define experiment name
             experiment_name = (
-                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
+                f"seed{seed}/{exp}/Shuffled_{model_category}-large-whitenoise_{embed_category}"
             )
 
             # Load configuration

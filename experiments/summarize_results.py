@@ -254,28 +254,131 @@ def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
         )
     )
 
+    # -------------------------------------------------------------------------
+    # CONFIGURATION
+    # -------------------------------------------------------------------------
+    # Define Colors:
+    # C0 (Blue)   : Global No-Embeddings family
+    # C1 (Orange) : Global Simple-Embeddings family
+    # C2 (Green)  : Global Hierarchical-Embeddings family
+    # C3 (Red)    : Locals family
+
+    # Define Markers:
+    # 'o' (Circle)   : Standard / Window
+    # '^' (Triangle) : Series
+    # 's' (Square)   : Stateless / Shuffled
+
+    STYLE_CONFIG = {
+        # --- GLOBAL NO EMBEDDINGS (Color C0) ---
+        "global_no-embeddings": {
+            "label": r"G$_{sf/w}$",
+            "color": "C0",
+            "marker": "o",
+            "category": "Global",
+        },
+        "global-series_no-embeddings": {
+            "label": r"G$_{sf/s}$",
+            "color": "C0",
+            "marker": "s",
+            "category": "Global",
+        },
+        "global-shuffled_no-embeddings": {
+            "label": r"G$_{sl}$",
+            "color": "C0",
+            "marker": "^",
+            "category": "Global",
+        },
+        # --- GLOBAL SIMPLE EMBEDDINGS (Color C1) ---
+        "global_simple-embeddings": {
+            "label": r"G$_{sf/w}$+$B_s$",
+            "color": "C1",
+            "marker": "o",
+            "category": r"Global+$B_s$",
+        },
+        "global-series_simple-embeddings": {
+            "label": r"G$_{sf/s}$+$B_s$",
+            "color": "C1",
+            "marker": "s",
+            "category": r"Global+$B_s$",
+        },
+        "global-shuffled_simple-embeddings": {
+            "label": r"G$_{sl}$+$B_s$",
+            "color": "C1",
+            "marker": "^",
+            "category": r"Global+$B_s$",
+        },
+        # --- GLOBAL HIERARCHICAL EMBEDDINGS (Color C2) ---
+        "global_hierarchical-embeddings": {
+            "label": r"G$_{sf/w}$+$B_h$",
+            "color": "C2",
+            "marker": "o",
+            "category": r"Global+$B_h$",
+        },
+        "global-series_hierarchical-embeddings": {
+            "label": r"G$_{sf/s}$+$B_h$",
+            "color": "C2",
+            "marker": "s",
+            "category": r"Global+$B_h$",
+        },
+        "global-shuffled_hierarchical-embeddings": {
+            "label": r"G$_{sl}$+$B_h$",
+            "color": "C2",
+            "marker": "^",
+            "category": r"Global+$B_h$",
+        },
+        # --- LOCALS (Color C3) ---
+        "locals-shuffled": {
+            "label": r"L$_{sl}$",
+            "color": "C3",
+            "marker": "^",
+            "category": "Local",
+        },
+        "locals": {
+            "label": r"L$_{sf}$",
+            "color": "C3",
+            "marker": "o",
+            "category": "Local",
+        },
+    }
+
+    # Legend categories: each list becomes one column in the legend
+    LEGEND_CATEGORIES = [
+        # (column title, ordered model keys)
+        ("Local", ["locals", "locals-shuffled"]),
+        (
+            "Global",
+            [
+                "global_no-embeddings",
+                "global-series_no-embeddings",
+                "global-shuffled_no-embeddings",
+            ],
+        ),
+        (
+            "Simple Emb.",
+            [
+                "global_simple-embeddings",
+                "global-series_simple-embeddings",
+                "global-shuffled_simple-embeddings",
+            ],
+        ),
+        (
+            "Hier. Emb.",
+            [
+                "global_hierarchical-embeddings",
+                "global-series_hierarchical-embeddings",
+                "global-shuffled_hierarchical-embeddings",
+            ],
+        ),
+    ]
+
+    # Flat plot order derived from categories
+    PLOT_ORDER = [k for _, keys in LEGEND_CATEGORIES for k in keys]
+    # -------------------------------------------------------------------------
+
     # Get unique avg_types (macro, micro)
     avg_types = (
         list(agg["avg_type"].dropna().unique()) if "avg_type" in agg.columns else [""]
     )
-
-    # Precompute shared y-limits for each metric across all avg_types
-    ylim_per_metric = {}
-    for metric in metric_bases:
-        mean_col, std_col = f"{metric}_mean", f"{metric}_std"
-        if mean_col not in agg.columns or std_col not in agg.columns:
-            continue
-
-        all_means = agg[mean_col].dropna()
-        all_stds = agg[std_col].fillna(0)
-        if len(all_means) == 0:
-            continue
-
-        # Compute global min/max considering error bars
-        y_min = (agg[mean_col] - all_stds).min()
-        y_max = (agg[mean_col] + all_stds).max()
-        margin = (y_max - y_min) * 0.1 if y_max > y_min else 0.1
-        ylim_per_metric[metric] = (y_min - margin, y_max + margin)
 
     for avg_type in avg_types:
         # Filter by avg_type
@@ -296,31 +399,47 @@ def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
             ):
                 continue
 
-            fig = plt.figure(figsize=(6, 3))
+            fig = plt.figure(figsize=(5, 3))
             ax = fig.gca()
-            for model in agg_filtered["model_type"].dropna().unique():
-                # custom model name
-                if model.lower() == "global_no-embeddings":
-                    label = "Global"
-                elif model.lower() == "global_simple-embeddings":
-                    label = r"Global + $B_{simple}$"
-                elif model.lower() == "locals":
-                    label = "Locals"
-                elif model.lower() == "global_hierarchical-embeddings":
-                    label = r"Global + $B_{hierarchical}$"
-                else:
-                    label = model
 
-                sub = agg_filtered[agg_filtered["model_type"] == model].sort_values(
+            # Plot in the specific order defined by PLOT_ORDER
+            available_models = set(agg_filtered["model_type"].dropna().unique())
+
+            # 1. Plot models defined in configuration
+            for model_key in PLOT_ORDER:
+                if model_key in available_models:
+                    style = STYLE_CONFIG[model_key]
+                    sub = agg_filtered[
+                        agg_filtered["model_type"] == model_key
+                    ].sort_values("train_size")
+                    if not sub.empty:
+                        ax.errorbar(
+                            sub["train_size"],
+                            sub[mean_col],
+                            yerr=sub[std_col].fillna(0),
+                            fmt=f"-{style['marker']}",  # e.g. -o, -^, -s
+                            color=style["color"],
+                            label=style["label"],
+                            markersize=4,  # Smaller markers
+                            alpha=0.7,  # Transparency for overlapping lines
+                        )
+                    available_models.remove(model_key)
+
+            # 2. Plot any leftover models (if new models appear in data)
+            for model_key in sorted(list(available_models)):
+                sub = agg_filtered[agg_filtered["model_type"] == model_key].sort_values(
                     "train_size"
                 )
-                ax.errorbar(
-                    sub["train_size"],
-                    sub[mean_col],
-                    yerr=sub[std_col].fillna(0),
-                    fmt="-o",
-                    label=label,
-                )
+                if not sub.empty:
+                    ax.errorbar(
+                        sub["train_size"],
+                        sub[mean_col],
+                        yerr=sub[std_col].fillna(0),
+                        fmt="-x",  # Default fallback
+                        label=model_key,
+                        markersize=4,
+                        alpha=0.7,
+                    )
 
             plt.xlabel("Train size (%)")
             if metric == "LogLik":
@@ -329,39 +448,30 @@ def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
                 plt.ylabel(f"{metric} $(\\downarrow)$")
             plt.title(f"{metric}{title_suffix}")
 
-            # Apply shared y-limits
-            if metric in ylim_per_metric:
-                ax.set_ylim(ylim_per_metric[metric])
+            # Show all x ticks
+            if len(agg_filtered) > 0:
+                ax.set_xticks(sorted(agg_filtered["train_size"].unique()))
 
-            legend_order = [
-                "Locals",
-                "Global",
-                r"Global + $B_{simple}$",
-                r"Global + $B_{hierarchical}$",
-            ]
+            # Place legend on the right side using plot order
             handles, labels = ax.get_legend_handles_labels()
-            order = sorted(
-                range(len(labels)),
-                key=lambda i: (
-                    legend_order.index(labels[i])
-                    if labels[i] in legend_order
-                    else len(legend_order) + i
-                ),
-            )
-            ax.legend(
-                [handles[i] for i in order],
-                [labels[i] for i in order],
-                loc="center left",
-                bbox_to_anchor=(1.01, 0.5),
-                ncol=1,
-                frameon=False,
-            )
-            # show all x ticks
-            if len(sub) > 0:
-                ax.set_xticks(sub["train_size"].unique())
-            fig.subplots_adjust(right=0.72)
+            if handles:
+                ax.legend(
+                    handles,
+                    labels,
+                    loc="center left",
+                    bbox_to_anchor=(1.01, 0.5),
+                    ncol=1,
+                    frameon=False,
+                    fontsize="x-small",
+                    handletextpad=0.4,
+                )
+
+            fig.subplots_adjust(right=0.70)
             fig.tight_layout()
-            fig.savefig(plots_dir / f"{metric}{suffix}.svg")
+            fig.savefig(
+                plots_dir / f"{metric}{suffix}.svg",
+                bbox_inches="tight",
+            )
             plt.close(fig)
 
 

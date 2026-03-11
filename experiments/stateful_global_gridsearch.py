@@ -242,8 +242,8 @@ def optimize_lookback(
 
 
 def main(Train=True, Eval=True, log_wandb=False):
-    list_of_seeds = [11, 42, 27, 3, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [235]
+    list_of_experiments = ["train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:

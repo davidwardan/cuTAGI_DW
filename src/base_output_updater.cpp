@@ -186,7 +186,7 @@ Args:
 
         // Compute updating quantities for the mean of the output
         float tmp = jcb_col / var_sum;
-        float tmp2 = jcb_col / (var_a_col + 1e-5f); //TODO: check later
+        float tmp2 = jcb_col / (var_a_col + 1e-5f);  // TODO: check later
         if (std::isinf(tmp) || std::isnan(tmp) || std::isinf(obs[col / 2]) ||
             std::isnan(obs[col / 2])) {
             delta_mu[col] = zero_pad;

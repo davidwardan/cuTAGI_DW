@@ -157,18 +157,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         if config.training.num_epochs <= 1:
             decaying_sigma_v = [sigma_start]
         else:
+            # Exponential decay: sigma(t) = sigma_end + (sigma_start - sigma_end) * decay_factor^t
             decay_factor = float(config.model.decaying_factor)
-            exponents = decay_factor ** np.arange(
-                config.training.num_epochs, dtype=np.float32
-            )
-            if np.isclose(exponents[0], exponents[-1]) or decay_factor <= 0.0:
-                weights = np.linspace(
-                    1.0, 0.0, config.training.num_epochs, dtype=np.float32
-                )
-            else:
-                weights = (exponents - exponents[-1]) / (exponents[0] - exponents[-1])
+            t = np.arange(config.training.num_epochs, dtype=np.float32)
             decaying_sigma_v = (
-                sigma_end + (sigma_start - sigma_end) * weights
+                sigma_end + (sigma_start - sigma_end) * (decay_factor**t)
             ).tolist()
 
     # --- Training loop ---
@@ -336,7 +329,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             # Where y is available use y otherwuse use m_pred
             y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
             v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
-
+            # else:
             # y_lookback = m_post.copy()
             # v_lookback = v_post.copy()
 
@@ -413,7 +406,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             # Update LSTM states for the current batch
             lstm_state_container.update_states_from_net(indices, net)
-            net.reset_lstm_states()
 
             # Specific to AGVI
             if config.use_AGVI:
@@ -444,12 +436,24 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 time_step=time_steps,
             )
 
-            # Where y is available use y otherwuse use m_pred
-            # y_lookback = np.where(np.isnan(y.flatten()), m_pred, y.flatten())
-            # v_lookback = np.where(np.isnan(y.flatten()), v_pred, 0.0)
+            # Fake Update
+            m_post, v_post = calculate_updates(
+                net,
+                output_updater,
+                m_pred,
+                v_pred,
+                y.flatten(),
+                use_AGVI=config.use_AGVI,
+                var_y=var_y,
+                train_mode=False,  # Important to prevent actual parameter updates
+            )
 
-            y_lookback = m_pred.copy()
-            v_lookback = v_pred.copy()
+            # Where y is available use y otherwuse use m_pred
+            y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+            # else:
+            #     y_lookback = m_post.copy()
+            #     v_lookback = v_post.copy()
 
             # Update look_back buffer
             look_back_buffer.update(
@@ -458,6 +462,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 indices=indices,
             )
         # End of epoch
+        net.reset_lstm_states()
 
         # Calculate micro metrics for early stopping
         val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
@@ -554,7 +559,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     net.eval()
 
     # reset look-back buffer and LSTM states before testing
-    look_back_buffer.reset()
+    # look_back_buffer.reset()
     # lstm_state_container.reset_states()
 
     test_batch_iter = BatchLoader.create_data_loader(
@@ -636,10 +641,28 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             time_step=time_steps,
         )
 
+        # Fake Update
+        m_post, v_post = calculate_updates(
+            net,
+            output_updater,
+            m_pred,
+            v_pred,
+            y.flatten(),
+            use_AGVI=config.use_AGVI,
+            var_y=var_y,
+            train_mode=False,  # Important to prevent actual parameter updates
+        )
+
+        # Where y is available use y otherwuse use m_pred
+        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+        # y_lookback = m_post.copy()
+        # v_lookback = v_post.copy()
+
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=m_pred.reshape(B, -1),
-            new_var=v_pred.reshape(B, -1),
+            new_mu=y_lookback.reshape(B, -1),
+            new_var=v_lookback.reshape(B, -1),
             indices=indices,
         )
 
@@ -1284,8 +1307,8 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [11, 42, 27, 3, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [42]
+    list_of_experiments = ["train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1297,9 +1320,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = (
-                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}"
-            )
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}lb12-whitenoise_{embed_category}"
 
             # Load configuration
             config = Config.from_yaml(
@@ -1311,6 +1332,8 @@ def main(Train=True, Eval=True, log_wandb=False):
             config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
             config.data.loader.order_mode = "by_window"
+            config.training.warmup_epochs = 3
+            config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from typing import Any, Optional
+import copy
 
 from experiments.wandb_helpers import (
     init_run,
@@ -138,10 +139,9 @@ def run_model(config, experiment_name: Optional[str] = None):
     # --- Training loop ---
     train_batch_iter = BatchLoader.create_data_loader(
         dataset=train_data.dataset,
-        order_mode="by_window",
+        order_mode=config.data.loader.order_mode,
         batch_size=config.data.loader.batch_size,
         shuffle=False,
-        seed=11,  # fixed for all seeds and runs
     )
 
     # Initialize look-back buffer and LSTM state container
@@ -155,6 +155,7 @@ def run_model(config, experiment_name: Optional[str] = None):
     lstm_state_container = LSTMStateContainer(
         num_series=config.data.loader.nb_ts, layer_state_shapes=layer_state_shapes
     )
+    net.eval()
 
     for (x, y), ts_id, w_id in train_batch_iter:
 
@@ -184,21 +185,14 @@ def run_model(config, experiment_name: Optional[str] = None):
         x, var_x = prepare_input(
             x=x,
             var_x=None,
-            look_back_mu=(
-                look_back_buffer.mu
-                if config.training.use_look_back_predictions
-                else None
-            ),
-            look_back_var=(
-                look_back_buffer.var
-                if config.training.use_look_back_predictions
-                else None
-            ),
+            look_back_mu=look_back_buffer.mu,
+            look_back_var=look_back_buffer.var,
             indices=ts_id,
             embeddings=(embeddings if config.total_embedding_size != 0 else None),
         )
 
         # Feedforward
+        net.reset_lstm_states() # TODO
         m_pred, v_pred = net(x, var_x)
 
         # Specific to AGVI
@@ -256,7 +250,6 @@ def run_model(config, experiment_name: Optional[str] = None):
 
         # Update LSTM states for the current batch
         lstm_state_container.update_states_from_net(indices, net)
-        net.reset_lstm_states()
 
         # Where y is available use y otherwuse use m_pred
         y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
@@ -268,6 +261,7 @@ def run_model(config, experiment_name: Optional[str] = None):
             new_var=v_lookback.reshape(B, -1),
             indices=indices,
         )
+        net.reset_lstm_states()
 
     # Validation
     val_batch_iter = BatchLoader.create_data_loader(
@@ -276,6 +270,8 @@ def run_model(config, experiment_name: Optional[str] = None):
         batch_size=config.data.loader.batch_size,
         shuffle=False,
     )
+
+    look_back_buffer_val = copy.deepcopy(look_back_buffer)
 
     for (x, y), ts_id, w_id in val_batch_iter:
 
@@ -287,36 +283,22 @@ def run_model(config, experiment_name: Optional[str] = None):
         # set LSTM states for the current batch
         lstm_state_container.set_states_on_net(indices, net)
 
-        # prepare look_back buffer
-        # Filter out padded indices (-1) before checking initialization status
-        valid_indices_for_init = [i for i in indices if i != -1]
-        if any(
-            look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
-        ):
-            look_back_buffer.initialize(
-                initial_mu=x[:, : config.data.loader.input_seq_len],
-                initial_var=np.zeros_like(
-                    x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                ),
-                indices=indices,
-            )
-
         # prepare input
         x, var_x = prepare_input(
             x=x,
             var_x=None,
-            look_back_mu=look_back_buffer.mu,
-            look_back_var=look_back_buffer.var,
+            look_back_mu=look_back_buffer_val.mu,
+            look_back_var=look_back_buffer_val.var,
             indices=indices,
             embeddings=(embeddings if config.total_embedding_size != 0 else None),
         )
 
         # Feedforward
+        net.reset_lstm_states() # TODO
         m_pred, v_pred = net(x, var_x)
 
         # Update LSTM states for the current batch
         lstm_state_container.update_states_from_net(indices, net)
-        net.reset_lstm_states()
 
         # Specific to AGVI
         if config.use_AGVI:
@@ -347,6 +329,13 @@ def run_model(config, experiment_name: Optional[str] = None):
             new_var=v_lookback.reshape(B, -1),
             indices=indices,
         )
+
+        look_back_buffer_val.update(
+            new_mu=m_pred.reshape(B, -1),
+            new_var=v_pred.reshape(B, -1),
+            indices=indices,
+        )
+        net.reset_lstm_states()
 
     # --- Testing ---
     test_batch_iter = BatchLoader.create_data_loader(
@@ -397,11 +386,11 @@ def run_model(config, experiment_name: Optional[str] = None):
         )
 
         # Feedforward
+        net.reset_lstm_states() # TODO
         m_pred, v_pred = net(x, var_x)
 
         # Update LSTM states for the current batch
         lstm_state_container.update_states_from_net(indices, net)
-        net.reset_lstm_states()
 
         # Specific to AGVI
         if config.use_AGVI:
@@ -428,6 +417,7 @@ def run_model(config, experiment_name: Optional[str] = None):
             new_var=v_pred.reshape(B, -1),
             indices=indices,
         )
+        net.reset_lstm_states()
 
     # Run over each time series and re_scale it
     if config.data.loader.scale_method == "standard":
@@ -1071,7 +1061,7 @@ def eval_model(
 def main(Train=True, Eval=True):
 
     list_of_seeds = [11]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_experiments = ["train100"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
@@ -1083,23 +1073,20 @@ def main(Train=True, Eval=True):
             embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = (
-                f"seed{seed}/{exp}/ByWindowTest_Obs_{model_category}_{embed_category}"
-            )
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}-shuffled_{embed_category}"
 
             # Load configuration
             config = Config.from_yaml(
-                f"out/seed{seed}/{exp}/ByWindow_Obs_global_no-embeddings/config.yaml"
+                f"out/seed{seed}/{exp}/experiment01_global-shuffled_no-embeddings/config.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.model.initialization.from_file = f"out/seed{seed}/{exp}/experiment01_global-shuffled_no-embeddings/param/model.bin"
+            config.evaluation.eval_plots = True
             config.data.loader.order_mode = "by_window"
-            config.model.initialization.from_file = (
-                f"out/seed{seed}/{exp}/ByWindow_Obs_global_no-embeddings/param/model.bin"
-            )
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

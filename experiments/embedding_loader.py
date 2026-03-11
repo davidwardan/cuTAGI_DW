@@ -81,7 +81,7 @@ class EmbeddingLayer:
             if not os.path.exists(init_file):
                 raise FileNotFoundError(f"Initialization file not found: {init_file}")
             print(f"Loading initialization from {init_file}...")
-            loaded_mu = np.load(init_file)
+            loaded_mu = np.load(init_file)["embeddings"]
 
             # Check shape
             if loaded_mu.shape != self.embedding_dim:

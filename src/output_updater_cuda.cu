@@ -15,7 +15,7 @@ __global__ void update_delta_z_using_indices_cuda(
         // minus 1 because the encoder index starts at 1
         idx = selected_idx[col] + (col / n_enc) * n_obs - 1;
         tmp = jcb[idx] / (var_a[idx] + var_obs[col]);
-        if (isinf(tmp) || isnan(tmp)) {
+        if (isinf(tmp) || isnan(tmp) || isnan(obs[col])) {
             delta_mu[idx] = zero_pad;
             delta_var[idx] = zero_pad;
         } else {
@@ -33,7 +33,7 @@ __global__ void update_delta_z_cuda(float const* mu_a, float const* var_a,
     float tmp = 0;
     if (col < size) {
         tmp = jcb[col] / (var_a[col] + var_obs[col]);
-        if (isinf(tmp) || isnan(tmp)) {
+        if (isinf(tmp) || isnan(tmp) || isnan(obs[col])) {
             delta_mu[col] = zero_pad;
             delta_var[col] = zero_pad;
         } else {

@@ -12,6 +12,8 @@ from pytagi import cuda
 from pathlib import Path
 import pandas as pd
 
+import copy
+
 from experiments.config import Config
 
 from experiments.data_loader import BatchLoader
@@ -283,6 +285,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 shuffle=False,
             )
 
+            look_back_buffer_val = copy.deepcopy(look_back_buffer)
+
             for (x, y), _, w_id in val_batch_iter:
 
                 # get current batch size
@@ -297,8 +301,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     )
 
                 # prepare look_back buffer
-                if look_back_buffer.needs_initialization[0]:
-                    look_back_buffer.initialize(
+                if look_back_buffer_val.needs_initialization[0]:
+                    look_back_buffer_val.initialize(
                         initial_mu=x[:, : config.data.loader.input_seq_len],
                         initial_var=np.zeros_like(
                             x[:, : config.data.loader.input_seq_len], dtype=np.float32
@@ -311,12 +315,12 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     x=x,
                     var_x=None,
                     look_back_mu=(
-                        look_back_buffer.mu
+                        look_back_buffer_val.mu
                         if config.forecasting.recursive_val
                         else None
                     ),
                     look_back_var=(
-                        look_back_buffer.var
+                        look_back_buffer_val.var
                         if config.forecasting.recursive_val
                         else None
                     ),
@@ -358,8 +362,30 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     time_step=w_id.item(),
                 )
 
+                # Fake Update
+                m_post, v_post = calculate_updates(
+                    net,
+                    output_updater,
+                    m_pred,
+                    v_pred,
+                    y.flatten(),
+                    use_AGVI=config.use_AGVI,
+                    var_y=var_y,
+                    train_mode=False,
+                )
+
+                # Where y is available use y otherwuse use m_pred
+                y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+                v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+
                 # Update look_back buffer
                 look_back_buffer.update(
+                    new_mu=y_lookback,
+                    new_var=v_lookback,
+                    indices=[0],
+                )
+
+                look_back_buffer_val.update(
                     new_mu=m_pred,
                     new_var=v_pred,
                     indices=[0],
@@ -453,7 +479,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         net.eval()
 
         # reset look-back buffer
-        look_back_buffer.reset()
+        # look_back_buffer.reset()
 
         test_batch_iter = BatchLoader.create_data_loader(
             dataset=test_data.dataset,
@@ -530,6 +556,22 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 indices=[ts],
                 time_step=w_id.item(),
             )
+
+            # Fake Update
+            m_post, v_post = calculate_updates(
+                net,
+                output_updater,
+                m_pred,
+                v_pred,
+                y.flatten(),
+                use_AGVI=config.use_AGVI,
+                var_y=var_y,
+                train_mode=False,
+            )
+
+            # Where y is available use y otherwuse use m_pred
+            # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
             # Update look_back buffer
             look_back_buffer.update(

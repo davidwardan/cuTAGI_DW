@@ -19,12 +19,13 @@ data:
     - 0
     nb_ts: 127
     ts_to_use: []
+    carry_split_context: true
 model:
   Sigma_v_bounds:
-  - null
-  - null
-  decaying_factor: 0.99
-  device: cpu
+  - 1
+  - 0.1
+  decaying_factor: 0.5
+  device: cuda
   hidden_sizes:
   - 40
   - 40
@@ -40,7 +41,7 @@ training:
   patience: 10
   min_delta: 0.0001
   warmup_epochs: 3
-  shuffle: false
+  shuffle: true
 evaluation:
   eval_plots: false
   eval_metrics: true
