@@ -1,7 +1,9 @@
 import os
 import json
+import argparse
+import multiprocessing as mp
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -14,6 +16,13 @@ from experiments import stateful_global as base_script
 from pytagi import Normalizer as normalizer
 from pytagi import cuda
 import pytagi.metric as metric
+
+DEFAULT_SEEDS: Sequence[int] = (
+    11,
+    42,
+    235,
+)
+DEFAULT_EXPERIMENTS: Sequence[str] = ("train100",)
 
 
 def _trim_trailing_nans(x: np.ndarray) -> np.ndarray:
@@ -142,6 +151,38 @@ def _select_best_trial(results_df: pd.DataFrame, metric_name: str) -> pd.Series:
     return results_df.sort_values(metric_key, ascending=ascending).iloc[0]
 
 
+def _train_lookback_trial_worker(
+    config_payload: Dict[str, Any],
+    trial_experiment_name: str,
+) -> None:
+    trial_config = Config(**config_payload)
+    base_script.train_model(
+        trial_config,
+        experiment_name=trial_experiment_name,
+        wandb_run=None,
+    )
+
+
+def _run_lookback_trial_in_subprocess(
+    ctx: Any,
+    trial_config: Config,
+    trial_experiment_name: str,
+) -> None:
+    process = ctx.Process(
+        target=_train_lookback_trial_worker,
+        args=(trial_config.model_dump(), trial_experiment_name),
+    )
+    process.start()
+    process.join()
+
+    if process.exitcode:
+        raise RuntimeError(
+            "Lookback trial failed "
+            f"(input_seq_len={trial_config.data.loader.input_seq_len}) "
+            f"with exit code {process.exitcode}."
+        )
+
+
 def optimize_lookback(
     config: Config,
     experiment_name: Optional[str] = None,
@@ -163,6 +204,13 @@ def optimize_lookback(
     config.to_yaml(output_dir / "config.yaml")
 
     results = []
+    ctx = mp.get_context("spawn")
+
+    if wandb_run is not None:
+        print(
+            "W&B logging object detected. "
+            "Lookback trials run in subprocesses and will train without live W&B trial logs."
+        )
 
     for lookback in candidate_values:
         trial_config = config.model_copy(deep=True)
@@ -170,10 +218,10 @@ def optimize_lookback(
         trial_experiment_name = f"{experiment_name}/lookback_{lookback}"
 
         print(f"Running lookback search trial with input_seq_len={lookback}")
-        base_script.train_model(
-            trial_config,
-            experiment_name=trial_experiment_name,
-            wandb_run=wandb_run,
+        _run_lookback_trial_in_subprocess(
+            ctx=ctx,
+            trial_config=trial_config,
+            trial_experiment_name=trial_experiment_name,
         )
 
         val_metrics = _compute_validation_metrics(
@@ -241,9 +289,22 @@ def optimize_lookback(
     return summary
 
 
-def main(Train=True, Eval=True, log_wandb=False):
-    list_of_seeds = [235]
-    list_of_experiments = ["train100"]
+def main(
+    Train: bool = True,
+    Eval: bool = True,
+    log_wandb: bool = False,
+    seeds: Optional[Sequence[int]] = None,
+    experiments: Optional[Sequence[str]] = None,
+):
+    list_of_seeds = list(seeds) if seeds is not None else list(DEFAULT_SEEDS)
+    list_of_experiments = (
+        list(experiments) if experiments is not None else list(DEFAULT_EXPERIMENTS)
+    )
+
+    if not list_of_seeds:
+        raise ValueError("At least one seed must be provided.")
+    if not list_of_experiments:
+        raise ValueError("At least one experiment must be provided.")
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -251,9 +312,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             model_category = "global"
             embed_category = "no-embeddings"
-            experiment_name = (
-                f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}_gridsearch"
-            )
+            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}_gridsearch"
 
             config = Config.from_yaml(
                 "experiments/configurations/global_no-embeddings_HQ127_gridsearch.yaml"
@@ -294,7 +353,9 @@ def main(Train=True, Eval=True, log_wandb=False):
                     evaluate_best_on_test=Eval,
                 )
             elif Eval:
-                summary_path = Path("out") / experiment_name / "lookback_search_summary.json"
+                summary_path = (
+                    Path("out") / experiment_name / "lookback_search_summary.json"
+                )
                 if not summary_path.exists():
                     raise FileNotFoundError(
                         f"Missing search summary at {summary_path}. Run training first."
@@ -315,4 +376,41 @@ def main(Train=True, Eval=True, log_wandb=False):
 
 
 if __name__ == "__main__":
-    main(True, True)
+    parser = argparse.ArgumentParser(description="Stateful global lookback gridsearch")
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_SEEDS),
+        help="One or more random seeds to run (e.g. --seeds 11 42 235).",
+    )
+    parser.add_argument(
+        "--experiments",
+        nargs="+",
+        default=list(DEFAULT_EXPERIMENTS),
+        help="One or more train split folders under data/hq (e.g. train60 train100).",
+    )
+    parser.add_argument(
+        "--log-wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging.",
+    )
+    parser.add_argument(
+        "--no-train",
+        action="store_true",
+        help="Skip training and only run evaluation from existing summaries.",
+    )
+    parser.add_argument(
+        "--no-eval",
+        action="store_true",
+        help="Skip evaluation of the selected best lookback.",
+    )
+    args = parser.parse_args()
+
+    main(
+        Train=not args.no_train,
+        Eval=not args.no_eval,
+        log_wandb=args.log_wandb,
+        seeds=args.seeds,
+        experiments=args.experiments,
+    )

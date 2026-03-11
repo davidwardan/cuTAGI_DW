@@ -10,26 +10,26 @@ data:
   loader:
     num_features: 2
     time_covariates:
-    - week_of_year
+      - week_of_year
     scale_method: standard
     order_mode: by_window
     input_seq_len: 52
-    batch_size: 1
+    batch_size: 64
     output_col:
-    - 0
+      - 0
     nb_ts: 127
     ts_to_use: []
     carry_split_context: true
 model:
   Sigma_v_bounds:
-  - 1
-  - 0.1
-  decaying_factor: 0.5
+    - 0.5
+    - 0.2
+  decaying_factor: 0.9
   device: cuda
   hidden_sizes:
-  - 40
-  - 40
-  - 40
+    - 40
+    - 40
+    - 40
   initialization:
     from_file: null
     variance_inject: 0.0
@@ -49,9 +49,14 @@ evaluation:
 lookback_search:
   enabled: true
   candidate_values:
-  - 12
-  - 24
-  - 36
-  - 52
+    - 4
+    - 8
+    - 12
+    - 13
+    - 16
+    - 24
+    - 26
+    - 36
+    - 52
   metric: rmse
   evaluate_best_on_test: true

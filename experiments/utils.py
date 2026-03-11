@@ -85,8 +85,6 @@ class LSTMStateContainer:
         self.layer_state_shapes = layer_state_shapes
         self.states = {}
 
-        np.random.seed(11)
-
         # Initialize NumPy arrays for each layer and state component
         for layer_idx, state_dim in layer_state_shapes.items():
             # Shape: (num_series, state_dim)

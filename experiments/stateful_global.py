@@ -168,12 +168,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     for epoch in pbar:
         net.train()
 
+        epoch_seed = None if config.seed is None else int(config.seed) + int(epoch)
         train_batch_iter = BatchLoader.create_data_loader(
             dataset=train_data.dataset,
             order_mode=config.data.loader.order_mode,
             batch_size=config.data.loader.batch_size,
             shuffle=config.training.shuffle,
-            seed=11,  # fixed for all seeds and runs
+            seed=epoch_seed,
         )
 
         # Initialize look-back buffer and LSTM state container
