@@ -120,6 +120,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         use_AGVI=config.use_AGVI,
         seed=config.seed,
         device=config.model.device,
+        cpu_threads=config.model.cpu_threads,
         hidden_sizes=config.model.hidden_sizes,
         input_seq_len=config.data.loader.input_seq_len,
         shift_biases=False,
@@ -330,7 +331,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
         val_batch_iter = BatchLoader.create_data_loader(
             dataset=val_data.dataset,
-            order_mode="by_window",
+            order_mode="by_series_batch",
             batch_size=config.data.loader.batch_size,
             shuffle=False,
         )
@@ -535,7 +536,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     test_batch_iter = BatchLoader.create_data_loader(
         dataset=test_data.dataset,
-        order_mode="by_window",
+        order_mode="by_series_batch",
         batch_size=config.data.loader.batch_size,
         shuffle=False,
     )

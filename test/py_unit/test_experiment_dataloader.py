@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock
+import yaml
 
 import numpy as np
 import pandas as pd
@@ -235,6 +236,40 @@ class TestExperimentDataLoader(unittest.TestCase):
         )
 
         self.assertSetEqual(set(np.unique(data.dataset["series_id"]).tolist()), {1, 3})
+
+    def test_config_allows_missing_top_level_sections(self):
+        config = Config.model_validate(
+            {
+                "data": {
+                    "loader": {
+                        "input_seq_len": 3,
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(config.model.hidden_sizes, [40, 40])
+        self.assertEqual(config.training.num_epochs, 100)
+        self.assertTrue(config.use_AGVI)
+        self.assertEqual(config.total_embedding_size, 0)
+
+    def test_to_yaml_can_exclude_defaults(self):
+        config = Config.model_validate(
+            {
+                "seed": 123,
+                "data": {"loader": {"input_seq_len": 1}},
+            }
+        )
+        out_path = os.path.join(self.tmpdir.name, "cfg.yaml")
+        config.to_yaml(out_path)
+
+        with open(out_path, "r") as f:
+            dumped = yaml.safe_load(f)
+
+        self.assertEqual(dumped["seed"], 123)
+        self.assertEqual(dumped["data"]["loader"]["input_seq_len"], 1)
+        self.assertNotIn("training", dumped)
+        self.assertNotIn("model", dumped)
 
 
 if __name__ == "__main__":

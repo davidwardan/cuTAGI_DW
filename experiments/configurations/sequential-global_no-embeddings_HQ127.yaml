@@ -27,7 +27,8 @@ model:
   - 1
   - 0.1
   decaying_factor: 0.5
-  device: cuda
+  device: cpu
+  cpu_threads: 16
   hidden_sizes:
   - 40
   - 40

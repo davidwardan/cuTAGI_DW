@@ -448,6 +448,7 @@ def build_model(
     init_params=None,
     shift_biases=False,
     sequential_model=False,
+    cpu_threads: Optional[int] = None,
 ):
     manual_seed(seed)
     layers = []
@@ -492,7 +493,10 @@ def build_model(
         # reset_param_variance(net, init_params)
         net.load(init_params)
     if device == "cpu":
-        net.set_threads(1)
+        if cpu_threads is not None:
+            if int(cpu_threads) <= 0:
+                raise ValueError("cpu_threads must be a positive integer when provided.")
+            net.set_threads(int(cpu_threads))
     elif device == "cuda":
         net.to_device("cuda")
     out_updater = OutputUpdater(net.device)

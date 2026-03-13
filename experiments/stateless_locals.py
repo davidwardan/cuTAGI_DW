@@ -93,6 +93,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             use_AGVI=config.use_AGVI,
             seed=config.seed,
             device=config.model.device,
+            cpu_threads=config.model.cpu_threads,
             init_params=config.model.initialization.from_file,
         )
 

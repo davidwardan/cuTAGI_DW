@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional, Dict, Tuple
 import yaml
 from pydantic import BaseModel, Field
 
@@ -13,8 +13,9 @@ class DataPaths(BaseModel):
 
 
 class DataLoader(BaseModel):
-    num_features: int = 2
-    time_covariates: List[str] = ["week_of_year"]
+    # Deprecated: feature count is inferred from target + configured covariates.
+    num_features: Optional[int] = None
+    time_covariates: List[str] = Field(default_factory=lambda: ["week_of_year"])
     covariate_window_mode: str = "last_step"
     scale_method: str = "standard"
     order_mode: str = "by_window"
@@ -22,9 +23,9 @@ class DataLoader(BaseModel):
     input_seq_len: int = 52
     carry_split_context: bool = False
     batch_size: int = 16
-    output_col: List[int] = [0]
+    output_col: List[int] = Field(default_factory=lambda: [0])
     nb_ts: int = 127
-    ts_to_use: List[int] = []
+    ts_to_use: List[int] = Field(default_factory=list)
 
 
 class Data(BaseModel):
@@ -40,27 +41,33 @@ class StandardEmbeddings(BaseModel):
 
 class MappedEmbeddings(BaseModel):
     embedding_map_dir: Optional[str] = None
-    embedding_map_sizes: Dict[str, int] = {
-        "dam_id": 3,
-        "dam_type_id": 3,
-        "sensor_type_id": 3,
-        "direction_id": 3,
-        "sensor_id": 3,
-    }
-    embedding_map_initializer: Dict[str, str] = {
-        "dam_id": "normal",
-        "dam_type_id": "normal",
-        "sensor_type_id": "normal",
-        "direction_id": "normal",
-        "sensor_id": "normal",
-    }
-    embedding_map_labels: Dict[str, List[str]] = {
-        "dam_id": ["DRU", "GOU", "LGA", "LTU", "MAT", "M5"],
-        "dam_type_id": ["Run-of-River", "Reservoir"],
-        "sensor_type_id": ["PIZ", "EXT", "PEN"],
-        "direction_id": ["NA", "X", "Y", "Z"],
-        "sensor_id": [],  # Will be populated dynamically if needed, or set in config
-    }
+    embedding_map_sizes: Dict[str, int] = Field(
+        default_factory=lambda: {
+            "dam_id": 3,
+            "dam_type_id": 3,
+            "sensor_type_id": 3,
+            "direction_id": 3,
+            "sensor_id": 3,
+        }
+    )
+    embedding_map_initializer: Dict[str, str] = Field(
+        default_factory=lambda: {
+            "dam_id": "normal",
+            "dam_type_id": "normal",
+            "sensor_type_id": "normal",
+            "direction_id": "normal",
+            "sensor_id": "normal",
+        }
+    )
+    embedding_map_labels: Dict[str, List[str]] = Field(
+        default_factory=lambda: {
+            "dam_id": ["DRU", "GOU", "LGA", "LTU", "MAT", "M5"],
+            "dam_type_id": ["Run-of-River", "Reservoir"],
+            "sensor_type_id": ["PIZ", "EXT", "PEN"],
+            "direction_id": ["NA", "X", "Y", "Z"],
+            "sensor_id": [],  # Will be populated dynamically if needed, or set in config
+        }
+    )
 
 
 class Embeddings(BaseModel):
@@ -76,10 +83,11 @@ class Initialization(BaseModel):
 
 
 class Model(BaseModel):
-    Sigma_v_bounds: tuple = (None, None)
+    Sigma_v_bounds: Tuple[Optional[float], Optional[float]] = (None, None)
     decaying_factor: float = 0.99
     device: str = "cuda"
-    hidden_sizes: List[int] = [40, 40]
+    cpu_threads: int = 1
+    hidden_sizes: List[int] = Field(default_factory=lambda: [40, 40])
     sequential_model: bool = False
     initialization: Initialization = Field(default_factory=Initialization)
 
@@ -110,7 +118,7 @@ class Evaluation(BaseModel):
 
 class LookbackSearch(BaseModel):
     enabled: bool = False
-    candidate_values: List[int] = []
+    candidate_values: List[int] = Field(default_factory=list)
     metric: str = "rmse"
     evaluate_best_on_test: bool = True
 
@@ -118,11 +126,11 @@ class LookbackSearch(BaseModel):
 class Config(BaseModel):
     seed: Optional[int] = None
     data: Data = Field(default_factory=Data)
-    embeddings: Optional[Embeddings] = None
-    model: Optional[Model] = None
-    training: Optional[Training] = None
+    embeddings: Embeddings = Field(default_factory=Embeddings)
+    model: Model = Field(default_factory=Model)
+    training: Training = Field(default_factory=Training)
     forecasting: Forecasting = Field(default_factory=Forecasting)
-    evaluation: Optional[Evaluation] = None
+    evaluation: Evaluation = Field(default_factory=Evaluation)
     lookback_search: LookbackSearch = Field(default_factory=LookbackSearch)
 
     @property
@@ -161,15 +169,11 @@ class Config(BaseModel):
     @property
     def use_mapped_embeddings(self) -> bool:
         """True if mapped embeddings are configured."""
-        if self.embeddings is None:
-            return False
         return self.embeddings.mapped.embedding_map_dir is not None
 
     @property
     def use_standard_embeddings(self) -> bool:
         """True if standard (one-per-series) embeddings are configured."""
-        if self.embeddings is None:
-            return False
         return (
             not self.use_mapped_embeddings
             and self.embeddings.standard.embedding_size is not None
@@ -179,8 +183,6 @@ class Config(BaseModel):
     @property
     def total_embedding_size(self) -> int:
         """Calculates the total embedding dimension based on configuration."""
-        if self.embeddings is None:
-            return 0
         if self.use_mapped_embeddings:
             return sum(self.embeddings.mapped.embedding_map_sizes.values())
         if self.use_standard_embeddings:
@@ -189,7 +191,7 @@ class Config(BaseModel):
 
     @property
     def sequential_model(self) -> bool:
-        return self.model is not None and self.model.sequential_model
+        return self.model.sequential_model
 
     @property
     def look_back_len(self) -> int:
@@ -240,17 +242,27 @@ class Config(BaseModel):
         """Loads configuration from a YAML file."""
         with open(path, "r") as f:
             config_dict = yaml.safe_load(f)
+        if config_dict is None:
+            config_dict = {}
         return cls(**config_dict)
 
-    def to_yaml(self, path: str):
+    def to_yaml(self, path: str, include_defaults: bool = False):
         """Saves configuration to a YAML file."""
+        payload = self.model_dump(
+            exclude_none=True,
+            exclude_defaults=not include_defaults,
+        )
         with open(path, "w") as f:
-            yaml.dump(self.model_dump(), f, default_flow_style=False)
+            yaml.dump(payload, f, default_flow_style=False, sort_keys=False)
 
-    def display(self):
+    def display(self, include_defaults: bool = False):
         """Displays the configuration."""
+        payload = self.model_dump(
+            exclude_none=True,
+            exclude_defaults=not include_defaults,
+        )
         print("\nConfiguration:")
-        print(yaml.dump(self.model_dump(), default_flow_style=False))
+        print(yaml.dump(payload, default_flow_style=False, sort_keys=False))
         print("\n")
 
     def wandb_dict(self) -> Dict[str, Any]:

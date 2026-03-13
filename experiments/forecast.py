@@ -118,6 +118,7 @@ def run_model(config, experiment_name: Optional[str] = None):
         use_AGVI=config.use_AGVI,
         seed=config.seed,
         device=config.model.device,
+        cpu_threads=config.model.cpu_threads,
         hidden_sizes=config.model.hidden_sizes,
         init_params=config.model.initialization.from_file,
         shift_biases=False,
