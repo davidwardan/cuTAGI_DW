@@ -178,7 +178,7 @@ def _run_lookback_trial_in_subprocess(
     if process.exitcode:
         raise RuntimeError(
             "Lookback trial failed "
-            f"(input_seq_len={trial_config.data.loader.input_seq_len}) "
+            f"(look_back_len={trial_config.look_back_len}) "
             f"with exit code {process.exitcode}."
         )
 
@@ -194,7 +194,7 @@ def optimize_lookback(
 
     candidate_values = list(dict.fromkeys(config.lookback_search.candidate_values))
     if not candidate_values:
-        candidate_values = [config.data.loader.input_seq_len]
+        candidate_values = [config.look_back_len]
 
     if any(value < 2 for value in candidate_values):
         raise ValueError("All lookback candidates must be >= 2.")
@@ -214,10 +214,10 @@ def optimize_lookback(
 
     for lookback in candidate_values:
         trial_config = config.model_copy(deep=True)
-        trial_config.data.loader.input_seq_len = int(lookback)
+        trial_config.data.loader.look_back_len = int(lookback)
         trial_experiment_name = f"{experiment_name}/lookback_{lookback}"
 
-        print(f"Running lookback search trial with input_seq_len={lookback}")
+        print(f"Running lookback search trial with look_back_len={lookback}")
         _run_lookback_trial_in_subprocess(
             ctx=ctx,
             trial_config=trial_config,
@@ -249,7 +249,7 @@ def optimize_lookback(
     results_df.to_csv(output_dir / "lookback_search_results.csv", index=False)
 
     best_config = config.model_copy(deep=True)
-    best_config.data.loader.input_seq_len = int(best_trial["lookback"])
+    best_config.data.loader.look_back_len = int(best_trial["lookback"])
     best_config.to_yaml(output_dir / "best_config.yaml")
 
     summary = {
@@ -364,7 +364,7 @@ def main(
                     summary = json.load(f)
 
                 best_config = config.model_copy(deep=True)
-                best_config.data.loader.input_seq_len = int(summary["best_lookback"])
+                best_config.data.loader.look_back_len = int(summary["best_lookback"])
                 base_script.eval_model(
                     best_config,
                     experiment_name=summary["best_experiment_name"],

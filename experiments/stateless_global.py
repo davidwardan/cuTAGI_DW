@@ -18,6 +18,7 @@ from experiments.utils import (
     prepare_data,
     build_model,
     prepare_input,
+    extract_target_history,
     plot_series,
     plot_embeddings,
     bhattacharyya_distance_matrix,
@@ -65,7 +66,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     train_data, val_data, test_data = prepare_data(
         x_file=config.x_file,
         date_file=config.date_file,
-        input_seq_len=config.data.loader.input_seq_len,
+        input_seq_len=config.window_len,
         carry_split_context=config.data.loader.carry_split_context,
         time_covariates=config.data.loader.time_covariates,
         covariate_window_mode=config.data.loader.covariate_window_mode,
@@ -188,7 +189,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
         # Initialize look-back buffer and LSTM state container
         look_back_buffer = LookBackBuffer(
-            input_seq_len=config.data.loader.input_seq_len,
+            input_seq_len=config.window_len,
             nb_ts=config.data.loader.nb_ts,
         )
 
@@ -344,11 +345,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             if any(
                 look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
             ):
+                initial_mu = extract_target_history(x, config.window_len)
                 look_back_buffer.initialize(
-                    initial_mu=x[:, : config.data.loader.input_seq_len],
-                    initial_var=np.zeros_like(
-                        x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                    ),
+                    initial_mu=initial_mu,
+                    initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                     indices=indices,
                 )
 
@@ -552,11 +552,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         if any(
             look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
         ):
+            initial_mu = extract_target_history(x, config.window_len)
             look_back_buffer.initialize(
-                initial_mu=x[:, : config.data.loader.input_seq_len],
-                initial_var=np.zeros_like(
-                    x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                ),
+                initial_mu=initial_mu,
+                initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                 indices=indices,
             )
 
@@ -1151,10 +1150,12 @@ def eval_model(
                             f"  Skipping category {category} in stitching (was not loaded)."
                         )
                         # Need to advance offset!
-                        current_offset += config.embedding_map_sizes[category]
+                        current_offset += config.embeddings.mapped.embedding_map_sizes[
+                            category
+                        ]
                         continue
 
-                    cat_size = config.embedding_map_sizes[category]
+                    cat_size = config.embeddings.mapped.embedding_map_sizes[category]
 
                     # Get indices from the ordered map
                     cat_indices = map_df_ordered[category].values
@@ -1212,14 +1213,14 @@ def eval_model(
                     # Plot PCA
                     plot_embeddings(
                         mu_stitched_start,
-                        config.data_loader.nb_ts,
+                        config.data.loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_start_stitched.svg",
                         labels=labels,
                     )
                     plot_embeddings(
                         mu_stitched_final,
-                        config.data_loader.nb_ts,
+                        config.data.loader.nb_ts,
                         input_dir,
                         "embeddings/embeddings_mu_pca_final_stitched.svg",
                         labels=labels,

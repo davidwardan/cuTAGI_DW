@@ -444,21 +444,30 @@ def build_model(
     seed,
     device,
     hidden_sizes=[40, 40, 40],
+    input_seq_len=1,
     init_params=None,
     shift_biases=False,
+    sequential_model=False,
 ):
     manual_seed(seed)
     layers = []
     current_input_size = input_size
-    for hidden_size in hidden_sizes:
-        layers.append(LSTM(current_input_size, hidden_size, 1))
-        current_input_size = hidden_size
+    if sequential_model:
+        for hidden_size in hidden_sizes:
+            layers.append(LSTM(current_input_size, hidden_size, input_seq_len))
+            current_input_size = hidden_size
+    else:
+        for hidden_size in hidden_sizes:
+            layers.append(LSTM(current_input_size, hidden_size, 1))
+            current_input_size = hidden_size
+
+    linear_input_size = current_input_size * input_seq_len if sequential_model else current_input_size
 
     if use_AGVI:
-        layers.append(Linear(current_input_size, 2))
+        layers.append(Linear(linear_input_size, 2))
         layers.append(EvenExp())
     else:
-        layers.append(Linear(current_input_size, 1))
+        layers.append(Linear(linear_input_size, 1))
 
     net = Sequential(*layers)
 
@@ -497,17 +506,19 @@ def prepare_input(
     look_back_var: Optional[np.ndarray],
     indices: np.ndarray,
     embeddings: Optional[np.ndarray] = None,
+    input_seq_len: Optional[int] = None,
+    sequential_model: bool = False,
 ):
     if var_x is None:
         var_x = np.zeros_like(x, dtype=np.float32)
 
     active_mask = indices >= 0
+    inferred_input_seq_len = input_seq_len
+    if inferred_input_seq_len is None and look_back_mu is not None:
+        inferred_input_seq_len = look_back_mu.shape[1]
+    target_positions = None
     if look_back_mu is not None:
-        input_seq_len = look_back_mu.shape[1]
-        target_positions = np.arange(input_seq_len)
-        if x.shape[1] > input_seq_len and x.shape[1] % input_seq_len == 0:
-            step_width = x.shape[1] // input_seq_len
-            target_positions = np.arange(0, input_seq_len * step_width, step_width)
+        target_positions = get_target_positions(x.shape[1], inferred_input_seq_len)
 
     if look_back_mu is not None:
         active_rows = np.where(active_mask)[0]
@@ -526,8 +537,23 @@ def prepare_input(
         embed_mu[~active_mask] = 0.0
         embed_var[~active_mask] = 0.0
 
-        x = np.concatenate((x, embed_mu), axis=1)
-        var_x = np.concatenate((var_x, embed_var), axis=1)
+        if sequential_model:
+            if inferred_input_seq_len is None:
+                raise ValueError(
+                    "input_seq_len must be provided when sequential_model=True."
+                )
+            step_width = x.shape[1] // inferred_input_seq_len
+            x = x.reshape(-1, inferred_input_seq_len, step_width)
+            var_x = var_x.reshape(-1, inferred_input_seq_len, step_width)
+            embed_mu = np.repeat(embed_mu[:, None, :], inferred_input_seq_len, axis=1)
+            embed_var = np.repeat(
+                embed_var[:, None, :], inferred_input_seq_len, axis=1
+            )
+            x = np.concatenate((x, embed_mu), axis=2).reshape(len(indices), -1)
+            var_x = np.concatenate((var_x, embed_var), axis=2).reshape(len(indices), -1)
+        else:
+            x = np.concatenate((x, embed_mu), axis=1)
+            var_x = np.concatenate((var_x, embed_var), axis=1)
 
     flat_x = x.astype(np.float32).reshape(-1)
     flat_var = var_x.astype(np.float32).reshape(-1)
@@ -539,6 +565,44 @@ def prepare_input(
     flat_var = np.clip(flat_var, a_min=1e-6, a_max=2.0)
 
     return flat_x, flat_var
+
+
+def get_target_positions(total_width: int, input_seq_len: int) -> np.ndarray:
+    if input_seq_len is None or input_seq_len <= 0:
+        raise ValueError("input_seq_len must be a positive integer.")
+    if total_width > input_seq_len and total_width % input_seq_len == 0:
+        step_width = total_width // input_seq_len
+        return np.arange(0, input_seq_len * step_width, step_width)
+    return np.arange(input_seq_len)
+
+
+def extract_target_history(x: np.ndarray, input_seq_len: int) -> np.ndarray:
+    return x[:, get_target_positions(x.shape[1], input_seq_len)]
+
+
+def extract_embedding_deltas(
+    mu_delta: np.ndarray,
+    var_delta: np.ndarray,
+    input_seq_len: int,
+    total_emb_size: int,
+    sequential_model: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    if total_emb_size <= 0:
+        return (
+            np.empty((mu_delta.shape[0], 0), dtype=np.float32),
+            np.empty((var_delta.shape[0], 0), dtype=np.float32),
+        )
+
+    if not sequential_model:
+        return mu_delta[:, -total_emb_size:], var_delta[:, -total_emb_size:]
+
+    step_width = mu_delta.shape[1] // input_seq_len
+    mu_steps = mu_delta.reshape(-1, input_seq_len, step_width)
+    var_steps = var_delta.reshape(-1, input_seq_len, step_width)
+    return (
+        mu_steps[:, :, -total_emb_size:].mean(axis=1),
+        var_steps[:, :, -total_emb_size:].mean(axis=1),
+    )
 
 
 # Define function to calculate updates

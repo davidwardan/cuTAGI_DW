@@ -316,7 +316,7 @@ class TimeSeriesDataBuilder:
                 covariate_window_mode=self.covariate_window_mode,
             )
 
-            series_ids = np.full((len(window_ids),), j, dtype=np.int32)
+            series_ids = np.full((len(window_ids),), series_idx, dtype=np.int32)
 
             rolled_per_ts.append(
                 (

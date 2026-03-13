@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from typing import Any, Optional
-import copy
 
 from experiments.wandb_helpers import (
+    log_model_parameters,
     init_run,
     log_data,
     finish_run,
@@ -18,6 +18,7 @@ from experiments.utils import (
     prepare_data,
     build_model,
     prepare_input,
+    extract_embedding_deltas,
     extract_target_history,
     plot_series,
     plot_embeddings,
@@ -26,9 +27,10 @@ from experiments.utils import (
     plot_similarity,
     calculate_updates,
     States,
+    EarlyStopping,
     LookBackBuffer,
-    LSTMStateContainer,
 )
+
 
 from pytagi import Normalizer as normalizer
 from pytagi import cuda
@@ -51,7 +53,7 @@ mpl.rcParams.update(
 )
 
 
-def run_model(config, experiment_name: Optional[str] = None):
+def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
     output_dir = f"out/{experiment_name}/"
@@ -119,8 +121,9 @@ def run_model(config, experiment_name: Optional[str] = None):
         seed=config.seed,
         device=config.model.device,
         hidden_sizes=config.model.hidden_sizes,
-        init_params=config.model.initialization.from_file,
+        input_seq_len=config.data.loader.input_seq_len,
         shift_biases=False,
+        sequential_model=config.model.sequential_model,
     )
 
     # Enable input state updates only if embeddings are being used
@@ -138,207 +141,398 @@ def run_model(config, experiment_name: Optional[str] = None):
         nb_ts=config.data.loader.nb_ts, total_time_steps=test_data.max_len
     )
 
+    # Create progress bar
+    pbar = tqdm(range(config.training.num_epochs), desc="Epochs")
+
+    # Initialize early stopping
+    early_stopping = EarlyStopping(
+        criteria=config.training.early_stopping_criteria,
+        patience=config.training.patience,
+        min_delta=config.training.min_delta,
+        warmup_epochs=config.training.warmup_epochs,
+    )
+
+    # Prepare decaying sigma_v if not using AGVI
+    if not config.use_AGVI:
+        sigma_start, sigma_end = config.model.Sigma_v_bounds
+        if sigma_start is None or sigma_end is None:
+            raise ValueError("Sigma_v_bounds must be defined when AGVI is disabled.")
+        sigma_start = float(sigma_start)
+        sigma_end = float(sigma_end)
+        if config.training.num_epochs <= 1:
+            decaying_sigma_v = [sigma_start]
+        else:
+            decay_factor = float(config.model.decaying_factor)
+            exponents = decay_factor ** np.arange(
+                config.training.num_epochs, dtype=np.float32
+            )
+            if np.isclose(exponents[0], exponents[-1]) or decay_factor <= 0.0:
+                weights = np.linspace(
+                    1.0, 0.0, config.training.num_epochs, dtype=np.float32
+                )
+            else:
+                weights = (exponents - exponents[-1]) / (exponents[0] - exponents[-1])
+            decaying_sigma_v = (
+                sigma_end + (sigma_start - sigma_end) * weights
+            ).tolist()
+
     # --- Training loop ---
-    train_batch_iter = BatchLoader.create_data_loader(
-        dataset=train_data.dataset,
-        order_mode=config.data.loader.order_mode,
-        batch_size=config.data.loader.batch_size,
-        shuffle=False,
-    )
+    for epoch in pbar:
+        net.train()
+        train_mse = []
+        train_log_lik = []
 
-    # Initialize look-back buffer and LSTM state container
-    look_back_buffer = LookBackBuffer(
-        input_seq_len=config.window_len,
-        nb_ts=config.data.loader.nb_ts,
-    )
+        epoch_seed = None if config.seed is None else int(config.seed) + int(epoch)
+        train_batch_iter = BatchLoader.create_data_loader(
+            dataset=train_data.dataset,
+            order_mode=config.data.loader.order_mode,
+            batch_size=config.data.loader.batch_size,
+            shuffle=config.training.shuffle,
+            seed=epoch_seed,
+        )
 
-    # Create layer_state_shapes dynamically based on config
-    layer_state_shapes = {i: size for i, size in enumerate(config.model.hidden_sizes)}
-    lstm_state_container = LSTMStateContainer(
-        num_series=config.data.loader.nb_ts, layer_state_shapes=layer_state_shapes
-    )
-    net.eval()
+        # Initialize look-back buffer and LSTM state container
+        look_back_buffer = LookBackBuffer(
+            input_seq_len=config.window_len,
+            nb_ts=config.data.loader.nb_ts,
+        )
 
-    for (x, y), ts_id, w_id in train_batch_iter:
+        # get current sigma_v if not using AGVI
+        if not config.use_AGVI:
+            sigma_v = decaying_sigma_v[epoch]
 
-        # get current batch size and indices
-        B = x.shape[0]
-        indices = ts_id
-        time_steps = w_id
+        # log current model parameters
+        if wandb_run is not None:
+            log_payload = log_model_parameters(
+                model=net,
+                epoch=epoch,
+                total_epochs=config.training.num_epochs,
+                logging_frequency=2,
+            )
 
-        # set LSTM states for the current batch
-        lstm_state_container.set_states_on_net(indices, net)
+        m_preds = []
+        std_preds = []
+        y_trues = []
 
-        # prepare look_back buffer
-        # Filter out padded indices (-1) before checking initialization status
-        valid_indices_for_init = [i for i in indices if i != -1]
-        if any(
-            look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
-        ):
-            initial_mu = extract_target_history(x, config.window_len)
-            look_back_buffer.initialize(
-                initial_mu=initial_mu,
-                initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+        for (x, y), ts_id, w_id in train_batch_iter:
+
+            # get current batch size and indices
+            B = x.shape[0]
+            indices = ts_id
+            time_steps = w_id
+
+            # prepare obsevation noise matrix
+            if not config.use_AGVI:
+                var_y = np.full(
+                    (B * len(config.data.loader.output_col),),
+                    sigma_v**2,
+                    dtype=np.float32,
+                )
+
+            # prepare input
+            x, var_x = prepare_input(
+                x=x,
+                var_x=None,
+                look_back_mu=None,
+                look_back_var=None,
+                indices=ts_id,
+                embeddings=embeddings,  # Pass the object directly
+                input_seq_len=config.data.loader.input_seq_len,
+                sequential_model=config.model.sequential_model,
+            )
+
+            # Feedforward
+            m_pred, v_pred = net(x, var_x)
+            # Specific to AGVI
+            if config.use_AGVI:
+                flat_m = np.ravel(m_pred)
+                flat_v = np.ravel(v_pred)
+
+                m_pred = flat_m[::2]  # even indices
+                v_pred = flat_v[::2]  # even indices
+                var_y = flat_m[1::2]  # odd indices var_v
+
+            s_pred_total = np.sqrt(v_pred + var_y)
+
+            # Compute metrics
+            mask = ~np.isnan(y.flatten())
+            y_masked = y.flatten()[mask]
+            m_pred_masked = m_pred[mask]
+            s_pred_masked = s_pred_total[mask]
+
+            m_preds.append(m_pred_masked)
+            std_preds.append(s_pred_masked)
+            y_trues.append(y_masked)
+
+            # Store predictions
+            train_states.update(
+                new_mu=m_pred.reshape(B, -1),
+                new_std=s_pred_total.reshape(B, -1),
+                indices=indices,
+                time_step=time_steps,
+            )
+
+            # Update
+            m_post, v_post = calculate_updates(
+                net,
+                output_updater,
+                m_pred,
+                v_pred,
+                y.flatten(),
+                use_AGVI=config.use_AGVI,
+                var_y=var_y,
+            )
+
+            # Update embeddings if used
+            if embeddings is not None:
+                mu_delta, var_delta = net.get_input_states()
+
+                mu_delta = mu_delta * var_x
+                var_delta = var_x * var_delta * var_x
+
+                mu_delta = mu_delta.reshape(B, -1)
+                var_delta = var_delta.reshape(B, -1)
+
+                # Get the slice corresponding to all embeddings
+                total_emb_size = config.total_embedding_size
+                mu_delta_slice, var_delta_slice = extract_embedding_deltas(
+                    mu_delta=mu_delta,
+                    var_delta=var_delta,
+                    input_seq_len=config.data.loader.input_seq_len,
+                    total_emb_size=total_emb_size,
+                    sequential_model=config.model.sequential_model,
+                )
+
+                # Update embeddings
+                embeddings.update(
+                    indices,
+                    mu_delta_slice,
+                    var_delta_slice,
+                )
+
+            # reset LSTM states
+            net.reset_lstm_states()
+
+        # End of epoch
+        train_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+        train_log_lik = metric.log_likelihood(
+            np.concatenate(m_preds), np.concatenate(y_trues), np.concatenate(std_preds)
+        )
+
+        # Validation
+        net.eval()
+        m_preds = []
+        std_preds = []
+        y_trues = []
+
+        # reset look-back buffer
+        look_back_buffer.reset()
+
+        val_batch_iter = BatchLoader.create_data_loader(
+            dataset=val_data.dataset,
+            order_mode="by_window",
+            batch_size=config.data.loader.batch_size,
+            shuffle=False,
+        )
+
+        for (x, y), ts_id, w_id in val_batch_iter:
+
+            # get current batch size and indices
+            B = x.shape[0]
+            indices = ts_id
+            time_steps = w_id
+
+            # prepare obsevation noise matrix
+            if not config.use_AGVI:
+                var_y = np.full(
+                    (B * len(config.data.loader.output_col),),
+                    sigma_v**2,
+                    dtype=np.float32,
+                )
+
+            # prepare look_back buffer
+            # Filter out padded indices (-1) before checking initialization status
+            valid_indices_for_init = [i for i in indices if i != -1]
+            if any(
+                look_back_buffer.needs_initialization[i] for i in valid_indices_for_init
+            ):
+                initial_mu = extract_target_history(x, config.window_len)
+                look_back_buffer.initialize(
+                    initial_mu=initial_mu,
+                    initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                    indices=indices,
+                )
+
+            # prepare input
+            x, var_x = prepare_input(
+                x=x,
+                var_x=None,
+                look_back_mu=(
+                    look_back_buffer.mu if config.forecasting.recursive_val else None
+                ),
+                look_back_var=(
+                    look_back_buffer.var if config.forecasting.recursive_val else None
+                ),
+                indices=indices,
+                embeddings=embeddings,  # Pass the object directly
+                input_seq_len=config.data.loader.input_seq_len,
+                sequential_model=config.model.sequential_model,
+            )
+
+            # Feedforward
+            m_pred, v_pred = net(x, var_x)
+
+            # Specific to AGVI
+            if config.use_AGVI:
+                flat_m = np.ravel(m_pred)
+                flat_v = np.ravel(v_pred)
+
+                m_pred = flat_m[::2]  # even indices
+                v_pred = flat_v[::2]  # even indices
+                var_y = flat_m[1::2]  # odd indices var_v
+
+            s_pred_total = np.sqrt(v_pred + var_y)
+
+            # Store metrics
+            mask = ~np.isnan(y.flatten())
+            y_masked = y.flatten()[mask]
+            m_pred_masked = m_pred[mask]
+            s_pred_masked = s_pred_total[mask]
+
+            m_preds.append(m_pred_masked)
+            std_preds.append(s_pred_masked)
+            y_trues.append(y_masked)
+
+            # Store predictions
+            val_states.update(
+                new_mu=m_pred.reshape(B, -1),
+                new_std=s_pred_total.reshape(B, -1),
+                indices=indices,
+                time_step=time_steps,
+            )
+
+            # Fake Update
+            m_post, v_post = calculate_updates(
+                net,
+                output_updater,
+                m_pred,
+                v_pred,
+                y.flatten(),
+                use_AGVI=config.use_AGVI,
+                var_y=var_y,
+                train_mode=False,  # Important to prevent actual parameter updates
+            )
+
+            # Where y is available use y otherwuse use m_pred
+            y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+
+            # Update look_back buffer
+            look_back_buffer.update(
+                new_mu=y_lookback.reshape(B, -1),
+                new_var=v_lookback.reshape(B, -1),
                 indices=indices,
             )
 
-        # prepare input
-        x, var_x = prepare_input(
-            x=x,
-            var_x=None,
-            look_back_mu=look_back_buffer.mu,
-            look_back_var=look_back_buffer.var,
-            indices=ts_id,
-            embeddings=(embeddings if config.total_embedding_size != 0 else None),
+            # reset LSTM states
+            net.reset_lstm_states()
+
+        # End of epoch
+        # Calculate micro metrics for early stopping
+        val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
+        val_log_lik = metric.log_likelihood(
+            np.concatenate(m_preds), np.concatenate(y_trues), np.concatenate(std_preds)
         )
 
-        # Feedforward
-        net.reset_lstm_states() # TODO
-        m_pred, v_pred = net(x, var_x)
-
-        # Specific to AGVI
-        if config.use_AGVI:
-            flat_m = np.ravel(m_pred)
-            flat_v = np.ravel(v_pred)
-
-            m_pred = flat_m[::2]  # even indices
-            v_pred = flat_v[::2]  # even indices
-            var_y = flat_m[1::2]  # odd indices var_v
-
-        s_pred_total = np.sqrt(v_pred + var_y)
-
-        # Store predictions
-        train_states.update(
-            new_mu=m_pred.reshape(B, -1),
-            new_std=s_pred_total.reshape(B, -1),
-            indices=indices,
-            time_step=time_steps,
+        # Update progress bar
+        pbar.set_postfix(
+            {
+                "Train RMSE": f"{train_mse:.4f}",
+                "Val RMSE": f"{val_mse:.4f}",
+                "Train LogLik": f"{train_log_lik:.4f}",
+                "Val LogLik": f"{val_log_lik:.4f}",
+                "Sigma_v": f"{sigma_v:.4f}" if not config.use_AGVI else "",
+            }
         )
 
-        # Update
-        m_post, v_post = calculate_updates(
+        if wandb_run:
+            # Log metrics
+            metrics_payload = {
+                "epoch": epoch,
+                "train_rmse": train_mse,
+                "train_log_lik": train_log_lik,
+                "val_rmse": val_mse,
+                "val_log_lik": val_log_lik,
+            }
+            if log_payload is None:
+                log_payload = metrics_payload
+            else:
+                log_payload.update(metrics_payload)
+            if not config.use_AGVI:
+                log_payload["sigma_v"] = sigma_v
+
+            # Send all logs for this epoch
+            log_data(log_payload, wandb_run=wandb_run)
+
+        # Check for early stopping
+        val_score = (
+            val_log_lik
+            if config.training.early_stopping_criteria == "loglik"
+            else val_mse
+        )
+        if early_stopping(
+            val_score,
             net,
-            output_updater,
-            m_pred,
-            v_pred,
-            y.flatten(),
-            use_AGVI=config.use_AGVI,
-            var_y=var_y,
-            train_mode=False,
-        )
+            look_back_buffer,
+            None,
+            train_states,
+            val_states,
+            sigma_v if not config.use_AGVI else None,
+            embeddings,  # Pass the object directly
+        ):
+            print(f"Early stopping at epoch {epoch+1}")
+            net.load_state_dict(early_stopping.best_state)
+            look_back_buffer = early_stopping.best_look_back_buffer
+            train_states = early_stopping.train_states
+            val_states = early_stopping.val_states
+            if not config.use_AGVI:
+                sigma_v = early_stopping.best_sigma_v
 
-        # Update embeddings if used
-        if embeddings is not None:
-            mu_delta, var_delta = net.get_input_states()
+            # Restore best embeddings
+            embeddings = early_stopping.best_embeddings
 
-            mu_delta = mu_delta * var_x
-            var_delta = var_x * var_delta * var_x
+            break
 
-            mu_delta = mu_delta.reshape(B, -1)
-            var_delta = var_delta.reshape(B, -1)
+    else:
+        # If loop finished without early stopping, load the best model found
+        if early_stopping.best_state is not None:
+            print("Training finished. Loading best model from early stopping tracker.")
+            net.load_state_dict(early_stopping.best_state)
+            look_back_buffer = early_stopping.best_look_back_buffer
+            train_states = early_stopping.train_states
+            val_states = early_stopping.val_states
+            if not config.use_AGVI:
+                sigma_v = early_stopping.best_sigma_v
 
-            # Get the slice corresponding to all embeddings
-            total_emb_size = config.total_embedding_size
-            mu_delta_slice = mu_delta[:, -total_emb_size:]
-            var_delta_slice = var_delta[:, -total_emb_size:]
+            # Restore best embeddings
+            embeddings = early_stopping.best_embeddings
 
-            # Update embeddings
-            embeddings.update(
-                indices,
-                mu_delta_slice,
-                var_delta_slice,
-            )
+    # Save best model
+    net.save(os.path.join(output_dir, "param/model.bin"))
 
-        # Update LSTM states for the current batch
-        lstm_state_container.update_states_from_net(indices, net)
-
-        # Where y is available use y otherwuse use m_pred
-        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
-
-        # Update look_back buffer
-        look_back_buffer.update(
-            new_mu=y_lookback.reshape(B, -1),
-            new_var=v_lookback.reshape(B, -1),
-            indices=indices,
-        )
-        net.reset_lstm_states()
-
-    # Validation
-    val_batch_iter = BatchLoader.create_data_loader(
-        dataset=val_data.dataset,
-        order_mode="by_window",
-        batch_size=config.data.loader.batch_size,
-        shuffle=False,
-    )
-
-    look_back_buffer_val = copy.deepcopy(look_back_buffer)
-
-    for (x, y), ts_id, w_id in val_batch_iter:
-
-        # get current batch size and indices
-        B = x.shape[0]
-        indices = ts_id
-        time_steps = w_id
-
-        # set LSTM states for the current batch
-        lstm_state_container.set_states_on_net(indices, net)
-
-        # prepare input
-        x, var_x = prepare_input(
-            x=x,
-            var_x=None,
-            look_back_mu=look_back_buffer_val.mu,
-            look_back_var=look_back_buffer_val.var,
-            indices=indices,
-            embeddings=(embeddings if config.total_embedding_size != 0 else None),
-        )
-
-        # Feedforward
-        net.reset_lstm_states() # TODO
-        m_pred, v_pred = net(x, var_x)
-
-        # Update LSTM states for the current batch
-        lstm_state_container.update_states_from_net(indices, net)
-
-        # Specific to AGVI
-        if config.use_AGVI:
-            flat_m = np.ravel(m_pred)
-            flat_v = np.ravel(v_pred)
-
-            m_pred = flat_m[::2]  # even indices
-            v_pred = flat_v[::2]  # even indices
-            var_y = flat_m[1::2]  # odd indices var_v
-
-        s_pred_total = np.sqrt(v_pred + var_y)
-
-        # Store predictions
-        val_states.update(
-            new_mu=m_pred.reshape(B, -1),
-            new_std=s_pred_total.reshape(B, -1),
-            indices=indices,
-            time_step=time_steps,
-        )
-
-        # Where y is available use y otherwuse use m_pred
-        y_lookback = np.where(np.isnan(y.flatten()), m_pred, y.flatten())
-        v_lookback = np.where(np.isnan(y.flatten()), v_pred, 0.0)
-
-        # Update look_back buffer
-        look_back_buffer.update(
-            new_mu=y_lookback.reshape(B, -1),
-            new_var=v_lookback.reshape(B, -1),
-            indices=indices,
-        )
-
-        look_back_buffer_val.update(
-            new_mu=m_pred.reshape(B, -1),
-            new_var=v_pred.reshape(B, -1),
-            indices=indices,
-        )
-        net.reset_lstm_states()
+    # Save best embeddings based on type
+    if embeddings is not None:
+        if config.use_mapped_embeddings:
+            embeddings.save(os.path.join(embedding_dir, "embeddings_final"))
+        elif config.use_standard_embeddings:
+            embeddings.save(os.path.join(embedding_dir, "embeddings_final.npz"))
 
     # --- Testing ---
+    net.eval()
+
+    # reset look-back buffer
+    look_back_buffer.reset()
+
     test_batch_iter = BatchLoader.create_data_loader(
         dataset=test_data.dataset,
         order_mode="by_window",
@@ -353,8 +547,11 @@ def run_model(config, experiment_name: Optional[str] = None):
         indices = ts_id
         time_steps = w_id
 
-        # set LSTM states for the current batch
-        lstm_state_container.set_states_on_net(indices, net)
+        # prepare obsevation noise matrix
+        if not config.use_AGVI:
+            var_y = np.full(
+                (B * len(config.data.loader.output_col),), sigma_v**2, dtype=np.float32
+            )
 
         # rolling window mechanism for traffic and electricity datasets
         if config.forecasting.rolling_window:
@@ -379,18 +576,20 @@ def run_model(config, experiment_name: Optional[str] = None):
         x, var_x = prepare_input(
             x=x,
             var_x=None,
-            look_back_mu=look_back_buffer.mu,
-            look_back_var=look_back_buffer.var,
+            look_back_mu=(
+                look_back_buffer.mu if config.forecasting.recursive_test else None
+            ),
+            look_back_var=(
+                look_back_buffer.var if config.forecasting.recursive_test else None
+            ),
             indices=indices,
-            embeddings=(embeddings if config.total_embedding_size != 0 else None),
+            embeddings=embeddings,  # Pass the object directly
+            input_seq_len=config.data.loader.input_seq_len,
+            sequential_model=config.model.sequential_model,
         )
 
         # Feedforward
-        net.reset_lstm_states() # TODO
         m_pred, v_pred = net(x, var_x)
-
-        # Update LSTM states for the current batch
-        lstm_state_container.update_states_from_net(indices, net)
 
         # Specific to AGVI
         if config.use_AGVI:
@@ -411,12 +610,30 @@ def run_model(config, experiment_name: Optional[str] = None):
             time_step=time_steps,
         )
 
+        # Fake Update
+        m_post, v_post = calculate_updates(
+            net,
+            output_updater,
+            m_pred,
+            v_pred,
+            y.flatten(),
+            use_AGVI=config.use_AGVI,
+            var_y=var_y,
+            train_mode=False,  # Important to prevent actual parameter updates
+        )
+
+        # Where y is available use y otherwuse use m_pred
+        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=m_pred.reshape(B, -1),
-            new_var=v_pred.reshape(B, -1),
+            new_mu=y_lookback.reshape(B, -1),
+            new_var=v_lookback.reshape(B, -1),
             indices=indices,
         )
+
+        # reset LSTM states
         net.reset_lstm_states()
 
     # Run over each time series and re_scale it
@@ -1060,9 +1277,9 @@ def eval_model(
                 )
 
 
-def main(Train=True, Eval=True):
+def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [11]
+    list_of_seeds = [42]
     list_of_experiments = ["train100"]
 
     # Iterate over experiments and seeds
@@ -1071,24 +1288,24 @@ def main(Train=True, Eval=True):
             print(f"Running experiment: {exp} with seed {seed}")
 
             # Model category
-            model_category = "global"
+            model_category = "sequential-global"
             embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}-shuffled_{embed_category}"
+            experiment_name = (
+                f"seed{seed}/{exp}/Shuffled_{model_category}_{embed_category}"
+            )
 
             # Load configuration
             config = Config.from_yaml(
-                f"out/seed{seed}/{exp}/experiment01_global-shuffled_no-embeddings/config.yaml"
+                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.model.initialization.from_file = f"out/seed{seed}/{exp}/experiment01_global-shuffled_no-embeddings/param/model.bin"
-            config.evaluation.eval_plots = True
-            config.data.loader.order_mode = "by_window"
+            config.data.loader.order_mode = "shuffled_filtered"  # forced
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
@@ -1097,13 +1314,34 @@ def main(Train=True, Eval=True):
             # Display config
             config.display()
 
+            if log_wandb:
+                # Initialize W&B run
+                run_id = f"{model_category}_{embed_category}_{exp}_seed{seed}".replace(
+                    " ", ""
+                )
+                run = init_run(
+                    project="tracking_weights_lstm",
+                    name=run_id,
+                    group=f"{model_category}_Seed{embed_category}",
+                    tags=["normal"],
+                    config=config_dict,
+                    reinit=True,
+                    save_code=True,
+                )
+            else:
+                run = None
+
             if Train:
                 # Train model
-                run_model(config, experiment_name=experiment_name)
+                train_model(config, experiment_name=experiment_name, wandb_run=run)
 
             if Eval:
                 # Evaluate model
-                eval_model(config, experiment_name=experiment_name)
+                eval_model(config, experiment_name=experiment_name, wandb_run=run)
+
+            # Finish the W&B run
+            if log_wandb:
+                finish_run(run)
 
 
 if __name__ == "__main__":

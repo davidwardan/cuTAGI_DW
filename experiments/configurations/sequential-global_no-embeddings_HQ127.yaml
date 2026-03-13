@@ -12,37 +12,36 @@ data:
     time_covariates:
     - week_of_year
     scale_method: standard
-    order_mode: by_window
-    input_seq_len: 1
-    look_back_len: 52
-    batch_size: 1
+    order_mode: shuffled
+    input_seq_len: 52
+    look_back_len: 1
+    batch_size: 16
     output_col:
     - 0
-    nb_ts: 127
     ts_to_use: []
+    nb_ts: 127
+    carry_split_context: true
+    covariate_window_mode: all_steps
 model:
   Sigma_v_bounds:
-  - null
-  - null
-  decaying_factor: 0.99
-  device: cpu
+  - 1
+  - 0.1
+  decaying_factor: 0.5
+  device: cuda
   hidden_sizes:
   - 40
   - 40
   - 40
-  initialization:
-    from_file: null
-    variance_inject: 0.0
-    variance_threshold: 1.0
-    variance_action: add
+  sequential_model: true
 training:
   num_epochs: 100
   early_stopping_criteria: rmse
   patience: 10
   min_delta: 0.0001
   warmup_epochs: 3
-  shuffle: false
+  shuffle: true
 evaluation:
   eval_plots: false
   eval_metrics: true
   seansonal_period: 52
+  embed_plots: false

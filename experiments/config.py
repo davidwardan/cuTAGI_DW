@@ -18,6 +18,7 @@ class DataLoader(BaseModel):
     covariate_window_mode: str = "last_step"
     scale_method: str = "standard"
     order_mode: str = "by_window"
+    look_back_len: Optional[int] = None
     input_seq_len: int = 52
     carry_split_context: bool = False
     batch_size: int = 16
@@ -79,6 +80,7 @@ class Model(BaseModel):
     decaying_factor: float = 0.99
     device: str = "cuda"
     hidden_sizes: List[int] = [40, 40]
+    sequential_model: bool = False
     initialization: Initialization = Field(default_factory=Initialization)
 
 
@@ -186,29 +188,51 @@ class Config(BaseModel):
         return 0  # No embeddings
 
     @property
+    def sequential_model(self) -> bool:
+        return self.model is not None and self.model.sequential_model
+
+    @property
+    def look_back_len(self) -> int:
+        """Effective look-back length for target history."""
+        if self.data.loader.look_back_len is None:
+            if self.sequential_model:
+                return 1
+            return self.data.loader.input_seq_len
+        return self.data.loader.look_back_len
+
+    @property
+    def window_len(self) -> int:
+        """Effective dataloader/history window length."""
+        if self.sequential_model:
+            return self.data.loader.input_seq_len
+        return self.look_back_len
+
+    @property
     def input_size(self) -> int:
         """Calculates the total input size for the model."""
-        covariate_window_mode = self.data.loader.covariate_window_mode.lower()
-        if covariate_window_mode == "all_steps":
-            base_size = self.data.loader.num_features * self.data.loader.input_seq_len
-        elif covariate_window_mode == "last_step":
-            base_size = self.data.loader.num_features + self.data.loader.input_seq_len - 1
-        else:
-            raise ValueError(
-                "data.loader.covariate_window_mode must be one of "
-                "{'last_step', 'all_steps'}."
-            )
-        return base_size + self.total_embedding_size
+        num_covariates = len(self.data.loader.time_covariates)
+        if self.sequential_model:
+            if self.data.loader.covariate_window_mode != "all_steps":
+                raise ValueError(
+                    "Sequential global models require covariate_window_mode='all_steps'."
+                )
+            if self.look_back_len != 1:
+                raise ValueError(
+                    "Sequential global models currently support only look_back_len=1."
+                )
+            return 1 + num_covariates + self.total_embedding_size
+
+        return self.look_back_len + num_covariates + self.total_embedding_size
 
     def split_target_offset(self, split: str) -> int:
         """Returns how many leading rows in a split are context-only."""
         split_name = split.lower()
         if split_name == "train":
-            return self.data.loader.input_seq_len
+            return self.window_len
         if split_name in {"val", "validation", "test"}:
             if self.data.loader.carry_split_context:
                 return 0
-            return self.data.loader.input_seq_len
+            return self.window_len
         raise ValueError(f"Unknown split '{split}'. Expected train, val, or test.")
 
     @classmethod

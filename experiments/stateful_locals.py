@@ -30,6 +30,7 @@ from experiments.utils import (
     adjust_params,
     prepare_data,
     prepare_input,
+    extract_target_history,
 )
 
 # Plotting defaults
@@ -74,7 +75,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         train_data, val_data, test_data = prepare_data(
             x_file=config.x_file,
             date_file=config.date_file,
-            input_seq_len=config.data.loader.input_seq_len,
+            input_seq_len=config.window_len,
             carry_split_context=config.data.loader.carry_split_context,
             time_covariates=config.data.loader.time_covariates,
             covariate_window_mode=config.data.loader.covariate_window_mode,
@@ -160,7 +161,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             # Initialize look-back buffer and LSTM state container
             look_back_buffer = LookBackBuffer(
-                input_seq_len=config.data.loader.input_seq_len, nb_ts=1
+                input_seq_len=config.window_len, nb_ts=1
             )
 
             # get current sigma_v if not using AGVI
@@ -186,11 +187,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
                 # prepare look_back buffer
                 if look_back_buffer.needs_initialization[0]:
+                    initial_mu = extract_target_history(x, config.window_len)
                     look_back_buffer.initialize(
-                        initial_mu=x[:, : config.data.loader.input_seq_len],
-                        initial_var=np.zeros_like(
-                            x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                        ),
+                        initial_mu=initial_mu,
+                        initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                         indices=[0],
                     )
 
@@ -303,11 +303,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
                 # prepare look_back buffer
                 if look_back_buffer_val.needs_initialization[0]:
+                    initial_mu = extract_target_history(x, config.window_len)
                     look_back_buffer_val.initialize(
-                        initial_mu=x[:, : config.data.loader.input_seq_len],
-                        initial_var=np.zeros_like(
-                            x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                        ),
+                        initial_mu=initial_mu,
+                        initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                         indices=[0],
                     )
 
@@ -512,11 +511,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             # prepare look_back buffer
             if look_back_buffer.needs_initialization[0]:
+                initial_mu = extract_target_history(x, config.window_len)
                 look_back_buffer.initialize(
-                    initial_mu=x[:, : config.data.loader.input_seq_len],
-                    initial_var=np.zeros_like(
-                        x[:, : config.data.loader.input_seq_len], dtype=np.float32
-                    ),
+                    initial_mu=initial_mu,
+                    initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                     indices=[0],
                 )
 

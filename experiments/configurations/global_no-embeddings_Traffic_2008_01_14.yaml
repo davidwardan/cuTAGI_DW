@@ -14,7 +14,8 @@ data:
     - day_of_week
     scale_method: None
     order_mode: by_window
-    input_seq_len: 24
+    input_seq_len: 1
+    look_back_len: 24
     batch_size: 8
     output_col:
     - 0

@@ -13,6 +13,7 @@ from experiments.utils import (
     LookBackBuffer,
     calculate_updates,
     prepare_input,
+    extract_target_history,
     adjust_params,
 )
 
@@ -147,9 +148,10 @@ def filter(net, output_updater, data, stateless: Optional[bool] = False):
 
         # prepare look_back buffer
         if look_back_buffer.needs_initialization[0]:
+            initial_mu = extract_target_history(x, input_seq_len)
             look_back_buffer.initialize(
-                initial_mu=x[:, :input_seq_len],
-                initial_var=np.zeros_like(x[:, :input_seq_len], dtype=np.float32),
+                initial_mu=initial_mu,
+                initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                 indices=[0],
             )
 

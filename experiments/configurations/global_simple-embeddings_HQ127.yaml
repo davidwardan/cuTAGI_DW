@@ -13,7 +13,8 @@ data:
     - week_of_year
     scale_method: standard
     order_mode: by_series_batch
-    input_seq_len: 52
+    input_seq_len: 1
+    look_back_len: 52
     batch_size: 16
     output_col:
     - 0
