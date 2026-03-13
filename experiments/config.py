@@ -15,6 +15,7 @@ class DataPaths(BaseModel):
 class DataLoader(BaseModel):
     num_features: int = 2
     time_covariates: List[str] = ["week_of_year"]
+    covariate_window_mode: str = "last_step"
     scale_method: str = "standard"
     order_mode: str = "by_window"
     input_seq_len: int = 52
@@ -187,7 +188,16 @@ class Config(BaseModel):
     @property
     def input_size(self) -> int:
         """Calculates the total input size for the model."""
-        base_size = self.data.loader.num_features + self.data.loader.input_seq_len - 1
+        covariate_window_mode = self.data.loader.covariate_window_mode.lower()
+        if covariate_window_mode == "all_steps":
+            base_size = self.data.loader.num_features * self.data.loader.input_seq_len
+        elif covariate_window_mode == "last_step":
+            base_size = self.data.loader.num_features + self.data.loader.input_seq_len - 1
+        else:
+            raise ValueError(
+                "data.loader.covariate_window_mode must be one of "
+                "{'last_step', 'all_steps'}."
+            )
         return base_size + self.total_embedding_size
 
     def split_target_offset(self, split: str) -> int:

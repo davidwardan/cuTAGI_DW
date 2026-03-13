@@ -383,6 +383,7 @@ def prepare_data(
     input_seq_len,
     carry_split_context,
     time_covariates,
+    covariate_window_mode,
     scale_method,
     order_mode,
     ts_to_use,
@@ -394,6 +395,7 @@ def prepare_data(
         output_seq_len=1,
         stride=1,
         time_covariates=time_covariates,
+        covariate_window_mode=covariate_window_mode,
         scale_method=scale_method,
         order_mode=order_mode,
         ts_to_use=ts_to_use,
@@ -408,6 +410,7 @@ def prepare_data(
         output_seq_len=1,
         stride=1,
         time_covariates=time_covariates,
+        covariate_window_mode=covariate_window_mode,
         scale_method=scale_method,
         x_mean=train_data.x_mean,
         x_std=train_data.x_std,
@@ -423,6 +426,7 @@ def prepare_data(
         output_seq_len=1,
         stride=1,
         time_covariates=time_covariates,
+        covariate_window_mode=covariate_window_mode,
         scale_method=scale_method,
         x_mean=train_data.x_mean,
         x_std=train_data.x_std,
@@ -500,11 +504,19 @@ def prepare_input(
     active_mask = indices >= 0
     if look_back_mu is not None:
         input_seq_len = look_back_mu.shape[1]
+        target_positions = np.arange(input_seq_len)
+        if x.shape[1] > input_seq_len and x.shape[1] % input_seq_len == 0:
+            step_width = x.shape[1] // input_seq_len
+            target_positions = np.arange(0, input_seq_len * step_width, step_width)
 
-        if look_back_mu is not None:
-            x[active_mask, :input_seq_len] = look_back_mu[indices[active_mask]]
-        if look_back_var is not None:
-            var_x[active_mask, :input_seq_len] = look_back_var[indices[active_mask]]
+    if look_back_mu is not None:
+        active_rows = np.where(active_mask)[0]
+        x[np.ix_(active_rows, target_positions)] = look_back_mu[indices[active_mask]]
+    if look_back_var is not None:
+        active_rows = np.where(active_mask)[0]
+        var_x[np.ix_(active_rows, target_positions)] = look_back_var[
+            indices[active_mask]
+        ]
 
     if embeddings is not None:
         lookup_indices = indices.copy()

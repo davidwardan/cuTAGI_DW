@@ -77,6 +77,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             input_seq_len=config.data.loader.input_seq_len,
             carry_split_context=config.data.loader.carry_split_context,
             time_covariates=config.data.loader.time_covariates,
+            covariate_window_mode=config.data.loader.covariate_window_mode,
             scale_method=config.data.loader.scale_method,
             order_mode=config.data.loader.order_mode,
             ts_to_use=[ts],

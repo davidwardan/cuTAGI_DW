@@ -26,6 +26,7 @@ class TimeSeriesDataBuilder:
         x_std: Optional[List[np.ndarray]] = None,  # List of stds, one array per series
         time_covariates: Optional[List[str]] = None,
         ts_to_use: Optional[List[int]] = None,
+        covariate_window_mode: str = "last_step",
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -41,6 +42,11 @@ class TimeSeriesDataBuilder:
         self.time_covariates = time_covariates or []
         self.ts_to_use = ts_to_use
         self.num_features = 1 + len(self.time_covariates)
+        self.covariate_window_mode = covariate_window_mode.lower()
+        if self.covariate_window_mode not in {"last_step", "all_steps"}:
+            raise ValueError(
+                "covariate_window_mode must be one of {'last_step', 'all_steps'}."
+            )
 
         # Metadata
         self.max_len = None
@@ -86,40 +92,59 @@ class TimeSeriesDataBuilder:
         input_seq_len: int,
         output_seq_len: int,
         stride: int,
+        covariate_window_mode: str = "last_step",
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         X: (T, F) with first column = (scaled) target, and remaining columns = time covariates.
-        Keeps time covariates only from the last timestep in each input window.
+        Builds input windows using either:
+        - 'last_step': all target steps plus covariates from the final input step.
+        - 'all_steps': flattened [x_t, cov_t] features for every step in the input window.
         """
         T, F = X.shape
         num_cov = F - 1
         min_len = input_seq_len + output_seq_len
+        if covariate_window_mode == "all_steps":
+            input_width = input_seq_len * F
+        else:
+            input_width = input_seq_len + num_cov
 
         if T < min_len:
             return (
-                np.empty((0, input_seq_len + num_cov), dtype=np.float32),
+                np.empty((0, input_width), dtype=np.float32),
                 np.empty((0, output_seq_len), dtype=np.float32),
                 np.empty((0,), dtype=np.int32),
             )
 
         n_win = 1 + (T - min_len) // stride
-        xw = np.zeros((n_win, input_seq_len + num_cov), dtype=np.float32)
+        xw = np.zeros((n_win, input_width), dtype=np.float32)
         yw = np.zeros((n_win, output_seq_len), dtype=np.float32)
         window_id = np.zeros(n_win, dtype=np.int32)
 
         for i in range(n_win):
             s = i * stride
-            x_slice = X[s : s + input_seq_len, 0]  # target only
-            cov_last = X[s + input_seq_len - 1, 1:] if num_cov > 0 else np.empty(0)
             y_slice = X[s + input_seq_len : s + input_seq_len + output_seq_len, 0]
-
-            xw[i, :input_seq_len] = x_slice
-            if num_cov > 0:
-                xw[i, input_seq_len:] = cov_last
+            if covariate_window_mode == "all_steps":
+                xw[i] = X[s : s + input_seq_len, :].reshape(-1)
+            else:
+                x_slice = X[s : s + input_seq_len, 0]  # target only
+                cov_last = X[s + input_seq_len - 1, 1:] if num_cov > 0 else np.empty(0)
+                xw[i, :input_seq_len] = x_slice
+                if num_cov > 0:
+                    xw[i, input_seq_len:] = cov_last
             yw[i] = y_slice
             window_id[i] = s  # index of the start of this window
 
         return xw, yw, window_id
+
+    def _window_input_size(self) -> int:
+        if self.covariate_window_mode == "all_steps":
+            return self.input_seq_len * self.num_features
+        return self.input_seq_len + self.num_features - 1
+
+    def _target_positions(self) -> np.ndarray:
+        if self.covariate_window_mode == "all_steps":
+            return np.arange(0, self.input_seq_len * self.num_features, self.num_features)
+        return np.arange(self.input_seq_len)
 
     def _time_covariates_from_datetime_column(
         self, dt_col: np.ndarray
@@ -288,6 +313,7 @@ class TimeSeriesDataBuilder:
                 input_seq_len=self.input_seq_len,
                 output_seq_len=self.output_seq_len,
                 stride=self.stride,
+                covariate_window_mode=self.covariate_window_mode,
             )
 
             series_ids = np.full((len(window_ids),), j, dtype=np.int32)
@@ -351,10 +377,7 @@ class TimeSeriesDataBuilder:
             if not xs:
                 return {
                     "value": (
-                        np.empty(
-                            (0, self.input_seq_len + self.num_features - 1),
-                            dtype=np.float32,
-                        ),
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
                         np.empty((0, self.output_seq_len), dtype=np.float32),
                     ),
                     "series_id": np.empty((0,), dtype=np.int32),
@@ -378,17 +401,14 @@ class TimeSeriesDataBuilder:
             if max(counts, default=0) == 0:
                 return {
                     "value": (
-                        np.empty(
-                            (0, self.input_seq_len + self.num_features - 1),
-                            dtype=np.float32,
-                        ),
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
                         np.empty((0, self.output_seq_len), dtype=np.float32),
                     ),
                     "series_id": np.empty((0,), dtype=np.int32),
                     "window_id": np.empty((0,), dtype=np.int32),
                 }
 
-            feat_x = self.input_seq_len + self.num_features - 1
+            feat_x = self._window_input_size()
             feat_y = self.output_seq_len
             total = sum(counts)
 
@@ -433,10 +453,7 @@ class TimeSeriesDataBuilder:
             if not xs:
                 return {
                     "value": (
-                        np.empty(
-                            (0, self.input_seq_len + self.num_features - 1),
-                            dtype=np.float32,
-                        ),
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
                         np.empty((0, self.output_seq_len), dtype=np.float32),
                     ),
                     "series_id": np.empty((0,), dtype=np.int32),
@@ -461,27 +478,7 @@ class TimeSeriesDataBuilder:
                 if len(yj) == 0:
                     continue
 
-                # Check for NaNs in the lookback portion of each window
-                # xj shape: (n_windows, input_seq_len + num_cov)
-                # We care about the target values in the lookback period
-                # The target is the first column if no covariates, or we might need to be careful
-                # xj stores [target, covariates...] per step
-                # Actually, based on _create_rolling_windows:
-                #    xw[i, :input_seq_len] = x_slice  <-- this is the target part
-                #    if num_cov > 0:
-                #        xw[i, input_seq_len:] = cov_last
-
-                # So the lookback part is distinct.
-                # Let's extract the lookback part for all windows in this series
-                lookback_part = xj[:, : self.input_seq_len]
-
-                # Count valid (non-NaN) values per window
-                # is_valid = ~np.isnan(lookback_part)
-                # valid_counts = np.sum(is_valid, axis=1)
-
-                # We want windows where > 50% of lookback is valid
-                # valid_counts > 0.5 * input_seq_len
-
+                lookback_part = xj[:, self._target_positions()]
                 valid_mask = np.sum(~np.isnan(lookback_part), axis=1) > (
                     0.5 * self.input_seq_len
                 )
@@ -498,10 +495,7 @@ class TimeSeriesDataBuilder:
                 print("Warning: No windows satisfied the filtered condition.")
                 return {
                     "value": (
-                        np.empty(
-                            (0, self.input_seq_len + self.num_features - 1),
-                            dtype=np.float32,
-                        ),
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
                         np.empty((0, self.output_seq_len), dtype=np.float32),
                     ),
                     "series_id": np.empty((0,), dtype=np.int32),
