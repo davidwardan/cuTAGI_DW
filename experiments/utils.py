@@ -1,0 +1,1438 @@
+import numpy as np
+
+from sklearn.decomposition import PCA
+from typing import Optional, Dict, Tuple
+import copy
+import networkx as nx
+
+from experiments.data_loader import (
+    TimeSeriesDataBuilder,
+)
+
+from typing import List
+
+# Plotting defaults
+import matplotlib.pyplot as plt
+
+from pytagi import manual_seed
+from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
+
+
+# --- Buffer Classes ---
+class LookBackBuffer:
+    """
+    A buffer to store the look-back mean and variance for multiple time series.
+    Args:
+        input_seq_len (int): The length of the input sequence to store.
+        nb_ts (int): The number of time series.
+    """
+
+    def __init__(self, input_seq_len, nb_ts):
+        self.mu = np.full((nb_ts, input_seq_len), np.nan, dtype=np.float32)
+        self.var = np.full((nb_ts, input_seq_len), 0.0, dtype=np.float32)
+        self.needs_initialization = [True for _ in range(nb_ts)]
+
+    def initialize(self, initial_mu, initial_var, indices):
+        for idx, mu, var in zip(indices, initial_mu, initial_var):
+            if self.needs_initialization[idx] and idx >= 0:
+                self.mu[idx] = np.nan_to_num(mu, nan=0.0)
+                self.var[idx] = np.nan_to_num(var, nan=0.0)
+                self.needs_initialization[idx] = False
+
+    def update(self, new_mu, new_var, indices):
+        # Check for negative indexes
+        indices = np.asarray(indices)
+        active_mask = indices >= 0
+        indices = indices[active_mask]
+        new_mu = new_mu[active_mask]
+        new_var = new_var[active_mask]
+
+        self.mu[indices] = np.roll(self.mu[indices], -1, axis=1)
+        self.var[indices] = np.roll(self.var[indices], -1, axis=1)
+
+        # Update the last column with new values
+        self.mu[indices, -1] = new_mu.ravel()
+        self.var[indices, -1] = new_var.ravel()
+
+    def reset(self):
+        nb_ts = self.mu.shape[0]
+        self.mu.fill(np.nan)
+        self.var.fill(0.0)
+        self.needs_initialization = [True for _ in range(nb_ts)]
+
+    def __call__(self, indices):
+        return self.mu[indices], self.var[indices]
+
+
+# LSTM State Container
+class LSTMStateContainer:
+    """
+    An optimized container for managing LSTM states using pre-allocated NumPy arrays.
+
+    This container stores the hidden and cell states (mean and variance) for all
+    time series across all LSTM layers in contiguous NumPy arrays. This avoids the
+    overhead of creating and managing dictionaries or lists for each series and
+    leverages vectorized operations for updating and retrieving batch states.
+
+    Args:
+        num_series (int): The total number of time series.
+        layer_state_shapes (dict): A dictionary mapping layer index to the shape
+                                   of its hidden state (e.g., {0: 40, 1: 40}).
+    """
+
+    def __init__(self, num_series: int, layer_state_shapes: dict):
+        self.num_series = num_series
+        self.layer_state_shapes = layer_state_shapes
+        self.states = {}
+
+        # Initialize NumPy arrays for each layer and state component
+        for layer_idx, state_dim in layer_state_shapes.items():
+            # Shape: (num_series, state_dim)
+            self.states[layer_idx] = {
+                "mu_h": np.zeros((num_series, state_dim), dtype=np.float32),
+                "var_h": np.zeros((num_series, state_dim), dtype=np.float32),
+                "mu_c": np.zeros((num_series, state_dim), dtype=np.float32),
+                "var_c": np.zeros((num_series, state_dim), dtype=np.float32),
+            }
+
+    def _unpack_net_states(self, net_states: dict, batch_size: int):
+        """Helper to unpack the flat state arrays from the network into a structured dict."""
+        try:
+            unpacked = {}
+            for layer_idx, (mu_h, var_h, mu_c, var_c) in net_states.items():
+                state_dim = self.layer_state_shapes[layer_idx]
+                # Reshape from flat array to (batch_size, state_dim)
+                unpacked[layer_idx] = {
+                    "mu_h": np.asarray(mu_h).reshape(batch_size, state_dim),
+                    "var_h": np.asarray(var_h).reshape(batch_size, state_dim),
+                    "mu_c": np.asarray(mu_c).reshape(batch_size, state_dim),
+                    "var_c": np.asarray(var_c).reshape(batch_size, state_dim),
+                }
+            return unpacked
+        except Exception as e:
+            raise ValueError(
+                f"Error unpacking network states: {e}. "
+                f"Check that the network states match expected shapes."
+                f"Layer idx: {layer_idx}, expected state dim: {state_dim}, "
+                f"batch size: {batch_size}"
+            ) from e
+
+    def _pack_for_net(self, batch_states: dict):
+        """Helper to pack a structured dict of states into the flat tuple format for the network."""
+        packed = {}
+        for layer_idx, states in batch_states.items():
+            packed[layer_idx] = (
+                states["mu_h"].flatten(),
+                states["var_h"].flatten(),
+                states["mu_c"].flatten(),
+                states["var_c"].flatten(),
+            )
+        return packed
+
+    def update_states_from_net(self, indices: np.ndarray, net):
+        """
+        Gets the latest states from the network for the given indices and
+        updates the internal storage using vectorized assignment.
+
+        Indices with a value of -1 are skipped.
+        """
+
+        valid_mask = indices != -1
+        valid_indices_to_update = indices[valid_mask]
+        if valid_indices_to_update.size == 0:
+            return
+
+        net_states = net.get_lstm_states()
+        batch_size = len(indices)
+
+        unpacked_states = self._unpack_net_states(net_states, batch_size)
+
+        # Vectorized update using advanced indexing
+        for layer_idx, components in unpacked_states.items():
+            self.states[layer_idx]["mu_h"][valid_indices_to_update] = components[
+                "mu_h"
+            ][valid_mask]
+            self.states[layer_idx]["var_h"][valid_indices_to_update] = components[
+                "var_h"
+            ][valid_mask]
+            self.states[layer_idx]["mu_c"][valid_indices_to_update] = components[
+                "mu_c"
+            ][valid_mask]
+            self.states[layer_idx]["var_c"][valid_indices_to_update] = components[
+                "var_c"
+            ][valid_mask]
+
+    def set_states_on_net(self, indices: np.ndarray, net):
+        """
+        Retrieves the stored states for the given indices and sets them on the network.
+
+        Indices with a value of -1 are sent as zero-states.
+        """
+
+        batch_size = len(indices)
+        if batch_size != 1:
+            valid_mask = indices != -1
+            valid_indices_to_read = indices[valid_mask]
+        else:
+            valid_mask = np.array([True], dtype=bool)
+            valid_indices_to_read = indices
+
+        batch_states = {}
+        for layer_idx, components in self.states.items():
+            state_dim = self.layer_state_shapes[layer_idx]
+
+            # 1. Create zero-filled arrays for the batch
+            batch_mu_h = np.zeros((batch_size, state_dim), dtype=np.float32)
+            batch_var_h = np.zeros((batch_size, state_dim), dtype=np.float32)
+            batch_mu_c = np.zeros((batch_size, state_dim), dtype=np.float32)
+            batch_var_c = np.zeros((batch_size, state_dim), dtype=np.float32)
+
+            # 2. Get the states from storage *only* for valid indices
+            source_mu_h = components["mu_h"][valid_indices_to_read]
+            source_var_h = components["var_h"][valid_indices_to_read]
+            source_mu_c = components["mu_c"][valid_indices_to_read]
+            source_var_c = components["var_c"][valid_indices_to_read]
+
+            # 3. Fill the batch arrays at the valid slots
+            batch_mu_h[valid_mask] = source_mu_h
+            batch_var_h[valid_mask] = source_var_h
+            batch_mu_c[valid_mask] = source_mu_c
+            batch_var_c[valid_mask] = source_var_c
+
+            # 4. Store the correctly constructed batch
+            batch_states[layer_idx] = {
+                "mu_h": batch_mu_h,
+                "var_h": batch_var_h,
+                "mu_c": batch_mu_c,
+                "var_c": batch_var_c,
+            }
+
+        packed_states = self._pack_for_net(batch_states)
+        net.set_lstm_states(packed_states)
+
+    def __call__(self, *args, **kwds):
+        pass
+
+    def get_statistics(self):
+        stats = {}
+        for layer_idx, components in self.states.items():
+            stats[layer_idx] = {
+                "mu_h_mean": np.mean(components["mu_h"]),
+                "var_h_mean": np.mean(components["var_h"]),
+                "mu_c_mean": np.mean(components["mu_c"]),
+                "var_c_mean": np.mean(components["var_c"]),
+            }
+        return stats
+
+    def reset_states(self):
+        for layer_idx, components in self.states.items():
+            components["mu_h"].fill(0.0)
+            components["var_h"].fill(0.0)
+            components["mu_c"].fill(0.0)
+            components["var_c"].fill(0.0)
+
+
+# --- Early Stopping Class ---
+class EarlyStopping:
+    def __init__(
+        self,
+        criteria="loglik",
+        patience=10,
+        min_delta=1e-4,
+        warmup_epochs=0,
+    ):
+        self.criteria = criteria
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_score = -np.inf if criteria == "loglik" else np.inf
+        self.counter = 0
+        self.best_state = None
+        self.best_look_back_buffer = None
+        self.best_lstm_state_container = None
+        self.train_states = None
+        self.val_states = None
+        self.best_sigma_v = None
+        self.best_embeddings = None
+        self.warmup_epochs = max(0, warmup_epochs)
+        self.epoch_count = 0
+
+    def _as_float(self, score):
+        score_array = np.asarray(score)
+        if score_array.size != 1:
+            raise ValueError(
+                f"Expected scalar score for early stopping, got shape {score_array.shape}"
+            )
+        return float(score_array.item())
+
+    def _is_improvement(self, current_score):
+        if not np.isfinite(current_score):
+            return False
+        if self.criteria == "loglik":
+            return current_score > self.best_score + self.min_delta
+        return current_score < self.best_score - self.min_delta
+
+    def _store_checkpoint(
+        self,
+        current_score,
+        model,
+        look_back_buffer,
+        lstm_state_container,
+        train_states,
+        val_states,
+        sigma_v,
+        embeddings,
+    ):
+        self.best_score = current_score
+        self.best_state = copy.deepcopy(model.state_dict())
+        self.best_look_back_buffer = copy.deepcopy(look_back_buffer)
+        self.best_lstm_state_container = copy.deepcopy(lstm_state_container)
+        self.train_states = copy.deepcopy(train_states)
+        self.val_states = copy.deepcopy(val_states)
+        self.best_sigma_v = sigma_v
+        self.best_embeddings = copy.deepcopy(embeddings)
+
+    def __call__(
+        self,
+        current_score,
+        model,
+        look_back_buffer,
+        lstm_state_container,
+        train_states,
+        val_states,
+        sigma_v,
+        embeddings,
+    ):
+        self.epoch_count += 1
+        current_score = self._as_float(current_score)
+        in_warmup = self.epoch_count <= self.warmup_epochs
+
+        if in_warmup:
+            return False  # Skip checkpointing during warmup
+
+        if self.best_state is None or self._is_improvement(current_score):
+            self._store_checkpoint(
+                current_score,
+                model,
+                look_back_buffer,
+                lstm_state_container,
+                train_states,
+                val_states,
+                sigma_v,
+                embeddings,
+            )
+            self.counter = 0
+            return False  # Not early stopping
+
+        self.counter += 1
+        if self.counter >= self.patience:
+            return True  # Early stopping
+        return False  # Not early stopping
+
+
+# --- States Class for plotting ---
+class States:
+    def __init__(self, nb_ts, total_time_steps):
+        """Initializes storage for mean and variance for time series states."""
+        self.mu = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
+        self.std = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
+
+    def update(self, new_mu, new_std, indices, time_step):
+        """
+        Efficiently updates states using vectorized NumPy indexing.
+
+        Args:
+            new_mu: Array of new mean values.
+            new_std: Array of new std values.
+            indices: Array of time series indices to update.
+            time_step: Array of time steps to update.
+        """
+        indices = np.asarray(indices)
+        valid_mask = indices >= 0
+
+        # Handle scalar time_step
+        if np.isscalar(time_step):
+            pass
+        else:
+            time_step = np.asarray(time_step)
+            time_step = time_step[valid_mask]
+
+        indices = indices[valid_mask]
+
+        # Handle new_mu / new_std if they match indices size
+        if not np.isscalar(new_mu) and len(new_mu) == len(valid_mask):
+            new_mu = new_mu[valid_mask]
+        if not np.isscalar(new_std) and len(new_std) == len(valid_mask):
+            new_std = new_std[valid_mask]
+
+        self.mu[indices, time_step] = new_mu.flatten()
+        self.std[indices, time_step] = new_std.flatten()
+
+    def __getitem__(self, idx):
+        """Allows retrieving a full time series' states via my_states[idx]."""
+        return self.mu[idx], self.std[idx]
+
+    def __setitem__(self, idx, value):
+        """Allows setting a full time series' states via my_states[idx] = (mu_array, var_array)."""
+        self.mu[idx], self.std[idx] = value
+
+
+# --- Helper functions ---
+def _pad_series_columns(
+    series_list: List[np.ndarray], fill_value, dtype
+) -> np.ndarray:
+    n_series = len(series_list)
+    max_len = max((len(s) for s in series_list), default=0)
+    out = np.full((max_len, n_series), fill_value, dtype=dtype)
+    for j, series in enumerate(series_list):
+        if len(series) > 0:
+            out[: len(series), j] = series
+    return out
+
+
+def _split_single_series(
+    x: np.ndarray,
+    dt: np.ndarray,
+    train_ratio: float,
+    val_ratio: float,
+    train_use_ratio: float,
+) -> Dict[str, np.ndarray]:
+    x_trim, dt_trim = TimeSeriesDataBuilder._trim_trailing_nans(x, dt)
+    n = len(x_trim)
+    if n == 0:
+        empty_x = np.array([], dtype=np.float32)
+        empty_dt = np.array([], dtype="datetime64[ns]")
+        return {
+            "train_x": empty_x,
+            "train_dt": empty_dt,
+            "full_train_x": empty_x,
+            "full_train_dt": empty_dt,
+            "val_x": empty_x,
+            "val_dt": empty_dt,
+            "test_x": empty_x,
+            "test_dt": empty_dt,
+        }
+
+    if n == 1:
+        n_train, n_val = 1, 0
+    elif n == 2:
+        n_train, n_val = 1, 0
+    else:
+        n_train = int(np.floor(n * train_ratio))
+        n_val = int(np.floor(n * val_ratio))
+
+        n_train = max(1, n_train)
+        n_val = max(1, n_val)
+
+        # Keep at least one point for test when enough total points exist.
+        if n_train + n_val >= n:
+            n_val = max(1, n - n_train - 1)
+        if n_train + n_val >= n:
+            n_train = max(1, n - n_val - 1)
+        if n_train + n_val >= n:
+            n_train, n_val = max(1, n - 2), 1
+
+    n_test = max(0, n - n_train - n_val)
+
+    train_end = n_train
+    val_end = n_train + n_val
+
+    full_train_x = x_trim[:train_end]
+    full_train_dt = dt_trim[:train_end]
+    n_train_used = int(np.floor(len(full_train_x) * train_use_ratio))
+    if len(full_train_x) > 0:
+        n_train_used = min(len(full_train_x), max(1, n_train_used))
+    # Keep the most recent training segment (closest to validation)
+    # so train->validation continuity is preserved when subsampling.
+    train_x = full_train_x[-n_train_used:]
+    train_dt = full_train_dt[-n_train_used:]
+
+    return {
+        "train_x": train_x,
+        "train_dt": train_dt,
+        "full_train_x": full_train_x,
+        "full_train_dt": full_train_dt,
+        "val_x": x_trim[train_end:val_end],
+        "val_dt": dt_trim[train_end:val_end],
+        "test_x": x_trim[val_end : val_end + n_test],
+        "test_dt": dt_trim[val_end : val_end + n_test],
+    }
+
+
+def split_full_dataset(
+    x_full_file: str,
+    date_full_file: str,
+    input_seq_len: int,
+    carry_split_context: bool,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.1,
+    train_use_ratio: float = 1.0,
+    ts_to_use: Optional[List[int]] = None,
+) -> Dict[str, np.ndarray]:
+    if train_ratio <= 0.0 or val_ratio < 0.0 or train_ratio + val_ratio >= 1.0:
+        raise ValueError(
+            "split ratios must satisfy: train_ratio > 0, val_ratio >= 0, and train_ratio + val_ratio < 1."
+        )
+    if train_use_ratio <= 0.0 or train_use_ratio > 1.0:
+        raise ValueError("train_use_ratio must be in the interval (0, 1].")
+
+    X_all = TimeSeriesDataBuilder._load_data_from_csv(x_full_file, col_to_use=ts_to_use)
+    DT_all = TimeSeriesDataBuilder._load_data_from_csv(
+        date_full_file, col_to_use=ts_to_use
+    )
+
+    if X_all.ndim == 1:
+        X_all = X_all.reshape(-1, 1)
+    if DT_all.ndim == 1:
+        DT_all = DT_all.reshape(-1, 1)
+
+    if DT_all.shape[1] == 1 and X_all.shape[1] > 1:
+        DT_all = np.tile(DT_all.reshape(-1, 1), (1, X_all.shape[1]))
+
+    if X_all.shape != DT_all.shape:
+        raise ValueError(
+            f"Full values and datetime files must have the same shape. Got {X_all.shape} vs {DT_all.shape}."
+        )
+
+    n_series = X_all.shape[1]
+
+    train_x_cols, train_dt_cols = [], []
+    val_x_cols, val_dt_cols = [], []
+    test_x_cols, test_dt_cols = [], []
+    val_truth_cols, test_truth_cols = [], []
+
+    for j in range(n_series):
+        split = _split_single_series(
+            X_all[:, j],
+            DT_all[:, j],
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            train_use_ratio=train_use_ratio,
+        )
+
+        train_x = split["train_x"]
+        train_dt = split["train_dt"]
+        full_train_x = split["full_train_x"]
+        full_train_dt = split["full_train_dt"]
+        val_core_x = split["val_x"]
+        val_core_dt = split["val_dt"]
+        test_core_x = split["test_x"]
+        test_core_dt = split["test_dt"]
+
+        if carry_split_context:
+            # Context continuity uses full pre-validation history, even when
+            # training is truncated from the head.
+            val_ctx = full_train_x[-min(input_seq_len, len(full_train_x)) :]
+            val_ctx_dt = full_train_dt[-min(input_seq_len, len(full_train_dt)) :]
+            val_x = np.concatenate([val_ctx, val_core_x], axis=0)
+            val_dt = np.concatenate([val_ctx_dt, val_core_dt], axis=0)
+
+            prior_x = np.concatenate([full_train_x, val_core_x], axis=0)
+            prior_dt = np.concatenate([full_train_dt, val_core_dt], axis=0)
+            test_ctx = prior_x[-min(input_seq_len, len(prior_x)) :]
+            test_ctx_dt = prior_dt[-min(input_seq_len, len(prior_dt)) :]
+            test_x = np.concatenate([test_ctx, test_core_x], axis=0)
+            test_dt = np.concatenate([test_ctx_dt, test_core_dt], axis=0)
+        else:
+            val_x, val_dt = val_core_x, val_core_dt
+            test_x, test_dt = test_core_x, test_core_dt
+
+        train_x_cols.append(train_x.astype(np.float32))
+        train_dt_cols.append(np.asarray(train_dt, dtype="datetime64[ns]"))
+        val_x_cols.append(val_x.astype(np.float32))
+        val_dt_cols.append(np.asarray(val_dt, dtype="datetime64[ns]"))
+        test_x_cols.append(test_x.astype(np.float32))
+        test_dt_cols.append(np.asarray(test_dt, dtype="datetime64[ns]"))
+        val_truth_cols.append(val_core_x.astype(np.float32))
+        test_truth_cols.append(test_core_x.astype(np.float32))
+
+    return {
+        "train_x": _pad_series_columns(train_x_cols, np.nan, np.float32),
+        "train_dt": _pad_series_columns(train_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "val_x": _pad_series_columns(val_x_cols, np.nan, np.float32),
+        "val_dt": _pad_series_columns(val_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "test_x": _pad_series_columns(test_x_cols, np.nan, np.float32),
+        "test_dt": _pad_series_columns(test_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "truth_train_x": _pad_series_columns(train_x_cols, np.nan, np.float32),
+        "truth_val_x": _pad_series_columns(val_truth_cols, np.nan, np.float32),
+        "truth_test_x": _pad_series_columns(test_truth_cols, np.nan, np.float32),
+    }
+
+
+def load_true_split_arrays(
+    x_file: List[str],
+    ts_to_use: List[int],
+    full_x_file: Optional[str] = None,
+    full_date_file: Optional[str] = None,
+    input_seq_len: Optional[int] = None,
+    carry_split_context: bool = False,
+    split_train_ratio: float = 0.7,
+    split_val_ratio: float = 0.1,
+    train_use_ratio: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if full_x_file is not None and full_date_file is not None:
+        if input_seq_len is None:
+            raise ValueError("input_seq_len must be provided when loading from full data.")
+        split = split_full_dataset(
+            x_full_file=full_x_file,
+            date_full_file=full_date_file,
+            input_seq_len=input_seq_len,
+            carry_split_context=carry_split_context,
+            train_ratio=split_train_ratio,
+            val_ratio=split_val_ratio,
+            train_use_ratio=train_use_ratio,
+            ts_to_use=ts_to_use,
+        )
+        return split["truth_train_x"], split["truth_val_x"], split["truth_test_x"]
+
+    true_train = TimeSeriesDataBuilder._load_data_from_csv(x_file[0], col_to_use=ts_to_use)
+    true_val = TimeSeriesDataBuilder._load_data_from_csv(x_file[1], col_to_use=ts_to_use)
+    true_test = TimeSeriesDataBuilder._load_data_from_csv(x_file[2], col_to_use=ts_to_use)
+    return true_train, true_val, true_test
+
+
+def prepare_data(
+    x_file,
+    date_file,
+    input_seq_len,
+    carry_split_context,
+    time_covariates,
+    covariate_window_mode,
+    scale_method,
+    order_mode,
+    ts_to_use,
+    full_x_file: Optional[str] = None,
+    full_date_file: Optional[str] = None,
+    split_train_ratio: float = 0.7,
+    split_val_ratio: float = 0.1,
+    train_use_ratio: float = 1.0,
+):
+    if full_x_file is not None or full_date_file is not None:
+        if full_x_file is None or full_date_file is None:
+            raise ValueError(
+                "full_x_file and full_date_file must be provided together when using full dataset splitting."
+            )
+
+        split = split_full_dataset(
+            x_full_file=full_x_file,
+            date_full_file=full_date_file,
+            input_seq_len=input_seq_len,
+            carry_split_context=carry_split_context,
+            train_ratio=split_train_ratio,
+            val_ratio=split_val_ratio,
+            train_use_ratio=train_use_ratio,
+            ts_to_use=ts_to_use,
+        )
+
+        train_data = TimeSeriesDataBuilder(
+            x_file=None,
+            date_time_file=None,
+            x_array=split["train_x"],
+            date_time_array=split["train_dt"],
+            input_seq_len=input_seq_len,
+            output_seq_len=1,
+            stride=1,
+            time_covariates=time_covariates,
+            covariate_window_mode=covariate_window_mode,
+            scale_method=scale_method,
+            order_mode=order_mode,
+            ts_to_use=ts_to_use,
+        )
+
+        val_data = TimeSeriesDataBuilder(
+            x_file=None,
+            date_time_file=None,
+            x_array=split["val_x"],
+            date_time_array=split["val_dt"],
+            input_seq_len=input_seq_len,
+            output_seq_len=1,
+            stride=1,
+            time_covariates=time_covariates,
+            covariate_window_mode=covariate_window_mode,
+            scale_method=scale_method,
+            x_mean=train_data.x_mean,
+            x_std=train_data.x_std,
+            order_mode="by_window",
+            ts_to_use=ts_to_use,
+        )
+
+        test_data = TimeSeriesDataBuilder(
+            x_file=None,
+            date_time_file=None,
+            x_array=split["test_x"],
+            date_time_array=split["test_dt"],
+            input_seq_len=input_seq_len,
+            output_seq_len=1,
+            stride=1,
+            time_covariates=time_covariates,
+            covariate_window_mode=covariate_window_mode,
+            scale_method=scale_method,
+            x_mean=train_data.x_mean,
+            x_std=train_data.x_std,
+            order_mode="by_window",
+            ts_to_use=ts_to_use,
+        )
+        return train_data, val_data, test_data
+
+    train_data = TimeSeriesDataBuilder(
+        x_file=x_file[0],
+        date_time_file=date_file[0],
+        input_seq_len=input_seq_len,
+        output_seq_len=1,
+        stride=1,
+        time_covariates=time_covariates,
+        covariate_window_mode=covariate_window_mode,
+        scale_method=scale_method,
+        order_mode=order_mode,
+        ts_to_use=ts_to_use,
+    )
+
+    val_data = TimeSeriesDataBuilder(
+        x_file=x_file[1],
+        date_time_file=date_file[1],
+        history_x_file=x_file[0] if carry_split_context else None,
+        history_date_time_file=date_file[0] if carry_split_context else None,
+        input_seq_len=input_seq_len,
+        output_seq_len=1,
+        stride=1,
+        time_covariates=time_covariates,
+        covariate_window_mode=covariate_window_mode,
+        scale_method=scale_method,
+        x_mean=train_data.x_mean,
+        x_std=train_data.x_std,
+        order_mode="by_window",
+        ts_to_use=ts_to_use,
+    )
+    test_data = TimeSeriesDataBuilder(
+        x_file=x_file[2],
+        date_time_file=date_file[2],
+        history_x_files=([x_file[0], x_file[1]] if carry_split_context else None),
+        history_date_time_files=(
+            [date_file[0], date_file[1]] if carry_split_context else None
+        ),
+        input_seq_len=input_seq_len,
+        output_seq_len=1,
+        stride=1,
+        time_covariates=time_covariates,
+        covariate_window_mode=covariate_window_mode,
+        scale_method=scale_method,
+        x_mean=train_data.x_mean,
+        x_std=train_data.x_std,
+        order_mode="by_window",
+        ts_to_use=ts_to_use,
+    )
+
+    return train_data, val_data, test_data
+
+
+# Define model
+def build_model(
+    input_size,
+    use_AGVI,
+    seed,
+    device,
+    hidden_sizes=[40, 40, 40],
+    input_seq_len=1,
+    init_params=None,
+    shift_biases=False,
+    sequential_model=False,
+    cpu_threads: Optional[int] = None,
+):
+    manual_seed(seed)
+    layers = []
+    current_input_size = input_size
+    if sequential_model:
+        for hidden_size in hidden_sizes:
+            layers.append(LSTM(current_input_size, hidden_size, input_seq_len))
+            current_input_size = hidden_size
+    else:
+        for hidden_size in hidden_sizes:
+            layers.append(LSTM(current_input_size, hidden_size, 1))
+            current_input_size = hidden_size
+
+    linear_input_size = current_input_size * input_seq_len if sequential_model else current_input_size
+
+    if use_AGVI:
+        layers.append(Linear(linear_input_size, 2))
+        layers.append(EvenExp())
+    else:
+        layers.append(Linear(linear_input_size, 1))
+
+    net = Sequential(*layers)
+
+    # shift LSTM biases
+    if shift_biases:
+        state_dict = net.state_dict()
+        for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+            if layer_name.split(".")[0].lower() == "lstm":
+                mu_b = np.array(mu_b, dtype=np.float32)
+
+                # option 1: shift only the bias for the forget gate which is the first quarter
+                gate_size = len(mu_b) // 4
+                mu_b[:gate_size] += 1.0
+
+                # option2: shift all biases by constant
+                # mu_b += 2.0
+
+                state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+        net.load_state_dict(state_dict)
+
+    if init_params is not None:
+        # reset_param_variance(net, init_params)
+        net.load(init_params)
+    if device == "cpu":
+        if cpu_threads is not None:
+            if int(cpu_threads) <= 0:
+                raise ValueError("cpu_threads must be a positive integer when provided.")
+            net.set_threads(int(cpu_threads))
+    elif device == "cuda":
+        net.to_device("cuda")
+    out_updater = OutputUpdater(net.device)
+    return net, out_updater
+
+
+def prepare_input(
+    x,
+    var_x: Optional[np.ndarray],
+    look_back_mu: Optional[np.ndarray],
+    look_back_var: Optional[np.ndarray],
+    indices: np.ndarray,
+    embeddings: Optional[np.ndarray] = None,
+    input_seq_len: Optional[int] = None,
+    sequential_model: bool = False,
+):
+    if var_x is None:
+        var_x = np.zeros_like(x, dtype=np.float32)
+
+    active_mask = indices >= 0
+    inferred_input_seq_len = input_seq_len
+    if inferred_input_seq_len is None and look_back_mu is not None:
+        inferred_input_seq_len = look_back_mu.shape[1]
+    target_positions = None
+    if look_back_mu is not None:
+        target_positions = get_target_positions(x.shape[1], inferred_input_seq_len)
+
+    if look_back_mu is not None:
+        active_rows = np.where(active_mask)[0]
+        x[np.ix_(active_rows, target_positions)] = look_back_mu[indices[active_mask]]
+    if look_back_var is not None:
+        active_rows = np.where(active_mask)[0]
+        var_x[np.ix_(active_rows, target_positions)] = look_back_var[
+            indices[active_mask]
+        ]
+
+    if embeddings is not None:
+        lookup_indices = indices.copy()
+        lookup_indices[lookup_indices == -1] = 0
+        embed_mu, embed_var = embeddings(lookup_indices)  # shape: (B, E)
+
+        embed_mu[~active_mask] = 0.0
+        embed_var[~active_mask] = 0.0
+
+        if sequential_model:
+            if inferred_input_seq_len is None:
+                raise ValueError(
+                    "input_seq_len must be provided when sequential_model=True."
+                )
+            step_width = x.shape[1] // inferred_input_seq_len
+            x = x.reshape(-1, inferred_input_seq_len, step_width)
+            var_x = var_x.reshape(-1, inferred_input_seq_len, step_width)
+            embed_mu = np.repeat(embed_mu[:, None, :], inferred_input_seq_len, axis=1)
+            embed_var = np.repeat(
+                embed_var[:, None, :], inferred_input_seq_len, axis=1
+            )
+            x = np.concatenate((x, embed_mu), axis=2).reshape(len(indices), -1)
+            var_x = np.concatenate((var_x, embed_var), axis=2).reshape(len(indices), -1)
+        else:
+            x = np.concatenate((x, embed_mu), axis=1)
+            var_x = np.concatenate((var_x, embed_var), axis=1)
+
+    flat_x = x.astype(np.float32).reshape(-1)
+    flat_var = var_x.astype(np.float32).reshape(-1)
+
+    np.nan_to_num(flat_x, copy=False, nan=0.0)
+    np.nan_to_num(flat_var, copy=False, nan=0.0)
+
+    # clip variance
+    flat_var = np.clip(flat_var, a_min=1e-6, a_max=2.0)
+
+    return flat_x, flat_var
+
+
+def get_target_positions(total_width: int, input_seq_len: int) -> np.ndarray:
+    if input_seq_len is None or input_seq_len <= 0:
+        raise ValueError("input_seq_len must be a positive integer.")
+    if total_width > input_seq_len and total_width % input_seq_len == 0:
+        step_width = total_width // input_seq_len
+        return np.arange(0, input_seq_len * step_width, step_width)
+    return np.arange(input_seq_len)
+
+
+def extract_target_history(x: np.ndarray, input_seq_len: int) -> np.ndarray:
+    return x[:, get_target_positions(x.shape[1], input_seq_len)]
+
+
+def extract_embedding_deltas(
+    mu_delta: np.ndarray,
+    var_delta: np.ndarray,
+    input_seq_len: int,
+    total_emb_size: int,
+    sequential_model: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    if total_emb_size <= 0:
+        return (
+            np.empty((mu_delta.shape[0], 0), dtype=np.float32),
+            np.empty((var_delta.shape[0], 0), dtype=np.float32),
+        )
+
+    if not sequential_model:
+        return mu_delta[:, -total_emb_size:], var_delta[:, -total_emb_size:]
+
+    step_width = mu_delta.shape[1] // input_seq_len
+    mu_steps = mu_delta.reshape(-1, input_seq_len, step_width)
+    var_steps = var_delta.reshape(-1, input_seq_len, step_width)
+    return (
+        mu_steps[:, :, -total_emb_size:].mean(axis=1),
+        var_steps[:, :, -total_emb_size:].mean(axis=1),
+    )
+
+
+# Define function to calculate updates
+def calculate_updates(
+    net,
+    out_updater,
+    m_pred,
+    v_pred,
+    y,
+    use_AGVI,
+    var_y=None,
+    train_mode=True,
+    overfit_mu=False,
+):
+    """
+    Calculates the posterior mean and variance (Kalman update) for the
+    output predictions.
+    """
+    # calculate updates
+    if train_mode:
+        if use_AGVI:
+            # Update output layer
+            out_updater.update_heteros(
+                output_states=net.output_z_buffer,
+                mu_obs=y,
+                delta_states=net.input_delta_z_buffer,
+            )
+        elif not use_AGVI and var_y is not None:
+            out_updater.update(
+                output_states=net.output_z_buffer,
+                mu_obs=y,
+                var_obs=var_y,
+                delta_states=net.input_delta_z_buffer,
+            )
+        else:
+            raise ValueError("var_y must be provided when not using AGVI")
+
+        # Backward + step
+        net.backward()
+        net.step()
+
+    # manually update states on python API
+    nan_indices = np.isnan(y)
+    has_nan = bool(np.any(nan_indices))
+    if has_nan:
+        y = np.array(y, copy=True)
+        var_y = np.array(var_y, copy=True)
+        np.copyto(y, m_pred, where=nan_indices)
+        np.copyto(var_y, 0.0, where=nan_indices)
+
+    # kalman update
+    K = v_pred / (v_pred + var_y)  # Kalman gain
+    v_post = (1.0 - K) * v_pred  # posterior variance
+    if overfit_mu:
+        m_post = m_pred + (v_pred / (v_pred + 1e-4)) * (y - m_pred)  # posterior mean
+    else:
+        m_post = m_pred + K * (y - m_pred)  # posterior mean
+    if has_nan:
+        np.copyto(v_post, v_pred, where=nan_indices)
+
+    # clip v_post to avoid numerical issues
+    v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
+
+    return m_post, v_post
+
+
+def update_aleatoric_uncertainty(
+    mu_z0: np.ndarray,
+    var_z0: np.ndarray,
+    mu_v2bar: np.ndarray,
+    var_v2bar: np.ndarray,
+    y: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Updates the aleatoric uncertainty (v2bar) using a Kalman filter
+    on the moments of the output distribution.
+    """
+
+    eps = 1e-8  # Cap for numerical stability
+    max_val = 1e6  # Cap values at 1 million
+    max_val_sq = 1e12  # Cap squared values
+
+    # Clean ALL inputs
+    mu_z0 = np.nan_to_num(mu_z0, posinf=max_val, neginf=-max_val)
+    var_z0 = np.nan_to_num(var_z0, nan=eps, posinf=max_val)  # Use eps for variance
+    mu_v2bar = np.nan_to_num(mu_v2bar, posinf=max_val, neginf=-max_val)
+    var_v2bar = np.nan_to_num(
+        var_v2bar, nan=eps, posinf=max_val
+    )  # Use eps for variance
+
+    # y may contain NaNs
+    valid_indices = ~np.isnan(y)
+
+    # Initialize posterior arrays as copies of the priors
+    mu_v2bar_posterior = mu_v2bar.copy()
+    var_v2bar_posterior = var_v2bar.copy()
+
+    # If all y values are NaN, no update is possible.
+    if not np.any(valid_indices):
+        return (
+            mu_v2bar_posterior,
+            var_v2bar_posterior,
+        )
+
+    # Filter all inputs to only include the data for valid (non-NaN) indices.
+    y_valid = y[valid_indices]
+    y_valid = np.nan_to_num(y_valid, posinf=max_val, neginf=-max_val)
+
+    mu_z0_valid = mu_z0[valid_indices]
+    var_z0_valid = var_z0[valid_indices]
+    mu_v2bar_valid = mu_v2bar[valid_indices]
+    var_v2bar_valid = var_v2bar[valid_indices]
+
+    # --- Kalman Filter on H ---
+
+    # Define Prior Moments for V, Y, H on valid data
+    mu_v = np.zeros_like(mu_v2bar_valid)
+
+    # Clip prior variance to be positive
+    var_v = np.clip(
+        mu_v2bar_valid, a_min=eps, a_max=None
+    )  # Prior aleatoric uncertainty
+
+    mu_y = mu_z0_valid + mu_v
+
+    # Clip prior variance components to be positive
+    var_z0_valid_clipped = np.clip(var_z0_valid, a_min=eps, a_max=None)
+    var_v_clipped = np.clip(var_v, a_min=eps, a_max=None)
+    var_y = var_z0_valid_clipped + var_v_clipped
+
+    mu_h = np.stack([mu_z0_valid, mu_v], axis=1)
+
+    cov_h = np.zeros((len(mu_z0_valid), 2, 2), dtype=np.float64)
+    cov_h[:, 0, 0] = var_z0_valid_clipped
+    cov_h[:, 1, 1] = var_v_clipped
+
+    cov_hy = np.stack([var_z0_valid_clipped, var_v_clipped], axis=1)
+
+    # Clip denominator for Kalman gain
+    stabilized_var_y = np.clip(var_y, eps, 5.0)  # Using 5.0 as a reasonable max
+
+    kalman_gain_h = np.divide(
+        cov_hy,
+        stabilized_var_y[:, np.newaxis],
+        out=np.zeros_like(cov_hy),
+        where=stabilized_var_y[:, np.newaxis] > eps,  # Use > eps
+    )
+
+    # Clean gain just in case
+    kalman_gain_h = np.nan_to_num(kalman_gain_h, nan=0.0, posinf=0.0, neginf=0.0)
+
+    mu_h_posterior = mu_h + kalman_gain_h * (y_valid - mu_y)[:, np.newaxis]
+    cov_h_posterior = cov_h - np.einsum("bi,bj->bij", kalman_gain_h, cov_hy)
+
+    # Enforce symmetry
+    cov_h_posterior_transposed = np.transpose(cov_h_posterior, (0, 2, 1))
+    cov_h_posterior = 0.5 * (cov_h_posterior + cov_h_posterior_transposed)
+
+    # Add diagonal jitter to ensure positive definiteness
+    num_hidden = cov_h_posterior.shape[1]
+    jitter = 1e-6
+    cov_h_posterior = cov_h_posterior + jitter * np.eye(num_hidden)[np.newaxis, :, :]
+
+    # --- Moment Matching for V^2 ---
+
+    mu_v_posterior = mu_h_posterior[:, 1]
+    # Clip mu_v_posterior to prevent overflow when squared
+    mu_v_posterior = np.clip(mu_v_posterior, -max_val, max_val)
+
+    var_v_posterior = cov_h_posterior[:, 1, 1]
+
+    # Clip posterior variance to be positive and prevent overflow
+    var_v_posterior = np.clip(var_v_posterior, eps, max_val_sq)
+
+    # Calculate Posterior Moments for V^2 on valid data
+    mu_v2_posterior = mu_v_posterior**2 + var_v_posterior
+    var_v2_posterior = 2 * (var_v_posterior**2) + 4 * var_v_posterior * (
+        mu_v_posterior**2
+    )
+    # Clip resulting variance
+    var_v2_posterior = np.clip(var_v2_posterior, eps, max_val_sq)
+
+    # Calculate Prior Moments for V^2 and Gain 'k' on valid data
+    mu_v2_prior = mu_v2bar_valid
+    var_v2_prior_unclipped = 3.0 * var_v2bar_valid + 2.0 * (mu_v2bar_valid**2)
+
+    # Clip prior variance (with max)
+    var_v2_prior = np.clip(var_v2_prior_unclipped, eps, max_val_sq)
+
+    # 1. Clean inputs (though they should be clean from the top, this is safer)
+    safe_var_v2bar_valid = np.nan_to_num(var_v2bar_valid, nan=eps, posinf=max_val)
+    safe_var_v2_prior = np.nan_to_num(var_v2_prior, nan=eps, posinf=max_val_sq)
+
+    # 2. Stabilize denominator
+    stabilized_var_v2_prior = np.clip(safe_var_v2_prior, a_min=eps, a_max=None)
+
+    # 3. This division is now safe
+    k = safe_var_v2bar_valid / stabilized_var_v2_prior
+
+    # Clean and clip gain k
+    k = np.nan_to_num(k, nan=0.0, posinf=0.0, neginf=0.0)
+    k = np.clip(k, 0.0, 1.0)  # Gain should be between 0 and 1
+
+    # Update V2bar to get its Posterior Moments on valid data
+    mu_v2bar_posterior_valid = mu_v2bar_valid + k * (mu_v2_posterior - mu_v2_prior)
+    var_v2bar_posterior_valid = var_v2bar_valid + k**2 * (
+        var_v2_posterior - var_v2_prior
+    )
+
+    # Clip final posterior variance
+    var_v2bar_posterior_valid = np.clip(var_v2bar_posterior_valid, eps, max_val_sq)
+
+    # Place the calculated posterior values
+    mu_v2bar_posterior[valid_indices] = mu_v2bar_posterior_valid
+    var_v2bar_posterior[valid_indices] = var_v2bar_posterior_valid
+
+    # Final check
+    mu_v2bar_posterior = np.nan_to_num(
+        mu_v2bar_posterior, posinf=max_val, neginf=-max_val
+    )
+    var_v2bar_posterior = np.nan_to_num(var_v2bar_posterior, nan=eps, posinf=max_val_sq)
+
+    return (
+        mu_v2bar_posterior,
+        var_v2bar_posterior,
+    )
+
+
+# --- Uncertainty Injection Function ---
+def adjust_params(net, mode="add", value=1e-2, threshold=5e-4, which_layer=None):
+    """
+    Adjusts the variances of weights and biases in the network's state dictionary.
+
+    For each layer (or specified layers), if a variance value is below the given threshold,
+    either adds or sets it to the specified value depending on the mode.
+
+    Args:
+        net: The neural network whose parameters will be modified.
+        mode (str): "add" to increment variances, "set" to assign the value directly.
+        value (float): The value to add or set for the variances.
+        threshold (float): Variances below this value will be adjusted.
+        which_layer (list or None): List of layer names to adjust. If None, all layers are adjusted.
+
+    Returns:
+        None. The network's parameters are updated in-place.
+    """
+
+    state_dict = net.state_dict()
+    for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+        if which_layer is None or layer_name in which_layer:
+            if mode.lower() == "add":
+                var_w = [x + value if x < threshold else x for x in var_w]
+                var_b = [x + value if x < threshold else x for x in var_b]
+            elif mode.lower() == "set":
+                var_w = [value if x < threshold else x for x in var_w]
+                var_b = [value if x < threshold else x for x in var_b]
+            state_dict[layer_name] = (mu_w, var_w, mu_b, var_b)
+    net.load_state_dict(state_dict)
+
+
+def reset_param_variance(net, param_dir):
+    """
+    Reset the variances on `net` while loading the means from `param_to_load`.
+    """
+    variance_dict = net.state_dict()
+    net.load(param_dir)
+    mean_dict = net.state_dict()
+
+    new_state_dict = {}
+    for layer_name, (_, var_w, _, var_b) in variance_dict.items():
+        if layer_name not in mean_dict:
+            raise KeyError(f"Layer '{layer_name}' not found in source state_dict.")
+        mu_w, _, mu_b, _ = mean_dict[layer_name]
+
+        new_state_dict[layer_name] = (
+            np.array(mu_w, copy=True),
+            np.array(var_w, copy=True),
+            np.array(mu_b, copy=True),
+            np.array(var_b, copy=True),
+        )
+
+    net.load_state_dict(new_state_dict)
+
+
+# Similarity / Distance Matrices
+def cosine_similarity_matrix(emb: np.ndarray) -> np.ndarray:
+    if emb.shape[1] == 1:
+        return np.ones((emb.shape[0], emb.shape[0]), dtype=np.float32)
+    emb = np.asarray(emb, dtype=np.float32)
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    normalized = emb / norms
+    return normalized @ normalized.T
+
+
+def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray:
+    if mu.shape[1] == 1:
+        return np.zeros((mu.shape[0], mu.shape[0]), dtype=np.float32)
+    mu = np.asarray(mu, dtype=np.float32)
+    var = np.asarray(var, dtype=np.float32)
+    if mu.shape != var.shape:
+        raise ValueError("mu and var must share the same shape")
+
+    eps = np.float32(1e-12)
+    var = np.maximum(var, eps)
+
+    mu_i = mu[:, None, :]
+    mu_j = mu[None, :, :]
+    var_i = var[:, None, :]
+    var_j = var[None, :, :]
+    sigma = 0.5 * (var_i + var_j)
+    sigma = np.maximum(sigma, eps)
+
+    diff = mu_i - mu_j
+    term1 = 0.125 * np.sum(diff * diff / sigma, axis=-1)
+
+    log_sigma = np.log(sigma)
+    log_var_i = np.log(var_i)
+    log_var_j = np.log(var_j)
+    term2 = 0.5 * np.sum(log_sigma - 0.5 * (log_var_i + log_var_j), axis=-1)
+
+    dist = term1 + term2
+    np.fill_diagonal(dist, 0.0)
+    return dist
+
+
+# --- Eval Helper Functions ---
+def plot_series(
+    ts_idx, y_true, y_pred, s_pred, out_dir, val_test_indices=None, std_factor=1
+):
+    """Plot truth, prediction, and std_factor band for a single series."""
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    yt = y_true
+    yp = y_pred if y_pred is not None else None
+    sp = s_pred if s_pred is not None else None
+    x = np.arange(len(yt))
+
+    plt.figure(figsize=(10, 3))
+    plt.plot(x, yt, label=r"$y_{true}$", color="red")
+    if yp is not None:
+        plt.plot(x, yp, label=r"$\mathbb{E}[Y']$", color="blue")
+    if sp is not None and yp is not None:
+        lower = yp - std_factor * sp
+        upper = yp + std_factor * sp
+        plt.fill_between(
+            x,
+            lower,
+            upper,
+            color="blue",
+            alpha=0.3,
+            label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(std_factor),
+        )
+
+    # Shade validation and test regions
+    if val_test_indices is not None:
+        val_start, test_start = val_test_indices
+        end_time = len(yt)
+        if val_start < test_start:
+            plt.axvspan(
+                val_start,
+                test_start - 1,
+                color="green",
+                alpha=0.15,
+                label="Validation",
+                linewidth=0,
+            )
+        if test_start < end_time:
+            plt.axvspan(
+                test_start,
+                end_time,
+                color="purple",
+                alpha=0.15,
+                label="Test",
+                linewidth=0,
+            )
+
+    plt.xlabel("Time Index")
+    plt.ylabel("Value")
+    plt.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.15),
+        ncol=5,
+        frameon=False,
+    )
+    out_path = out_dir / f"series_{ts_idx:03d}.svg"
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+
+
+def plot_embeddings(mu_embedding, n_series, in_dir, out_path, labels=None):
+    if mu_embedding.shape[1] < 2:
+        n_series = mu_embedding.shape[0]
+        values = mu_embedding[:, 0]
+
+        # We get the indices that would sort the array
+        sorted_indices = np.argsort(values)
+        sorted_values = values[sorted_indices]
+
+        # Prepare sorted labels
+        if labels is not None:
+            sorted_labels = np.array(labels)[sorted_indices]
+        else:
+            sorted_labels = [str(i) for i in sorted_indices]
+        # Y positions for each series
+        y_pos = np.arange(n_series)
+
+        # Calculate dynamic height
+        dynamic_height = max(4, n_series * 0.25)
+        plt.figure(figsize=(6, dynamic_height))
+
+        plt.hlines(y=y_pos, xmin=0, xmax=sorted_values, color="skyblue", alpha=0.7)
+        plt.plot(sorted_values, y_pos, "o", color="blue", alpha=0.9)
+        plt.yticks(y_pos, sorted_labels)
+        plt.xlabel("Embedding Value")
+        plt.title("Ranked 1D Embeddings")
+        plt.grid(True, axis="x", linestyle="--", alpha=0.5)
+        plt.axvline(0, color="grey", linewidth=0.8)
+
+        emb_plot_path = in_dir / out_path
+        plt.savefig(emb_plot_path, bbox_inches="tight")
+        plt.close()
+        return
+    pca = PCA(n_components=2)
+    mu_emb_2d = pca.fit_transform(mu_embedding)
+
+    # plot embeddings
+    plt.figure(figsize=(8, 6))
+    plt.scatter(mu_emb_2d[:, 0], mu_emb_2d[:, 1], c="blue", alpha=0.7)
+    if labels is not None:
+        for i, label in enumerate(labels):
+            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], label)
+    else:
+        for i in range(n_series):
+            plt.text(mu_emb_2d[i, 0], mu_emb_2d[i, 1], str(i))
+    plt.xlabel("Principal Component 1")
+    plt.ylabel("Principal Component 2")
+    plt.grid(True, alpha=0.3)
+    emb_plot_path = in_dir / out_path
+    plt.savefig(emb_plot_path, bbox_inches="tight")
+    plt.close()
+
+
+def plot_similarity(
+    sim_matrix: np.ndarray,
+    out_path,
+    title: str,
+    labels: Optional[List[str]] = None,
+    *,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+) -> None:
+    sim_matrix = np.asarray(sim_matrix, dtype=np.float32)
+    if sim_matrix.ndim != 2 or sim_matrix.shape[0] != sim_matrix.shape[1]:
+        raise ValueError("sim_matrix must be a square 2D array")
+
+    # Order rows/cols by aggregate similarity to highlight structure.
+    score = np.sum(sim_matrix, axis=1)
+    order = np.argsort(-score)
+    ordered = sim_matrix[order][:, order]
+
+    if labels is not None:
+        if len(labels) != sim_matrix.shape[0]:
+            raise ValueError("labels must have the same length as sim_matrix size")
+        ordered_labels = [str(labels[idx]) for idx in order]
+    else:
+        ordered_labels = [str(idx) for idx in order]
+
+    num_series = ordered.shape[0]
+    width = max(8.0, min(num_series * 0.4, 24.0))
+    height = max(6.0, min(num_series * 0.4, 24.0))
+    plt.figure(figsize=(width, height))
+    heatmap = plt.imshow(
+        ordered,
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+        interpolation="nearest",
+    )
+    plt.title(f"{title} (sorted by similarity)")
+    plt.xlabel("Entity/Series Index")  # Generic label
+    plt.ylabel("Entity/Series Index")  # Generic label
+
+    if num_series > 0:
+        tick_positions = np.arange(num_series, dtype=int)
+        rotation = 45 if num_series <= 20 else 90
+        fontsize = 8 if num_series <= 30 else max(4, 12 - num_series // 10)
+        plt.xticks(
+            tick_positions,
+            ordered_labels,
+            rotation=rotation,
+            ha="right",
+            fontsize=fontsize,
+        )
+        plt.yticks(tick_positions, ordered_labels, fontsize=fontsize)
+
+    plt.colorbar(heatmap, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()
+
+
+def plot_similarity_graph(
+    sim_matrix: np.ndarray,
+    out_path,
+    threshold=0.8,
+    title="Time Series Similarity Graph",
+):
+    sim = np.asarray(sim_matrix, dtype=float)
+    n = sim.shape[0]
+    assert sim.shape[0] == sim.shape[1], "sim_matrix must be square"
+
+    # Build graph
+    G = nx.Graph()
+    G.add_nodes_from(range(n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            val = sim[i, j]
+            if np.isfinite(val) and val >= threshold:
+                G.add_edge(i, j, weight=float(val))
+
+    if G.number_of_edges() == 0:
+        print(f"No edges at threshold {threshold}. Try lowering it.")
+        return
+
+    # Layout
+    pos = nx.spring_layout(G, seed=42, k=0.4)
+
+    # Get edges + widths safely
+    edges_with_data = list(G.edges(data=True))
+    edgelist = [(u, v) for (u, v, _) in edges_with_data]
+    widths = [max(0.5, d.get("weight", 0.0) * 2.0) for (_, _, d) in edges_with_data]
+
+    plt.figure(figsize=(10, 8))
+    nx.draw_networkx_nodes(G, pos, node_color="skyblue", node_size=300, alpha=0.9)
+    nx.draw_networkx_edges(G, pos, edgelist=edgelist, width=widths, alpha=0.6)
+    nx.draw_networkx_labels(G, pos, font_size=14)
+    plt.title(f"{title}\n(Edges ≥ {threshold})", fontsize=16)
+    plt.axis("off")
+    plt.savefig(out_path, bbox_inches="tight")
+    plt.close()

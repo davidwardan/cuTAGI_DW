@@ -1,0 +1,927 @@
+from typing import Generator, Optional, Tuple, List, Dict
+import numpy as np
+import pandas as pd
+
+from pytagi import Normalizer
+
+import warnings
+from matplotlib import pyplot as plt
+
+
+class TimeSeriesDataBuilder:
+    def __init__(
+        self,
+        x_file: Optional[str],
+        date_time_file: Optional[str],
+        input_seq_len: int,
+        output_seq_len: int,
+        stride: int,
+        x_array: Optional[np.ndarray] = None,
+        date_time_array: Optional[np.ndarray] = None,
+        history_x_file: Optional[str] = None,
+        history_date_time_file: Optional[str] = None,
+        history_x_files: Optional[List[str]] = None,
+        history_date_time_files: Optional[List[str]] = None,
+        order_mode: str = "by_window",
+        scale_method: Optional[str] = None,
+        x_mean: Optional[
+            List[np.ndarray]
+        ] = None,  # List of means, one array per series
+        x_std: Optional[List[np.ndarray]] = None,  # List of stds, one array per series
+        time_covariates: Optional[List[str]] = None,
+        ts_to_use: Optional[List[int]] = None,
+        covariate_window_mode: str = "last_step",
+    ) -> None:
+        self.x_file = x_file
+        self.date_time_file = date_time_file
+        self.x_array = x_array
+        self.date_time_array = date_time_array
+        self.history_x_file = history_x_file
+        self.history_date_time_file = history_date_time_file
+        self.history_x_files = history_x_files
+        self.history_date_time_files = history_date_time_files
+        self.input_seq_len = input_seq_len
+        self.output_seq_len = output_seq_len
+        self.stride = stride
+        self.order_mode = order_mode
+        self.scale_method = scale_method
+        self.x_mean = x_mean
+        self.x_std = x_std
+        self.time_covariates = time_covariates or []
+        self.ts_to_use = ts_to_use
+        self.num_features = 1 + len(self.time_covariates)
+        self.covariate_window_mode = covariate_window_mode.lower()
+        if self.covariate_window_mode not in {"last_step", "all_steps"}:
+            raise ValueError(
+                "covariate_window_mode must be one of {'last_step', 'all_steps'}."
+            )
+
+        # Metadata
+        self.max_len = None
+
+        # processed outputs
+        self.dataset = self._process_all()
+
+    # --- Data Processing Helpers ---
+    @staticmethod
+    def _load_data_from_csv(
+        data_file: str, col_to_use: Optional[List[int]] = None
+    ) -> np.ndarray:
+        """Load CSV -> 2D numpy (T, N). Skips the first row (header)."""
+        try:
+            df = pd.read_csv(
+                data_file, skiprows=1, delimiter=",", header=None, usecols=col_to_use
+            )
+        except:
+            df = pd.read_csv(data_file, skiprows=1, delimiter=",", header=None)
+
+        return df.values
+
+    @staticmethod
+    def _trim_trailing_nans(
+        x: np.ndarray, dt: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Trim padded trailing NaNs in the *target* series, keep the same cut for datetime."""
+        if len(x) == 0:
+            return x, dt
+        valid = ~np.isnan(x)
+        if not np.any(valid):
+            return np.array([], dtype=np.float32), np.array([], dtype="datetime64[ns]")
+        last = np.where(valid)[0][-1]
+        x = x[: last + 1]
+        dt = dt[: last + 1]
+        if not np.issubdtype(dt.dtype, np.datetime64):
+            dt = np.array(dt, dtype="datetime64[ns]")
+        return x.astype(np.float32), dt
+
+    @staticmethod
+    def _create_rolling_windows(
+        X: np.ndarray,
+        input_seq_len: int,
+        output_seq_len: int,
+        stride: int,
+        covariate_window_mode: str = "last_step",
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        X: (T, F) with first column = (scaled) target, and remaining columns = time covariates.
+        Builds input windows using either:
+        - 'last_step': all target steps plus covariates from the final input step.
+        - 'all_steps': flattened [x_t, cov_t] features for every step in the input window.
+        """
+        T, F = X.shape
+        num_cov = F - 1
+        min_len = input_seq_len + output_seq_len
+        if covariate_window_mode == "all_steps":
+            input_width = input_seq_len * F
+        else:
+            input_width = input_seq_len + num_cov
+
+        if T < min_len:
+            return (
+                np.empty((0, input_width), dtype=np.float32),
+                np.empty((0, output_seq_len), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+            )
+
+        n_win = 1 + (T - min_len) // stride
+        xw = np.zeros((n_win, input_width), dtype=np.float32)
+        yw = np.zeros((n_win, output_seq_len), dtype=np.float32)
+        window_id = np.zeros(n_win, dtype=np.int32)
+
+        for i in range(n_win):
+            s = i * stride
+            y_slice = X[s + input_seq_len : s + input_seq_len + output_seq_len, 0]
+            if covariate_window_mode == "all_steps":
+                xw[i] = X[s : s + input_seq_len, :].reshape(-1)
+            else:
+                x_slice = X[s : s + input_seq_len, 0]  # target only
+                cov_last = X[s + input_seq_len - 1, 1:] if num_cov > 0 else np.empty(0)
+                xw[i, :input_seq_len] = x_slice
+                if num_cov > 0:
+                    xw[i, input_seq_len:] = cov_last
+            yw[i] = y_slice
+            window_id[i] = s  # index of the start of this window
+
+        return xw, yw, window_id
+
+    def _window_input_size(self) -> int:
+        if self.covariate_window_mode == "all_steps":
+            return self.input_seq_len * self.num_features
+        return self.input_seq_len + self.num_features - 1
+
+    def _target_positions(self) -> np.ndarray:
+        if self.covariate_window_mode == "all_steps":
+            return np.arange(0, self.input_seq_len * self.num_features, self.num_features)
+        return np.arange(self.input_seq_len)
+
+    def _time_covariates_from_datetime_column(
+        self, dt_col: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """Build covariates for a single datetime column."""
+        if not self.time_covariates:
+            return None
+        if not np.issubdtype(dt_col.dtype, np.datetime64):
+            dt = dt_col.astype("datetime64[ns]")
+        else:
+            dt = dt_col
+
+        cols = []
+        for cov in self.time_covariates:
+            c = cov.lower()
+            if c == "hour_of_day":
+                cols.append(
+                    (dt.astype("datetime64[h]").astype(int) % 24).reshape(-1, 1)
+                )
+            elif c == "day_of_week":
+                cols.append((dt.astype("datetime64[D]").astype(int) % 7).reshape(-1, 1))
+            elif c == "week_of_year":
+                dt_series = pd.Series(dt)
+                cols.append(dt_series.dt.isocalendar().week.values.reshape(-1, 1))
+            elif c == "month_of_year":
+                cols.append(
+                    ((dt.astype("datetime64[M]").astype(int) % 12) + 1).reshape(-1, 1)
+                )
+            elif c == "quarter_of_year":
+                month = (dt.astype("datetime64[M]").astype(int) % 12) + 1
+                quarter = ((month - 1) // 3 + 1).reshape(-1, 1)
+                cols.append(quarter)
+            else:
+                assert False, f"Unknown time covariate: {cov}"
+
+        if not cols:
+            return None
+        return np.concatenate(cols, axis=1).astype(np.float32)
+
+    def _standard_scale_series(
+        self, X: np.ndarray, mu: np.ndarray, std: np.ndarray
+    ) -> np.ndarray:
+        """Standard scale a single series X (T, F) with provided mu, sd (F,)."""
+        # Add a small epsilon to std dev to avoid division by zero
+        X_scaled = Normalizer.standardize(X, mu=mu, std=std)
+        return X_scaled
+
+    def _prepend_history_context(
+        self,
+        x: np.ndarray,
+        dt: np.ndarray,
+        history_x: Optional[np.ndarray],
+        history_dt: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Prepends up to input_seq_len rows of history for cross-split lookback."""
+        if history_x is None or history_dt is None or self.input_seq_len <= 0:
+            return x, dt
+
+        history_x, history_dt = self._trim_trailing_nans(history_x, history_dt)
+        if history_x.size == 0:
+            return x, dt
+
+        prefix_len = min(len(history_x), self.input_seq_len)
+        x = np.concatenate([history_x[-prefix_len:], x], axis=0)
+        dt = np.concatenate([history_dt[-prefix_len:], dt], axis=0)
+        return x.astype(np.float32), np.asarray(dt, dtype="datetime64[ns]")
+
+    def _process_all(self) -> Dict[str, np.ndarray]:
+        if self.x_array is not None or self.date_time_array is not None:
+            if self.x_array is None or self.date_time_array is None:
+                raise ValueError(
+                    "x_array and date_time_array must be provided together for in-memory loading."
+                )
+            X_all = np.asarray(self.x_array)
+            DT_all = np.asarray(self.date_time_array)
+        else:
+            if self.x_file is None or self.date_time_file is None:
+                raise ValueError(
+                    "Either (x_file, date_time_file) or (x_array, date_time_array) must be provided."
+                )
+            X_all = self._load_data_from_csv(self.x_file, col_to_use=self.ts_to_use)
+            DT_all = self._load_data_from_csv(
+                self.date_time_file, col_to_use=self.ts_to_use
+            )
+
+        if X_all.ndim == 1:
+            X_all = X_all.reshape(-1, 1)
+        if DT_all.ndim == 1:
+            DT_all = DT_all.reshape(-1, 1)
+
+        # if DT_all has only one column duplicate columns to make it same shape X_all
+        if DT_all.shape[1] == 1 and X_all.shape[1] > 1:
+            print("assuming single datetime column for all series, duplicating...")
+            DT_all = np.tile(DT_all.reshape(-1, 1), (1, X_all.shape[1]))
+
+        history_sources: List[Tuple[np.ndarray, np.ndarray]] = []
+        if self.history_x_files is not None or self.history_date_time_files is not None:
+            if self.history_x_files is None or self.history_date_time_files is None:
+                raise ValueError(
+                    "history_x_files and history_date_time_files must be provided together."
+                )
+            if len(self.history_x_files) != len(self.history_date_time_files):
+                raise ValueError(
+                    "history_x_files and history_date_time_files must have the same length."
+                )
+
+            for x_hist_path, dt_hist_path in zip(
+                self.history_x_files, self.history_date_time_files
+            ):
+                X_hist_all = self._load_data_from_csv(x_hist_path, col_to_use=self.ts_to_use)
+                DT_hist_all = self._load_data_from_csv(
+                    dt_hist_path, col_to_use=self.ts_to_use
+                )
+                if DT_hist_all.shape[1] == 1 and X_hist_all.shape[1] > 1:
+                    DT_hist_all = np.tile(
+                        DT_hist_all.reshape(-1, 1), (1, X_hist_all.shape[1])
+                    )
+                if (
+                    X_hist_all.shape[1] != X_all.shape[1]
+                    or DT_hist_all.shape[1] != DT_all.shape[1]
+                ):
+                    raise ValueError(
+                        "History split must contain the same series columns as the current split."
+                    )
+                history_sources.append((X_hist_all, DT_hist_all))
+        elif self.history_x_file is not None and self.history_date_time_file is not None:
+            X_hist_all = self._load_data_from_csv(
+                self.history_x_file, col_to_use=self.ts_to_use
+            )
+            DT_hist_all = self._load_data_from_csv(
+                self.history_date_time_file, col_to_use=self.ts_to_use
+            )
+            if DT_hist_all.shape[1] == 1 and X_hist_all.shape[1] > 1:
+                DT_hist_all = np.tile(DT_hist_all.reshape(-1, 1), (1, X_hist_all.shape[1]))
+            if X_hist_all.shape[1] != X_all.shape[1] or DT_hist_all.shape[1] != DT_all.shape[1]:
+                raise ValueError(
+                    "History split must contain the same series columns as the current split."
+                )
+            history_sources.append((X_hist_all, DT_hist_all))
+
+        assert X_all.shape == DT_all.shape, (
+            f"Data and DateTime files must have the same shape. "
+            f"Got {X_all.shape} vs {DT_all.shape}."
+        )
+
+        T, N = X_all.shape
+        self.max_len = T
+        ts_indices = self.ts_to_use if self.ts_to_use is not None else list(range(N))
+        if len(ts_indices) != N:
+            raise ValueError(
+                "ts_to_use length must match number of loaded series columns. "
+                f"Got {len(ts_indices)} indices for {N} columns."
+            )
+
+        rolled_per_ts = []
+        scaling_info_per_ts = []  # To store calculated (mu, sd) tuples
+
+        X_all_norm = np.full_like(X_all, np.nan, dtype=np.float32)
+        for j in range(N):
+            xj, dtj = X_all[:, j], DT_all[:, j]
+            xj, dtj = self._trim_trailing_nans(xj, dtj)
+            if history_sources:
+                history_xj = np.concatenate(
+                    [x_hist_all[:, j] for x_hist_all, _ in history_sources], axis=0
+                )
+                history_dtj = np.concatenate(
+                    [dt_hist_all[:, j] for _, dt_hist_all in history_sources], axis=0
+                )
+            else:
+                history_xj = None
+                history_dtj = None
+            xj, dtj = self._prepend_history_context(xj, dtj, history_xj, history_dtj)
+            series_idx = ts_indices[j]
+            covs = self._time_covariates_from_datetime_column(dtj)
+
+            if covs is None:
+                Xj = xj.reshape(-1, 1).astype(np.float32)
+            else:
+                Xj = np.concatenate(
+                    [xj.reshape(-1, 1), covs.astype(np.float32)], axis=1
+                )
+
+            if Xj.shape[0] == 0:
+                continue
+
+            if Xj.shape[1] != self.num_features:
+                raise RuntimeError(
+                    f"Internal error: Feature count mismatch for Series {series_idx}. "
+                    f"Expected {self.num_features}, got {Xj.shape[1]}."
+                )
+
+            if self.scale_method == "standard":
+                if self.x_mean is None or self.x_std is None:
+                    # Calculate and store stats
+                    mu, std = Normalizer.compute_mean_std(Xj)
+                    scaling_info_per_ts.append((mu, std))
+                else:
+                    # Use provided stats
+                    if len(self.x_mean) != N or len(self.x_std) != N:
+                        raise ValueError(
+                            f"x_mean/x_std lists must have length {N} (matching loaded series),"
+                            f" but got {len(self.x_mean)}/{len(self.x_std)}."
+                        )
+                    mu = self.x_mean[j]
+                    std = self.x_std[j]
+
+                if len(mu) != self.num_features or len(std) != self.num_features:
+                    raise ValueError(
+                        f"Series {series_idx}: Mismatch in feature count for scaling. "
+                        f"Data has {self.num_features} features, but mean/std have {len(mu)}/{len(std)}."
+                    )
+
+                Xj = self._standard_scale_series(Xj, mu, std)
+            elif self.scale_method is not None:
+                print(f"Unknown scale_method: {self.scale_method}")
+
+            norm_len = min(Xj.shape[0], X_all_norm.shape[0])
+            if norm_len > 0:
+                X_all_norm[:norm_len, j] = Xj[-norm_len:, 0]
+
+            x_rolled, y_rolled, window_ids = self._create_rolling_windows(
+                Xj,
+                input_seq_len=self.input_seq_len,
+                output_seq_len=self.output_seq_len,
+                stride=self.stride,
+                covariate_window_mode=self.covariate_window_mode,
+            )
+
+            series_ids = np.full((len(window_ids),), series_idx, dtype=np.int32)
+
+            rolled_per_ts.append(
+                (
+                    x_rolled.astype(np.float32),
+                    y_rolled.astype(np.float32),
+                    window_ids.astype(np.int32),
+                    series_ids.astype(np.int32),
+                )
+            )
+
+        if (
+            self.scale_method == "standard"
+            and self.x_mean is None
+            and self.x_std is None
+            and scaling_info_per_ts  # Check list is not empty
+        ):
+            means, stds = zip(*scaling_info_per_ts)
+            self.x_mean = list(means)
+            self.x_std = list(stds)
+
+        # # Plot distribution for each time Series
+        # pdf_name = self.x_file.split("/")[-1].replace(".csv", "")
+
+        # all_means = np.nanmean(X_all_norm, axis=0)
+        # all_stds = np.nanstd(X_all_norm, axis=0)
+        # plt.figure(figsize=(min(12, len(all_means) * 0.1), 3))
+        # plt.errorbar(
+        #     x=np.arange(len(all_means)),
+        #     y=all_means,
+        #     yerr=all_stds,
+        #     fmt="o",
+        #     markersize=3,
+        #     ecolor="r",
+        #     capsize=3,
+        # )
+        # plt.xlabel("Time Series Index")
+        # plt.ylabel("Value")
+        # plt.title(f"{pdf_name}")
+        # plt.grid(True)
+        # plt.tight_layout()
+        # plt.xlim(-1, len(all_means))
+        # plt.ylim(-5, 5)
+        # plt.savefig(f"out/dist_{pdf_name}.svg")
+        # plt.close()
+
+        # --- Concatenation Logic ---
+        if self.order_mode == "by_series" or self.order_mode == "by_series_batch":
+            xs, ys = [], []
+            S_parts, K_parts = [], []
+            for j, (xj, yj, kj, sj) in enumerate(rolled_per_ts):
+                if len(yj) == 0:
+                    continue
+                xs.append(xj)
+                ys.append(yj)
+                K_parts.append(kj)
+                S_parts.append(sj)
+
+            if not xs:
+                return {
+                    "value": (
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
+                        np.empty((0, self.output_seq_len), dtype=np.float32),
+                    ),
+                    "series_id": np.empty((0,), dtype=np.int32),
+                    "window_id": np.empty((0,), dtype=np.int32),
+                }
+
+            X = np.concatenate(xs, axis=0).astype(np.float32)
+            Y = np.concatenate(ys, axis=0).astype(np.float32)
+            S = np.concatenate(S_parts, axis=0)
+            K = np.concatenate(K_parts, axis=0)
+
+            return {
+                "value": (X, Y),
+                "series_id": S,
+                "window_id": K,
+            }
+
+        elif self.order_mode == "by_window":
+            n_ts = len(rolled_per_ts)
+            counts = [len(yw) for (_, yw, _, _) in rolled_per_ts]
+            if max(counts, default=0) == 0:
+                return {
+                    "value": (
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
+                        np.empty((0, self.output_seq_len), dtype=np.float32),
+                    ),
+                    "series_id": np.empty((0,), dtype=np.int32),
+                    "window_id": np.empty((0,), dtype=np.int32),
+                }
+
+            feat_x = self._window_input_size()
+            feat_y = self.output_seq_len
+            total = sum(counts)
+
+            X = np.zeros((total, feat_x), dtype=np.float32)
+            Y = np.zeros((total, feat_y), dtype=np.float32)
+            S = np.zeros((total,), dtype=np.int32)
+            K = np.zeros((total,), dtype=np.int32)
+
+            write = 0
+            max_k = max(counts)
+            for k in range(max_k):
+                for j in range(n_ts):
+                    xj, yj, kj, sj = rolled_per_ts[j]
+                    if k < len(yj):
+                        X[write] = xj[k]
+                        Y[write] = yj[k]
+                        S[write] = sj[k]
+                        K[write] = kj[k]
+                        write += 1
+
+            S, K = S[:write], K[:write]
+
+            return {
+                "value": (X[:write], Y[:write]),
+                "series_id": S,
+                "window_id": K,
+            }
+
+        elif self.order_mode == "shuffled":
+            # Concatenate all windows without any specific ordering
+            # (shuffling happens in the loader)
+            xs, ys = [], []
+            S_parts, K_parts = [], []
+            for j, (xj, yj, kj, sj) in enumerate(rolled_per_ts):
+                if len(yj) == 0:
+                    continue
+                xs.append(xj)
+                ys.append(yj)
+                K_parts.append(kj)
+                S_parts.append(sj)
+
+            if not xs:
+                return {
+                    "value": (
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
+                        np.empty((0, self.output_seq_len), dtype=np.float32),
+                    ),
+                    "series_id": np.empty((0,), dtype=np.int32),
+                    "window_id": np.empty((0,), dtype=np.int32),
+                }
+
+            X = np.concatenate(xs, axis=0).astype(np.float32)
+            Y = np.concatenate(ys, axis=0).astype(np.float32)
+            S = np.concatenate(S_parts, axis=0)
+            K = np.concatenate(K_parts, axis=0)
+
+            return {
+                "value": (X, Y),
+                "series_id": S,
+                "window_id": K,
+            }
+        elif self.order_mode == "shuffled_filtered":
+            # Concatenate all windows but filter out those with >50% NaNs in the lookback
+            xs, ys = [], []
+            S_parts, K_parts = [], []
+            for j, (xj, yj, kj, sj) in enumerate(rolled_per_ts):
+                if len(yj) == 0:
+                    continue
+
+                lookback_part = xj[:, self._target_positions()]
+                valid_mask = np.sum(~np.isnan(lookback_part), axis=1) > (
+                    0.5 * self.input_seq_len
+                )
+
+                if not np.any(valid_mask):
+                    continue
+
+                xs.append(xj[valid_mask])
+                ys.append(yj[valid_mask])
+                K_parts.append(kj[valid_mask])
+                S_parts.append(sj[valid_mask])
+
+            if not xs:
+                print("Warning: No windows satisfied the filtered condition.")
+                return {
+                    "value": (
+                        np.empty((0, self._window_input_size()), dtype=np.float32),
+                        np.empty((0, self.output_seq_len), dtype=np.float32),
+                    ),
+                    "series_id": np.empty((0,), dtype=np.int32),
+                    "window_id": np.empty((0,), dtype=np.int32),
+                }
+
+            X = np.concatenate(xs, axis=0).astype(np.float32)
+            Y = np.concatenate(ys, axis=0).astype(np.float32)
+            S = np.concatenate(S_parts, axis=0)
+            K = np.concatenate(K_parts, axis=0)
+
+            return {
+                "value": (X, Y),
+                "series_id": S,
+                "window_id": K,
+            }
+        else:
+            raise ValueError(f"Unknown order_mode: {self.order_mode}")
+
+
+class BatchLoader:
+    # -- Data Loader Generators ---
+    @staticmethod
+    def _loader_by_window(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        batch_size: int,
+        shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Generator for 'by_window' mode.
+        - Batches contain samples with the *same* window_id.
+        - Iterates sequentially through window_ids (k=0, k=1, k=2...).
+        - If shuffle=True, shuffles the series *within* each window_id group.
+        - Pads the last batch of each window group with NaN (for X/Y),
+          -1 (for S), and k_id (for K) to ensure it fills the batch_size.
+        """
+        if len(X) == 0:
+            return
+
+        x_feat_dim = X.shape[1]
+        y_feat_dim = Y.shape[1]
+        unique_window_ids, start_indices = np.unique(K, return_index=True)
+        end_indices = np.append(start_indices[1:], len(K))
+
+        for k_id, start, end in zip(unique_window_ids, start_indices, end_indices):
+            x_window_group = X[start:end]
+            y_window_group = Y[start:end]
+            s_window_group = S[start:end]
+            k_window_group = K[start:end]
+
+            num_series_in_group = len(x_window_group)
+            group_indices = np.arange(num_series_in_group)
+
+            if shuffle:
+                if rng is not None:
+                    rng.shuffle(group_indices)
+                else:
+                    np.random.shuffle(group_indices)
+
+            for i in range(0, num_series_in_group, batch_size):
+                batch_indices = group_indices[i : i + batch_size]
+
+                x_batch_real = x_window_group[batch_indices]
+                y_batch_real = y_window_group[batch_indices]
+                s_batch_real = s_window_group[batch_indices]
+                k_batch_real = k_window_group[batch_indices]
+
+                current_batch_size = len(x_batch_real)
+                num_to_pad = batch_size - current_batch_size
+
+                if num_to_pad > 0:
+                    x_pad = np.full(
+                        (num_to_pad, x_feat_dim), np.nan, dtype=x_batch_real.dtype
+                    )
+                    y_pad = np.full(
+                        (num_to_pad, y_feat_dim), np.nan, dtype=y_batch_real.dtype
+                    )
+                    s_pad = np.full((num_to_pad,), -1, dtype=s_batch_real.dtype)
+                    k_pad = np.full((num_to_pad,), k_id, dtype=k_batch_real.dtype)
+
+                    x_batch = np.concatenate((x_batch_real, x_pad), axis=0)
+                    y_batch = np.concatenate((y_batch_real, y_pad), axis=0)
+                    s_batch = np.concatenate((s_batch_real, s_pad), axis=0)
+                    k_batch = np.concatenate((k_batch_real, k_pad), axis=0)
+
+                    yield (x_batch, y_batch), s_batch, k_batch
+                else:
+                    yield (x_batch_real, y_batch_real), s_batch_real, k_batch_real
+
+    @staticmethod
+    def _loader_shuffled(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        batch_size: int,
+        shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Generator for 'shuffled' mode.
+        - Fully randomizes all windows across all series and time positions.
+        - If shuffle=True, shuffles the entire dataset indices.
+        - Batches may contain windows from different series and different time positions.
+        - Drops the last batch if it's smaller than batch_size.
+        """
+        if len(X) == 0:
+            return
+
+        n_samples = len(X)
+        indices = np.arange(n_samples)
+
+        if shuffle:
+            if rng is not None:
+                rng.shuffle(indices)
+            else:
+                np.random.shuffle(indices)
+
+        # Only iterate up to the last full batch
+        n_full_batches = n_samples // batch_size
+        for i in range(n_full_batches):
+            start = i * batch_size
+            batch_indices = indices[start : start + batch_size]
+
+            x_batch = X[batch_indices]
+            y_batch = Y[batch_indices]
+            s_batch = S[batch_indices]
+            k_batch = K[batch_indices]
+
+            yield (x_batch, y_batch), s_batch, k_batch
+
+    @staticmethod
+    def _loader_by_series(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        batch_size: int,
+        shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Generator for 'by_series' mode.
+        - Follows the rule: Warns and forces batch_size=1.
+        - Iterates through all windows of one series, then all windows of the next.
+        - If shuffle=True, shuffles the order of the series.
+        """
+        if batch_size > 1:
+            warnings.warn(
+                f"Warning: 'by_series' mode only supports batch_size=1. "
+                f"Forcing batch_size=1."
+            )
+            batch_size = 1
+
+        unique_series_ids = np.unique(S)
+        if shuffle:
+            if rng is not None:
+                rng.shuffle(unique_series_ids)
+            else:
+                np.random.shuffle(unique_series_ids)
+
+        for series_id in unique_series_ids:
+            (series_indices,) = np.where(S == series_id)
+            for idx in series_indices:
+                x_batch = X[idx : idx + 1]
+                y_batch = Y[idx : idx + 1]
+                s_batch = S[idx : idx + 1]
+                k_batch = K[idx : idx + 1]
+
+                yield (x_batch, y_batch), s_batch, k_batch
+
+    @staticmethod
+    def _loader_by_series_batch(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        batch_size: int,
+        shuffle: bool,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Generator for 'by_series_batch' mode.
+        - Batches contain samples from 'batch_size' different series.
+        - Iterates through time for this group of series until all are exhausted.
+        - Padded with NaNs if series lengths differ or if fewer than batch_size series remain.
+        """
+        if len(X) == 0:
+            return
+
+        x_feat_dim = X.shape[1]
+        y_feat_dim = Y.shape[1]
+
+        # Identify unique series
+        # Assumes X, Y, S, K are sorted by series (guaranteed by _process_all)
+        unique_series_ids, series_start_indices = np.unique(S, return_index=True)
+        # Note: np.unique returns sorted unique elements
+
+        # We need to shuffle the series order if requested
+        series_order = np.arange(len(unique_series_ids))
+        if shuffle:
+            if rng is not None:
+                rng.shuffle(series_order)
+            else:
+                np.random.shuffle(series_order)
+
+        ordered_series_ids = unique_series_ids[series_order]
+
+        # Map series_id to its data slice for faster access
+        # Since they are sorted in input arrays, we can just store start/end indices
+        series_slices = {}
+        for i, s_id in enumerate(unique_series_ids):
+            start = series_start_indices[i]
+            end = (
+                series_start_indices[i + 1]
+                if i + 1 < len(unique_series_ids)
+                else len(S)
+            )
+            series_slices[s_id] = (start, end)
+
+        num_series = len(ordered_series_ids)
+
+        for i in range(0, num_series, batch_size):
+            batch_series_ids = ordered_series_ids[i : i + batch_size]
+            current_batch_series_count = len(batch_series_ids)
+
+            # Prepare data access for these series
+            # We need to know the max length to iterate
+            max_len_in_batch = 0
+            series_data_in_batch = []  # List of (X, Y, S, K) for each series in batch
+
+            for s_id in batch_series_ids:
+                start, end = series_slices[s_id]
+                x_s = X[start:end]
+                y_s = Y[start:end]
+                s_s = S[start:end]
+                k_s = K[start:end]
+                dataset_len = len(x_s)
+                max_len_in_batch = max(max_len_in_batch, dataset_len)
+                series_data_in_batch.append(
+                    {"X": x_s, "Y": y_s, "S": s_s, "K": k_s, "len": dataset_len}
+                )
+
+            # Pad the series_data_in_batch if we are at the very end and have fewer series
+            # However, the loop logic handles filling the 'batch'.
+            # We just need to ensure the yielded tensors have shape (batch_size, ...)
+
+            for t in range(max_len_in_batch):
+                # Construct the batch at time step t across the series in this group
+
+                # Check if we need padding for missing series (if last batch is partial)
+                # But here we want to handle padding per series length too.
+
+                x_batch_list = []
+                y_batch_list = []
+                s_batch_list = []
+                k_batch_list = []
+
+                for b_idx in range(batch_size):
+                    # If we have a series for this batch slot
+                    if b_idx < current_batch_series_count:
+                        s_data = series_data_in_batch[b_idx]
+                        if t < s_data["len"]:
+                            x_batch_list.append(s_data["X"][t])
+                            y_batch_list.append(s_data["Y"][t])
+                            s_batch_list.append(s_data["S"][t])
+                            k_batch_list.append(s_data["K"][t])
+                        else:
+                            # This series is finished, pad
+                            # Pad with NaNs/Dummy
+                            x_batch_list.append(
+                                np.full((x_feat_dim,), np.nan, dtype=X.dtype)
+                            )
+                            y_batch_list.append(
+                                np.full((y_feat_dim,), np.nan, dtype=Y.dtype)
+                            )
+                            # For S and K, just repeat the last valid or use -1
+                            # Using -1 for S to indicate padding
+                            s_batch_list.append(-1)
+                            # For K, maybe use the last K or -1? Let's use -1 to be safe or last valid k + steps?
+                            # Usually window_id identifies time. Let's use -1.
+                            k_batch_list.append(-1)
+                    else:
+                        # Padding for completely missing series (last batch of series grouping)
+                        x_batch_list.append(
+                            np.full((x_feat_dim,), np.nan, dtype=X.dtype)
+                        )
+                        y_batch_list.append(
+                            np.full((y_feat_dim,), np.nan, dtype=Y.dtype)
+                        )
+                        s_batch_list.append(-1)
+                        k_batch_list.append(-1)
+
+                yield (np.array(x_batch_list), np.array(y_batch_list)), np.array(
+                    s_batch_list
+                ), np.array(k_batch_list)
+
+    def create_data_loader(
+        dataset: Dict[str, np.ndarray],
+        order_mode: str,
+        batch_size: int,
+        shuffle: bool = False,
+        seed: Optional[int] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Creates a batch generator from a global time series dataset.
+
+        Usage:
+        loader_instance = GlobalTimeSeriesDataloader(...)
+        my_dataset = loader_instance.dataset
+
+        # Call the static method on the class itself
+        loader = GlobalTimeSeriesDataloader.create_data_loader(
+            my_dataset, 'by_window', 32
+        )
+        for (x, y), s, k in loader:
+            #... training logic ...
+        """
+        (X, Y) = dataset["value"]
+        S = dataset["series_id"]
+        K = dataset["window_id"]
+
+        if len(X) == 0:
+            return
+
+        rng = np.random.default_rng(seed) if seed is not None else None
+
+        # Call the other static methods using the class name
+        if order_mode == "by_series":
+            yield from BatchLoader._loader_by_series(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "by_series_batch":
+            yield from BatchLoader._loader_by_series_batch(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "by_window":
+            yield from BatchLoader._loader_by_window(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "shuffled":
+            yield from BatchLoader._loader_shuffled(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "shuffled_filtered":
+            yield from BatchLoader._loader_shuffled(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        else:
+            raise ValueError(f"Unknown order_mode: {order_mode}")
