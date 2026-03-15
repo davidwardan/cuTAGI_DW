@@ -390,26 +390,14 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 time_step=time_steps,
             )
 
-            # Fake Update
-            m_post, v_post = calculate_updates(
-                net,
-                output_updater,
-                m_pred,
-                v_pred,
-                y.flatten(),
-                use_AGVI=config.use_AGVI,
-                var_y=var_y,
-                train_mode=False,  # Important to prevent actual parameter updates
-            )
-
             # Where y is available use y otherwuse use m_pred
-            y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+            # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=y_lookback.reshape(B, -1),
-                new_var=v_lookback.reshape(B, -1),
+                new_mu=m_pred.reshape(B, -1),
+                new_var=v_pred.reshape(B, -1),
                 indices=indices,
             )
 
@@ -600,13 +588,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         )
 
         # Where y is available use y otherwuse use m_pred
-        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+        # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+        # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=y_lookback.reshape(B, -1),
-            new_var=v_lookback.reshape(B, -1),
+            new_mu=m_pred.reshape(B, -1),
+            new_var=v_pred.reshape(B, -1),
             indices=indices,
         )
 
@@ -666,7 +654,9 @@ def eval_model(
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
     test_states = np.load(input_dir / "test_states.npz")
-    true_train, true_val, true_test = load_true_split_arrays(**config.true_split_kwargs())
+    true_train, true_val, true_test = load_true_split_arrays(
+        **config.true_split_kwargs()
+    )
 
     def _trim_trailing_nans(x: np.ndarray):
         """Trim padded trailing NaNs in the *target* series, keep the same cut for datetime."""
@@ -1237,12 +1227,13 @@ def eval_model(
 def main(Train=True, Eval=True, log_wandb=False):
 
     list_of_seeds = [42]
-    list_of_experiments = ["train100"]
+    list_of_train_use_ratios = [1.0]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
-        for exp in list_of_experiments:
-            print(f"Running experiment: {exp} with seed {seed}")
+        for train_use_ratio in list_of_train_use_ratios:
+            ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
+            print(f"Running experiment: {ratio_tag} with seed {seed}")
 
             # Model category
             model_category = "global"
@@ -1250,7 +1241,8 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Define experiment name
             experiment_name = (
-                f"seed{seed}/{exp}/Shuffled_{model_category}-large-whitenoise_{embed_category}"
+                f"seed{seed}/{ratio_tag}/"
+                f"Shuffled_{model_category}_{embed_category}"
             )
 
             # Load configuration
@@ -1260,8 +1252,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
-            config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.data.loader.train_use_ratio = train_use_ratio
             config.data.loader.order_mode = "shuffled_filtered"  # forced for stateless
 
             # Convert config object to a dictionary for W&B
@@ -1273,9 +1264,9 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             if log_wandb:
                 # Initialize W&B run
-                run_id = f"{model_category}_{embed_category}_{exp}_seed{seed}".replace(
-                    " ", ""
-                )
+                run_id = (
+                    f"{model_category}_{embed_category}_{ratio_tag}_seed{seed}"
+                ).replace(" ", "")
                 run = init_run(
                     project="tracking_weights_lstm",
                     name=run_id,
