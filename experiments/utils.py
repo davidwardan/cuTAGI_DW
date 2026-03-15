@@ -377,9 +377,7 @@ class States:
 
 
 # --- Helper functions ---
-def _pad_series_columns(
-    series_list: List[np.ndarray], fill_value, dtype
-) -> np.ndarray:
+def _pad_series_columns(series_list: List[np.ndarray], fill_value, dtype) -> np.ndarray:
     n_series = len(series_list)
     max_len = max((len(s) for s in series_list), default=0)
     out = np.full((max_len, n_series), fill_value, dtype=dtype)
@@ -547,11 +545,17 @@ def split_full_dataset(
 
     return {
         "train_x": _pad_series_columns(train_x_cols, np.nan, np.float32),
-        "train_dt": _pad_series_columns(train_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "train_dt": _pad_series_columns(
+            train_dt_cols, np.datetime64("NaT"), "datetime64[ns]"
+        ),
         "val_x": _pad_series_columns(val_x_cols, np.nan, np.float32),
-        "val_dt": _pad_series_columns(val_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "val_dt": _pad_series_columns(
+            val_dt_cols, np.datetime64("NaT"), "datetime64[ns]"
+        ),
         "test_x": _pad_series_columns(test_x_cols, np.nan, np.float32),
-        "test_dt": _pad_series_columns(test_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "test_dt": _pad_series_columns(
+            test_dt_cols, np.datetime64("NaT"), "datetime64[ns]"
+        ),
         "truth_train_x": _pad_series_columns(train_x_cols, np.nan, np.float32),
         "truth_val_x": _pad_series_columns(val_truth_cols, np.nan, np.float32),
         "truth_test_x": _pad_series_columns(test_truth_cols, np.nan, np.float32),
@@ -571,7 +575,9 @@ def load_true_split_arrays(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if full_x_file is not None and full_date_file is not None:
         if input_seq_len is None:
-            raise ValueError("input_seq_len must be provided when loading from full data.")
+            raise ValueError(
+                "input_seq_len must be provided when loading from full data."
+            )
         split = split_full_dataset(
             x_full_file=full_x_file,
             date_full_file=full_date_file,
@@ -584,9 +590,15 @@ def load_true_split_arrays(
         )
         return split["truth_train_x"], split["truth_val_x"], split["truth_test_x"]
 
-    true_train = TimeSeriesDataBuilder._load_data_from_csv(x_file[0], col_to_use=ts_to_use)
-    true_val = TimeSeriesDataBuilder._load_data_from_csv(x_file[1], col_to_use=ts_to_use)
-    true_test = TimeSeriesDataBuilder._load_data_from_csv(x_file[2], col_to_use=ts_to_use)
+    true_train = TimeSeriesDataBuilder._load_data_from_csv(
+        x_file[0], col_to_use=ts_to_use
+    )
+    true_val = TimeSeriesDataBuilder._load_data_from_csv(
+        x_file[1], col_to_use=ts_to_use
+    )
+    true_test = TimeSeriesDataBuilder._load_data_from_csv(
+        x_file[2], col_to_use=ts_to_use
+    )
     return true_train, true_val, true_test
 
 
@@ -741,15 +753,23 @@ def build_model(
     layers = []
     current_input_size = input_size
     if sequential_model:
-        for hidden_size in hidden_sizes:
-            layers.append(LSTM(current_input_size, hidden_size, input_seq_len))
+        for layer_idx, hidden_size in enumerate(hidden_sizes):
+            last_timestep = layer_idx == len(hidden_sizes) - 1
+            layers.append(
+                LSTM(
+                    current_input_size,
+                    hidden_size,
+                    last_timestep,
+                    input_seq_len,
+                )
+            )
             current_input_size = hidden_size
     else:
         for hidden_size in hidden_sizes:
             layers.append(LSTM(current_input_size, hidden_size, 1))
             current_input_size = hidden_size
 
-    linear_input_size = current_input_size * input_seq_len if sequential_model else current_input_size
+    linear_input_size = current_input_size
 
     if use_AGVI:
         layers.append(Linear(linear_input_size, 2))
@@ -782,7 +802,9 @@ def build_model(
     if device == "cpu":
         if cpu_threads is not None:
             if int(cpu_threads) <= 0:
-                raise ValueError("cpu_threads must be a positive integer when provided.")
+                raise ValueError(
+                    "cpu_threads must be a positive integer when provided."
+                )
             net.set_threads(int(cpu_threads))
     elif device == "cuda":
         net.to_device("cuda")
@@ -837,25 +859,38 @@ def prepare_input(
             x = x.reshape(-1, inferred_input_seq_len, step_width)
             var_x = var_x.reshape(-1, inferred_input_seq_len, step_width)
             embed_mu = np.repeat(embed_mu[:, None, :], inferred_input_seq_len, axis=1)
-            embed_var = np.repeat(
-                embed_var[:, None, :], inferred_input_seq_len, axis=1
-            )
+            embed_var = np.repeat(embed_var[:, None, :], inferred_input_seq_len, axis=1)
             x = np.concatenate((x, embed_mu), axis=2).reshape(len(indices), -1)
             var_x = np.concatenate((var_x, embed_var), axis=2).reshape(len(indices), -1)
         else:
             x = np.concatenate((x, embed_mu), axis=1)
             var_x = np.concatenate((var_x, embed_var), axis=1)
 
-    flat_x = x.astype(np.float32).reshape(-1)
-    flat_var = var_x.astype(np.float32).reshape(-1)
+    x = x.astype(np.float32, copy=False)
+    var_x = var_x.astype(np.float32, copy=False)
 
-    np.nan_to_num(flat_x, copy=False, nan=0.0)
-    np.nan_to_num(flat_var, copy=False, nan=0.0)
+    np.nan_to_num(x, copy=False, nan=0.0)
+    np.nan_to_num(var_x, copy=False, nan=0.0)
 
     # clip variance
-    flat_var = np.clip(flat_var, a_min=1e-6, a_max=2.0)
+    var_x = np.clip(var_x, a_min=1e-6, a_max=2.0)
 
-    return flat_x, flat_var
+    if sequential_model:
+        if inferred_input_seq_len is None:
+            raise ValueError(
+                "input_seq_len must be provided when sequential_model=True."
+            )
+        if x.ndim != 3:
+            if x.shape[1] % inferred_input_seq_len != 0:
+                raise ValueError(
+                    "Sequential inputs must have width divisible by input_seq_len. "
+                    f"Got width={x.shape[1]} and input_seq_len={inferred_input_seq_len}."
+                )
+            step_width = x.shape[1] // inferred_input_seq_len
+            x = x.reshape(-1, inferred_input_seq_len, step_width)
+        return x, var_x.reshape(-1)
+
+    return x.reshape(-1), var_x.reshape(-1)
 
 
 def get_target_positions(total_width: int, input_seq_len: int) -> np.ndarray:

@@ -1265,7 +1265,7 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [42]
+    list_of_seeds = [43]
     list_of_train_use_ratios = [1.0]
 
     # Iterate over experiments and seeds
