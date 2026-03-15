@@ -17,8 +17,8 @@ class HiddenStateCuda : public BaseHiddenStates {
     ~HiddenStateCuda();
 
     void set_input_x(const std::vector<float> &mu_x,
-                     const std::vector<float> &var_x,
-                     const size_t block_size) override;
+                     const std::vector<float> &var_x, const size_t block_size,
+                     const size_t seq_len = 1) override;
 
     std::string get_name() const override { return "HiddenStateCuda"; };
     void allocate_memory();
@@ -158,6 +158,7 @@ class LSTMStateCuda : public BaseLSTMStates {
     std::string get_name() const override { return "LSTMStateCuda"; };
     void set_num_states(size_t num_states, size_t num_inputs,
                         int device_idx_ = 0) override;
+    void reset_prev_states() override;
     void allocate_memory();
     void deallocate_memory();
     void to_device();
