@@ -6,18 +6,18 @@ from experiments.config import Config
 from pytagi import cuda
 
 DEFAULT_SEEDS: Sequence[int] = [11]
-DEFAULT_EXPERIMENTS: Sequence[str] = (
-    "train30",
-    "train40",
-    "train60",
-    "train80",
-    "train100",
+DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (
+    0.35,
+    0.5,
+    0.65,
+    0.8,
+    1.0,
 )
 
 
 def _run_experiment(
     seed: int,
-    exp: str,
+    train_use_ratio: float,
     train: bool,
     evaluate: bool,
 ) -> None:
@@ -26,9 +26,10 @@ def _run_experiment(
     # Model category
     model_category = "locals"
     # embed_category = "no-embeddings"
+    ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}-shuffled"
+    experiment_name = f"seed{seed}/{ratio_tag}/experiment01_{model_category}-shuffled"
 
     # Load configuration
     config = Config.from_yaml(
@@ -37,8 +38,7 @@ def _run_experiment(
 
     config.seed = seed
     config.model.device = "cuda" if cuda.is_available() else "cpu"
-    config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-    config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+    config.data.loader.train_use_ratio = train_use_ratio
     config.data.loader.order_mode = "shuffled_filtered"
     config.evaluation.eval_plots = True
 
@@ -59,7 +59,7 @@ def _run_experiment(
 
 def run_experiments(
     seeds: Iterable[int] = DEFAULT_SEEDS,
-    experiments: Iterable[str] = DEFAULT_EXPERIMENTS,
+    train_use_ratios: Iterable[float] = DEFAULT_TRAIN_USE_RATIOS,
     *,
     train: bool = False,
     evaluate: bool = True,
@@ -67,18 +67,19 @@ def run_experiments(
     ctx = mp.get_context("spawn")
 
     for seed in seeds:
-        for experiment in experiments:
-            print(f"Launching experiment '{experiment}' with seed {seed}")
+        for train_use_ratio in train_use_ratios:
+            ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
+            print(f"Launching experiment '{ratio_tag}' with seed {seed}")
             process = ctx.Process(
                 target=_run_experiment,
-                args=(seed, experiment, train, evaluate),
+                args=(seed, train_use_ratio, train, evaluate),
             )
             process.start()
             process.join()
 
             if process.exitcode:
                 raise RuntimeError(
-                    f"Experiment '{experiment}' with seed {seed} failed "
+                    f"Experiment '{ratio_tag}' with seed {seed} failed "
                     f"with exit code {process.exitcode}"
                 )
 

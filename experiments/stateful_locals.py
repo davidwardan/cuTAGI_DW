@@ -273,14 +273,14 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             std_preds = []
             y_trues = []
 
+            look_back_buffer.reset()  # reset look-back buffer before validation
+
             val_batch_iter = BatchLoader.create_data_loader(
                 dataset=val_data.dataset,
                 order_mode="by_window",
                 batch_size=config.data.loader.batch_size,
                 shuffle=False,
             )
-
-            look_back_buffer_val = copy.deepcopy(look_back_buffer)
 
             for (x, y), _, w_id in val_batch_iter:
 
@@ -296,9 +296,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     )
 
                 # prepare look_back buffer
-                if look_back_buffer_val.needs_initialization[0]:
+                if look_back_buffer.needs_initialization[0]:
                     initial_mu = extract_target_history(x, config.window_len)
-                    look_back_buffer_val.initialize(
+                    look_back_buffer.initialize(
                         initial_mu=initial_mu,
                         initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                         indices=[0],
@@ -309,12 +309,12 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     x=x,
                     var_x=None,
                     look_back_mu=(
-                        look_back_buffer_val.mu
+                        look_back_buffer.mu
                         if config.forecasting.recursive_val
                         else None
                     ),
                     look_back_var=(
-                        look_back_buffer_val.var
+                        look_back_buffer.var
                         if config.forecasting.recursive_val
                         else None
                     ),
@@ -369,17 +369,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 )
 
                 # Where y is available use y otherwuse use m_pred
-                y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-                v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+                # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+                # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
-                    new_mu=y_lookback,
-                    new_var=v_lookback,
-                    indices=[0],
-                )
-
-                look_back_buffer_val.update(
                     new_mu=m_pred,
                     new_var=v_pred,
                     indices=[0],
@@ -473,7 +467,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         net.eval()
 
         # reset look-back buffer
-        # look_back_buffer.reset()
+        look_back_buffer.reset()
 
         test_batch_iter = BatchLoader.create_data_loader(
             dataset=test_data.dataset,
@@ -793,22 +787,23 @@ def eval_model(config, experiment_name: Optional[str] = None):
 def main(Train=True, Eval=True, log_wandb=False):
 
     list_of_seeds = [11, 42, 27, 3, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_train_use_ratios = [0.35, 0.5, 0.65, 0.8, 1.0]
 
     for seed in list_of_seeds:
-        for exp in list_of_experiments:
-            print(f"Running experiment: {exp} with seed {seed}")
+        for train_use_ratio in list_of_train_use_ratios:
+            ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
+            print(f"Running experiment: {ratio_tag} with seed {seed}")
 
             # Model category
             model_category = "locals"
 
             # Create folders for storing results
-            output_base_dir = f"out/seed{seed}/{exp}"
+            output_base_dir = f"out/seed{seed}/{ratio_tag}"
             if not os.path.exists(output_base_dir):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
+            experiment_name = f"seed{seed}/{ratio_tag}/BySeries_{model_category}"
 
             # Create configuration
             config = Config.from_yaml(
@@ -817,8 +812,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
-            config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.data.loader.train_use_ratio = train_use_ratio
             config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B
@@ -833,7 +827,7 @@ def main(Train=True, Eval=True, log_wandb=False):
                 run = init_run(
                     project="Local_Model_Run",
                     group="Time_Series_Local_Models",
-                    name=f"{model_category}_{exp}_Seed{seed}",
+                    name=f"{model_category}_{ratio_tag}_Seed{seed}",
                     config=config_dict,
                     reinit=True,  # Allows re-initializing in a loop
                     save_code=True,  # Saves the main script

@@ -1,6 +1,8 @@
 seed: 1
 data:
   paths:
+    x_full: data/hq/ts_weekly_values_edited.csv
+    dates_full: data/hq/ts_weekly_datetimes_edited.csv
     x_train: data/hq/train100/split_train_values.csv
     dates_train: data/hq/train100/split_train_datetimes.csv
     x_val: data/hq/split_val_values.csv
@@ -13,6 +15,9 @@ data:
     - week_of_year
     scale_method: standard
     order_mode: by_window
+    split_train_ratio: 0.7
+    split_val_ratio: 0.15
+    train_use_ratio: 1.0
     input_seq_len: 1
     look_back_len: 12
     batch_size: 16

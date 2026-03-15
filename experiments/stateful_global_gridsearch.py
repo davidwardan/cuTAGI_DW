@@ -23,7 +23,7 @@ DEFAULT_SEEDS: Sequence[int] = (
     42,
     235,
 )
-DEFAULT_EXPERIMENTS: Sequence[str] = ("train100",)
+DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (1.0,)
 
 
 def _trim_trailing_nans(x: np.ndarray) -> np.ndarray:
@@ -282,25 +282,31 @@ def main(
     Eval: bool = True,
     log_wandb: bool = False,
     seeds: Optional[Sequence[int]] = None,
-    experiments: Optional[Sequence[str]] = None,
+    train_use_ratios: Optional[Sequence[float]] = None,
 ):
     list_of_seeds = list(seeds) if seeds is not None else list(DEFAULT_SEEDS)
-    list_of_experiments = (
-        list(experiments) if experiments is not None else list(DEFAULT_EXPERIMENTS)
+    list_of_train_use_ratios = (
+        list(train_use_ratios)
+        if train_use_ratios is not None
+        else list(DEFAULT_TRAIN_USE_RATIOS)
     )
 
     if not list_of_seeds:
         raise ValueError("At least one seed must be provided.")
-    if not list_of_experiments:
-        raise ValueError("At least one experiment must be provided.")
+    if not list_of_train_use_ratios:
+        raise ValueError("At least one train_use_ratio must be provided.")
 
     for seed in list_of_seeds:
-        for exp in list_of_experiments:
-            print(f"Running experiment: {exp} with seed {seed}")
+        for train_use_ratio in list_of_train_use_ratios:
+            ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
+            print(f"Running experiment: {ratio_tag} with seed {seed}")
 
             model_category = "global"
             embed_category = "no-embeddings"
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}_{embed_category}_gridsearch"
+            experiment_name = (
+                f"seed{seed}/{ratio_tag}/"
+                f"experiment01_{model_category}_{embed_category}_gridsearch"
+            )
 
             config = Config.from_yaml(
                 "experiments/configurations/global_no-embeddings_HQ127_gridsearch.yaml"
@@ -308,8 +314,7 @@ def main(
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
-            config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
+            config.data.loader.train_use_ratio = train_use_ratio
             config.data.loader.order_mode = "by_window"
 
             config_dict = config.wandb_dict()
@@ -319,7 +324,7 @@ def main(
 
             if log_wandb:
                 run_id = (
-                    f"{model_category}_{embed_category}_{exp}_seed{seed}_gridsearch"
+                    f"{model_category}_{embed_category}_{ratio_tag}_seed{seed}_gridsearch"
                 ).replace(" ", "")
                 run = init_run(
                     project="tracking_weights_lstm",
@@ -373,10 +378,11 @@ if __name__ == "__main__":
         help="One or more random seeds to run (e.g. --seeds 11 42 235).",
     )
     parser.add_argument(
-        "--experiments",
+        "--train-use-ratios",
+        type=float,
         nargs="+",
-        default=list(DEFAULT_EXPERIMENTS),
-        help="One or more train split folders under data/hq (e.g. train60 train100).",
+        default=list(DEFAULT_TRAIN_USE_RATIOS),
+        help="One or more train_use_ratio values to run (e.g. 0.3 0.6 1.0).",
     )
     parser.add_argument(
         "--log-wandb",
@@ -400,5 +406,5 @@ if __name__ == "__main__":
         Eval=not args.no_eval,
         log_wandb=args.log_wandb,
         seeds=args.seeds,
-        experiments=args.experiments,
+        train_use_ratios=args.train_use_ratios,
     )

@@ -1035,30 +1035,36 @@ def eval_model(
 def main(Train=True, Eval=True):
 
     list_of_seeds = [11]
-    list_of_experiments = ["train100"]
+    list_of_train_use_ratios = [1.0]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:
-        for exp in list_of_experiments:
-            print(f"Running experiment: {exp} with seed {seed}")
+        for train_use_ratio in list_of_train_use_ratios:
+            ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
+            print(f"Running experiment: {ratio_tag} with seed {seed}")
 
             # Model category
             model_category = "global"
             embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}-shuffled_{embed_category}"
+            experiment_name = (
+                f"seed{seed}/{ratio_tag}/"
+                f"experiment01_{model_category}-shuffled_{embed_category}"
+            )
 
             # Load configuration
             config = Config.from_yaml(
-                f"out/seed{seed}/{exp}/experiment01_global-shuffled_no-embeddings/config.yaml"
+                f"out/seed{seed}/{ratio_tag}/experiment01_global-shuffled_no-embeddings/config.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
-            config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
-            config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.model.initialization.from_file = f"out/seed{seed}/{exp}/experiment01_global-shuffled_no-embeddings/param/model.bin"
+            config.data.loader.train_use_ratio = train_use_ratio
+            config.model.initialization.from_file = (
+                f"out/seed{seed}/{ratio_tag}/"
+                f"experiment01_global-shuffled_no-embeddings/param/model.bin"
+            )
             config.evaluation.eval_plots = True
             config.data.loader.order_mode = "by_window"
 
