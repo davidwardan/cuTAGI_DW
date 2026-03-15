@@ -1,7 +1,7 @@
 import numpy as np
 
 from sklearn.decomposition import PCA
-from typing import Optional
+from typing import Optional, Dict, Tuple
 import copy
 import networkx as nx
 
@@ -377,6 +377,219 @@ class States:
 
 
 # --- Helper functions ---
+def _pad_series_columns(
+    series_list: List[np.ndarray], fill_value, dtype
+) -> np.ndarray:
+    n_series = len(series_list)
+    max_len = max((len(s) for s in series_list), default=0)
+    out = np.full((max_len, n_series), fill_value, dtype=dtype)
+    for j, series in enumerate(series_list):
+        if len(series) > 0:
+            out[: len(series), j] = series
+    return out
+
+
+def _split_single_series(
+    x: np.ndarray,
+    dt: np.ndarray,
+    train_ratio: float,
+    val_ratio: float,
+    train_use_ratio: float,
+) -> Dict[str, np.ndarray]:
+    x_trim, dt_trim = TimeSeriesDataBuilder._trim_trailing_nans(x, dt)
+    n = len(x_trim)
+    if n == 0:
+        empty_x = np.array([], dtype=np.float32)
+        empty_dt = np.array([], dtype="datetime64[ns]")
+        return {
+            "train_x": empty_x,
+            "train_dt": empty_dt,
+            "full_train_x": empty_x,
+            "full_train_dt": empty_dt,
+            "val_x": empty_x,
+            "val_dt": empty_dt,
+            "test_x": empty_x,
+            "test_dt": empty_dt,
+        }
+
+    if n == 1:
+        n_train, n_val = 1, 0
+    elif n == 2:
+        n_train, n_val = 1, 0
+    else:
+        n_train = int(np.floor(n * train_ratio))
+        n_val = int(np.floor(n * val_ratio))
+
+        n_train = max(1, n_train)
+        n_val = max(1, n_val)
+
+        # Keep at least one point for test when enough total points exist.
+        if n_train + n_val >= n:
+            n_val = max(1, n - n_train - 1)
+        if n_train + n_val >= n:
+            n_train = max(1, n - n_val - 1)
+        if n_train + n_val >= n:
+            n_train, n_val = max(1, n - 2), 1
+
+    n_test = max(0, n - n_train - n_val)
+
+    train_end = n_train
+    val_end = n_train + n_val
+
+    full_train_x = x_trim[:train_end]
+    full_train_dt = dt_trim[:train_end]
+    n_train_used = int(np.floor(len(full_train_x) * train_use_ratio))
+    if len(full_train_x) > 0:
+        n_train_used = min(len(full_train_x), max(1, n_train_used))
+    # Keep the most recent training segment (closest to validation)
+    # so train->validation continuity is preserved when subsampling.
+    train_x = full_train_x[-n_train_used:]
+    train_dt = full_train_dt[-n_train_used:]
+
+    return {
+        "train_x": train_x,
+        "train_dt": train_dt,
+        "full_train_x": full_train_x,
+        "full_train_dt": full_train_dt,
+        "val_x": x_trim[train_end:val_end],
+        "val_dt": dt_trim[train_end:val_end],
+        "test_x": x_trim[val_end : val_end + n_test],
+        "test_dt": dt_trim[val_end : val_end + n_test],
+    }
+
+
+def split_full_dataset(
+    x_full_file: str,
+    date_full_file: str,
+    input_seq_len: int,
+    carry_split_context: bool,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.1,
+    train_use_ratio: float = 1.0,
+    ts_to_use: Optional[List[int]] = None,
+) -> Dict[str, np.ndarray]:
+    if train_ratio <= 0.0 or val_ratio < 0.0 or train_ratio + val_ratio >= 1.0:
+        raise ValueError(
+            "split ratios must satisfy: train_ratio > 0, val_ratio >= 0, and train_ratio + val_ratio < 1."
+        )
+    if train_use_ratio <= 0.0 or train_use_ratio > 1.0:
+        raise ValueError("train_use_ratio must be in the interval (0, 1].")
+
+    X_all = TimeSeriesDataBuilder._load_data_from_csv(x_full_file, col_to_use=ts_to_use)
+    DT_all = TimeSeriesDataBuilder._load_data_from_csv(
+        date_full_file, col_to_use=ts_to_use
+    )
+
+    if X_all.ndim == 1:
+        X_all = X_all.reshape(-1, 1)
+    if DT_all.ndim == 1:
+        DT_all = DT_all.reshape(-1, 1)
+
+    if DT_all.shape[1] == 1 and X_all.shape[1] > 1:
+        DT_all = np.tile(DT_all.reshape(-1, 1), (1, X_all.shape[1]))
+
+    if X_all.shape != DT_all.shape:
+        raise ValueError(
+            f"Full values and datetime files must have the same shape. Got {X_all.shape} vs {DT_all.shape}."
+        )
+
+    n_series = X_all.shape[1]
+
+    train_x_cols, train_dt_cols = [], []
+    val_x_cols, val_dt_cols = [], []
+    test_x_cols, test_dt_cols = [], []
+    val_truth_cols, test_truth_cols = [], []
+
+    for j in range(n_series):
+        split = _split_single_series(
+            X_all[:, j],
+            DT_all[:, j],
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            train_use_ratio=train_use_ratio,
+        )
+
+        train_x = split["train_x"]
+        train_dt = split["train_dt"]
+        full_train_x = split["full_train_x"]
+        full_train_dt = split["full_train_dt"]
+        val_core_x = split["val_x"]
+        val_core_dt = split["val_dt"]
+        test_core_x = split["test_x"]
+        test_core_dt = split["test_dt"]
+
+        if carry_split_context:
+            # Context continuity uses full pre-validation history, even when
+            # training is truncated from the head.
+            val_ctx = full_train_x[-min(input_seq_len, len(full_train_x)) :]
+            val_ctx_dt = full_train_dt[-min(input_seq_len, len(full_train_dt)) :]
+            val_x = np.concatenate([val_ctx, val_core_x], axis=0)
+            val_dt = np.concatenate([val_ctx_dt, val_core_dt], axis=0)
+
+            prior_x = np.concatenate([full_train_x, val_core_x], axis=0)
+            prior_dt = np.concatenate([full_train_dt, val_core_dt], axis=0)
+            test_ctx = prior_x[-min(input_seq_len, len(prior_x)) :]
+            test_ctx_dt = prior_dt[-min(input_seq_len, len(prior_dt)) :]
+            test_x = np.concatenate([test_ctx, test_core_x], axis=0)
+            test_dt = np.concatenate([test_ctx_dt, test_core_dt], axis=0)
+        else:
+            val_x, val_dt = val_core_x, val_core_dt
+            test_x, test_dt = test_core_x, test_core_dt
+
+        train_x_cols.append(train_x.astype(np.float32))
+        train_dt_cols.append(np.asarray(train_dt, dtype="datetime64[ns]"))
+        val_x_cols.append(val_x.astype(np.float32))
+        val_dt_cols.append(np.asarray(val_dt, dtype="datetime64[ns]"))
+        test_x_cols.append(test_x.astype(np.float32))
+        test_dt_cols.append(np.asarray(test_dt, dtype="datetime64[ns]"))
+        val_truth_cols.append(val_core_x.astype(np.float32))
+        test_truth_cols.append(test_core_x.astype(np.float32))
+
+    return {
+        "train_x": _pad_series_columns(train_x_cols, np.nan, np.float32),
+        "train_dt": _pad_series_columns(train_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "val_x": _pad_series_columns(val_x_cols, np.nan, np.float32),
+        "val_dt": _pad_series_columns(val_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "test_x": _pad_series_columns(test_x_cols, np.nan, np.float32),
+        "test_dt": _pad_series_columns(test_dt_cols, np.datetime64("NaT"), "datetime64[ns]"),
+        "truth_train_x": _pad_series_columns(train_x_cols, np.nan, np.float32),
+        "truth_val_x": _pad_series_columns(val_truth_cols, np.nan, np.float32),
+        "truth_test_x": _pad_series_columns(test_truth_cols, np.nan, np.float32),
+    }
+
+
+def load_true_split_arrays(
+    x_file: List[str],
+    ts_to_use: List[int],
+    full_x_file: Optional[str] = None,
+    full_date_file: Optional[str] = None,
+    input_seq_len: Optional[int] = None,
+    carry_split_context: bool = False,
+    split_train_ratio: float = 0.7,
+    split_val_ratio: float = 0.1,
+    train_use_ratio: float = 1.0,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if full_x_file is not None and full_date_file is not None:
+        if input_seq_len is None:
+            raise ValueError("input_seq_len must be provided when loading from full data.")
+        split = split_full_dataset(
+            x_full_file=full_x_file,
+            date_full_file=full_date_file,
+            input_seq_len=input_seq_len,
+            carry_split_context=carry_split_context,
+            train_ratio=split_train_ratio,
+            val_ratio=split_val_ratio,
+            train_use_ratio=train_use_ratio,
+            ts_to_use=ts_to_use,
+        )
+        return split["truth_train_x"], split["truth_val_x"], split["truth_test_x"]
+
+    true_train = TimeSeriesDataBuilder._load_data_from_csv(x_file[0], col_to_use=ts_to_use)
+    true_val = TimeSeriesDataBuilder._load_data_from_csv(x_file[1], col_to_use=ts_to_use)
+    true_test = TimeSeriesDataBuilder._load_data_from_csv(x_file[2], col_to_use=ts_to_use)
+    return true_train, true_val, true_test
+
+
 def prepare_data(
     x_file,
     date_file,
@@ -387,7 +600,79 @@ def prepare_data(
     scale_method,
     order_mode,
     ts_to_use,
+    full_x_file: Optional[str] = None,
+    full_date_file: Optional[str] = None,
+    split_train_ratio: float = 0.7,
+    split_val_ratio: float = 0.1,
+    train_use_ratio: float = 1.0,
 ):
+    if full_x_file is not None or full_date_file is not None:
+        if full_x_file is None or full_date_file is None:
+            raise ValueError(
+                "full_x_file and full_date_file must be provided together when using full dataset splitting."
+            )
+
+        split = split_full_dataset(
+            x_full_file=full_x_file,
+            date_full_file=full_date_file,
+            input_seq_len=input_seq_len,
+            carry_split_context=carry_split_context,
+            train_ratio=split_train_ratio,
+            val_ratio=split_val_ratio,
+            train_use_ratio=train_use_ratio,
+            ts_to_use=ts_to_use,
+        )
+
+        train_data = TimeSeriesDataBuilder(
+            x_file=None,
+            date_time_file=None,
+            x_array=split["train_x"],
+            date_time_array=split["train_dt"],
+            input_seq_len=input_seq_len,
+            output_seq_len=1,
+            stride=1,
+            time_covariates=time_covariates,
+            covariate_window_mode=covariate_window_mode,
+            scale_method=scale_method,
+            order_mode=order_mode,
+            ts_to_use=ts_to_use,
+        )
+
+        val_data = TimeSeriesDataBuilder(
+            x_file=None,
+            date_time_file=None,
+            x_array=split["val_x"],
+            date_time_array=split["val_dt"],
+            input_seq_len=input_seq_len,
+            output_seq_len=1,
+            stride=1,
+            time_covariates=time_covariates,
+            covariate_window_mode=covariate_window_mode,
+            scale_method=scale_method,
+            x_mean=train_data.x_mean,
+            x_std=train_data.x_std,
+            order_mode="by_window",
+            ts_to_use=ts_to_use,
+        )
+
+        test_data = TimeSeriesDataBuilder(
+            x_file=None,
+            date_time_file=None,
+            x_array=split["test_x"],
+            date_time_array=split["test_dt"],
+            input_seq_len=input_seq_len,
+            output_seq_len=1,
+            stride=1,
+            time_covariates=time_covariates,
+            covariate_window_mode=covariate_window_mode,
+            scale_method=scale_method,
+            x_mean=train_data.x_mean,
+            x_std=train_data.x_std,
+            order_mode="by_window",
+            ts_to_use=ts_to_use,
+        )
+        return train_data, val_data, test_data
+
     train_data = TimeSeriesDataBuilder(
         x_file=x_file[0],
         date_time_file=date_file[0],
@@ -420,8 +705,10 @@ def prepare_data(
     test_data = TimeSeriesDataBuilder(
         x_file=x_file[2],
         date_time_file=date_file[2],
-        history_x_file=x_file[1] if carry_split_context else None,
-        history_date_time_file=date_file[1] if carry_split_context else None,
+        history_x_files=([x_file[0], x_file[1]] if carry_split_context else None),
+        history_date_time_files=(
+            [date_file[0], date_file[1]] if carry_split_context else None
+        ),
         input_seq_len=input_seq_len,
         output_seq_len=1,
         stride=1,

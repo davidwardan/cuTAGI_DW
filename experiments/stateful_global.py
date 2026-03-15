@@ -25,6 +25,7 @@ from experiments.utils import (
     cosine_similarity_matrix,
     plot_similarity,
     calculate_updates,
+    load_true_split_arrays,
     States,
     EarlyStopping,
     LookBackBuffer,
@@ -63,17 +64,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     config.to_yaml(os.path.join(output_dir, "config.yaml"))
 
     # Prepare data loaders
-    train_data, val_data, test_data = prepare_data(
-        x_file=config.x_file,
-        date_file=config.date_file,
-        input_seq_len=config.window_len,
-        carry_split_context=config.data.loader.carry_split_context,
-        time_covariates=config.data.loader.time_covariates,
-        covariate_window_mode=config.data.loader.covariate_window_mode,
-        scale_method=config.data.loader.scale_method,
-        order_mode=config.data.loader.order_mode,
-        ts_to_use=config.ts_to_use,
-    )
+    train_data, val_data, test_data = prepare_data(**config.prepare_data_kwargs())
 
     # Embeddings
     embedding_dir = os.path.join(output_dir, "embeddings")
@@ -720,27 +711,7 @@ def eval_model(
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
     test_states = np.load(input_dir / "test_states.npz")
-    true_train = pd.read_csv(
-        config.x_file[0],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
-    true_val = pd.read_csv(
-        config.x_file[1],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
-    true_test = pd.read_csv(
-        config.x_file[2],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
+    true_train, true_val, true_test = load_true_split_arrays(**config.true_split_kwargs())
 
     def _trim_trailing_nans(x: np.ndarray):
         """Trim padded trailing NaNs in the *target* series, keep the same cut for datetime."""

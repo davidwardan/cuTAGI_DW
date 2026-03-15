@@ -16,6 +16,8 @@ from experiments.data_loader import TimeSeriesDataBuilder
 from experiments.utils import (
     prepare_input,
     extract_target_history,
+    prepare_data,
+    split_full_dataset,
 )
 
 
@@ -270,6 +272,180 @@ class TestExperimentDataLoader(unittest.TestCase):
         self.assertEqual(dumped["data"]["loader"]["input_seq_len"], 1)
         self.assertNotIn("training", dumped)
         self.assertNotIn("model", dumped)
+
+    def test_test_split_context_falls_back_to_train_when_val_is_short(self):
+        train_x = os.path.join(self.tmpdir.name, "train_x.csv")
+        train_dt = os.path.join(self.tmpdir.name, "train_dt.csv")
+        val_x = os.path.join(self.tmpdir.name, "val_x.csv")
+        val_dt = os.path.join(self.tmpdir.name, "val_dt.csv")
+        test_x = os.path.join(self.tmpdir.name, "test_x.csv")
+        test_dt = os.path.join(self.tmpdir.name, "test_dt.csv")
+
+        pd.DataFrame({"value": [1, 2, 3, 4, 5]}).to_csv(train_x, index=False)
+        pd.DataFrame(
+            {"datetime": [f"2024-01-01T0{i}:00:00" for i in range(5)]}
+        ).to_csv(train_dt, index=False)
+        pd.DataFrame({"value": [6]}).to_csv(val_x, index=False)
+        pd.DataFrame({"datetime": ["2024-01-01T05:00:00"]}).to_csv(val_dt, index=False)
+        pd.DataFrame({"value": [7, 8]}).to_csv(test_x, index=False)
+        pd.DataFrame({"datetime": ["2024-01-01T06:00:00", "2024-01-01T07:00:00"]}).to_csv(
+            test_dt, index=False
+        )
+
+        _, _, test_data = prepare_data(
+            x_file=[train_x, val_x, test_x],
+            date_file=[train_dt, val_dt, test_dt],
+            input_seq_len=4,
+            carry_split_context=True,
+            time_covariates=[],
+            covariate_window_mode="last_step",
+            scale_method=None,
+            order_mode="by_window",
+            ts_to_use=None,
+        )
+
+        x_test, y_test = test_data.dataset["value"]
+        self.assertGreater(len(x_test), 0)
+        np.testing.assert_allclose(x_test[0], np.array([3, 4, 5, 6], dtype=np.float32))
+        np.testing.assert_allclose(y_test[:, 0], np.array([7, 8], dtype=np.float32))
+
+    def test_split_full_dataset_trims_trailing_nans_and_adds_context(self):
+        full_x = os.path.join(self.tmpdir.name, "full_x.csv")
+        full_dt = os.path.join(self.tmpdir.name, "full_dt.csv")
+
+        pd.DataFrame({"value": [1, 2, 3, 4, 5, 6, 7, np.nan, np.nan]}).to_csv(
+            full_x, index=False
+        )
+        pd.DataFrame(
+            {"datetime": [f"2024-01-01T0{i}:00:00" for i in range(9)]}
+        ).to_csv(full_dt, index=False)
+
+        split = split_full_dataset(
+            x_full_file=full_x,
+            date_full_file=full_dt,
+            input_seq_len=2,
+            carry_split_context=True,
+            train_ratio=0.5,
+            val_ratio=0.25,
+            ts_to_use=None,
+        )
+
+        train = split["train_x"][:, 0]
+        val = split["val_x"][:, 0]
+        test = split["test_x"][:, 0]
+        truth_val = split["truth_val_x"][:, 0]
+        truth_test = split["truth_test_x"][:, 0]
+
+        np.testing.assert_allclose(train[~np.isnan(train)], np.array([1, 2, 3], dtype=np.float32))
+        np.testing.assert_allclose(
+            val[~np.isnan(val)], np.array([2, 3, 4], dtype=np.float32)
+        )
+        np.testing.assert_allclose(
+            test[~np.isnan(test)], np.array([3, 4, 5, 6, 7], dtype=np.float32)
+        )
+        np.testing.assert_allclose(
+            truth_val[~np.isnan(truth_val)], np.array([4], dtype=np.float32)
+        )
+        np.testing.assert_allclose(
+            truth_test[~np.isnan(truth_test)], np.array([5, 6, 7], dtype=np.float32)
+        )
+
+    def test_split_full_dataset_keeps_val_test_fixed_when_train_use_ratio_changes(self):
+        full_x = os.path.join(self.tmpdir.name, "full_x_ratio.csv")
+        full_dt = os.path.join(self.tmpdir.name, "full_dt_ratio.csv")
+
+        pd.DataFrame({"value": np.arange(1, 13, dtype=np.float32)}).to_csv(
+            full_x, index=False
+        )
+        pd.DataFrame(
+            {"datetime": [f"2024-01-01T{i:02d}:00:00" for i in range(12)]}
+        ).to_csv(full_dt, index=False)
+
+        split_full = split_full_dataset(
+            x_full_file=full_x,
+            date_full_file=full_dt,
+            input_seq_len=3,
+            carry_split_context=True,
+            train_ratio=0.6,
+            val_ratio=0.2,
+            train_use_ratio=1.0,
+            ts_to_use=None,
+        )
+        split_half = split_full_dataset(
+            x_full_file=full_x,
+            date_full_file=full_dt,
+            input_seq_len=3,
+            carry_split_context=True,
+            train_ratio=0.6,
+            val_ratio=0.2,
+            train_use_ratio=0.5,
+            ts_to_use=None,
+        )
+
+        train_full = split_full["train_x"][:, 0]
+        train_half = split_half["train_x"][:, 0]
+        val_full = split_full["val_x"][:, 0]
+        val_half = split_half["val_x"][:, 0]
+        test_full = split_full["test_x"][:, 0]
+        test_half = split_half["test_x"][:, 0]
+        truth_val_full = split_full["truth_val_x"][:, 0]
+        truth_val_half = split_half["truth_val_x"][:, 0]
+        truth_test_full = split_full["truth_test_x"][:, 0]
+        truth_test_half = split_half["truth_test_x"][:, 0]
+
+        self.assertLess(np.sum(~np.isnan(train_half)), np.sum(~np.isnan(train_full)))
+        np.testing.assert_allclose(
+            train_half[~np.isnan(train_half)],
+            np.array([5, 6, 7], dtype=np.float32),
+        )
+        np.testing.assert_allclose(
+            truth_val_full[~np.isnan(truth_val_full)],
+            truth_val_half[~np.isnan(truth_val_half)],
+        )
+        np.testing.assert_allclose(
+            truth_test_full[~np.isnan(truth_test_full)],
+            truth_test_half[~np.isnan(truth_test_half)],
+        )
+        np.testing.assert_allclose(
+            val_full[~np.isnan(val_full)],
+            val_half[~np.isnan(val_half)],
+        )
+        np.testing.assert_allclose(
+            test_full[~np.isnan(test_full)],
+            test_half[~np.isnan(test_half)],
+        )
+
+    def test_split_full_dataset_handles_all_nan_series(self):
+        full_x = os.path.join(self.tmpdir.name, "full_x_all_nan.csv")
+        full_dt = os.path.join(self.tmpdir.name, "full_dt_all_nan.csv")
+
+        pd.DataFrame(
+            {
+                "all_nan": [np.nan, np.nan, np.nan, np.nan],
+                "valid": [1.0, 2.0, 3.0, 4.0],
+            }
+        ).to_csv(full_x, index=False)
+        pd.DataFrame(
+            {
+                "d0": [f"2024-01-01T0{i}:00:00" for i in range(4)],
+                "d1": [f"2024-01-01T0{i}:00:00" for i in range(4)],
+            }
+        ).to_csv(full_dt, index=False)
+
+        split = split_full_dataset(
+            x_full_file=full_x,
+            date_full_file=full_dt,
+            input_seq_len=2,
+            carry_split_context=True,
+            train_ratio=0.5,
+            val_ratio=0.25,
+            ts_to_use=None,
+        )
+
+        nan_series_train = split["train_x"][:, 0]
+        valid_series_train = split["train_x"][:, 1]
+        self.assertTrue(np.all(np.isnan(nan_series_train)))
+        self.assertGreater(np.sum(~np.isnan(valid_series_train)), 0)
 
 
 if __name__ == "__main__":

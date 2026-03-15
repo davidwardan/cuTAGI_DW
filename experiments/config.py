@@ -4,6 +4,8 @@ from pydantic import BaseModel, Field
 
 
 class DataPaths(BaseModel):
+    x_full: Optional[str] = None
+    dates_full: Optional[str] = None
     x_train: str = "data/hq/train100/split_train_values.csv"
     dates_train: str = "data/hq/train100/split_train_datetimes.csv"
     x_val: str = "data/hq/split_val_values.csv"
@@ -19,6 +21,9 @@ class DataLoader(BaseModel):
     covariate_window_mode: str = "last_step"
     scale_method: str = "standard"
     order_mode: str = "by_window"
+    split_train_ratio: float = 0.7
+    split_val_ratio: float = 0.1
+    train_use_ratio: float = 1.0
     look_back_len: Optional[int] = None
     input_seq_len: int = 52
     carry_split_context: bool = False
@@ -157,6 +162,61 @@ class Config(BaseModel):
             self.data.paths.dates_val,
             self.data.paths.dates_test,
         ]
+
+    def prepare_data_kwargs(self, ts_to_use: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Shared kwargs for experiments.utils.prepare_data."""
+        resolved_ts = self.ts_to_use if ts_to_use is None else ts_to_use
+        full_x, full_dt = self._resolved_full_split_paths()
+        return {
+            "x_file": self.x_file,
+            "date_file": self.date_file,
+            "input_seq_len": self.window_len,
+            "carry_split_context": self.data.loader.carry_split_context,
+            "time_covariates": self.data.loader.time_covariates,
+            "covariate_window_mode": self.data.loader.covariate_window_mode,
+            "scale_method": self.data.loader.scale_method,
+            "order_mode": self.data.loader.order_mode,
+            "ts_to_use": resolved_ts,
+            "full_x_file": full_x,
+            "full_date_file": full_dt,
+            "split_train_ratio": self.data.loader.split_train_ratio,
+            "split_val_ratio": self.data.loader.split_val_ratio,
+            "train_use_ratio": self.data.loader.train_use_ratio,
+        }
+
+    def true_split_kwargs(self, ts_to_use: Optional[List[int]] = None) -> Dict[str, Any]:
+        """Shared kwargs for experiments.utils.load_true_split_arrays."""
+        resolved_ts = self.ts_to_use if ts_to_use is None else ts_to_use
+        full_x, full_dt = self._resolved_full_split_paths()
+        return {
+            "x_file": self.x_file,
+            "ts_to_use": resolved_ts,
+            "full_x_file": full_x,
+            "full_date_file": full_dt,
+            "input_seq_len": self.window_len,
+            "carry_split_context": self.data.loader.carry_split_context,
+            "split_train_ratio": self.data.loader.split_train_ratio,
+            "split_val_ratio": self.data.loader.split_val_ratio,
+            "train_use_ratio": self.data.loader.train_use_ratio,
+        }
+
+    def _resolved_full_split_paths(self) -> Tuple[Optional[str], Optional[str]]:
+        has_x_full = self.data.paths.x_full is not None
+        has_dt_full = self.data.paths.dates_full is not None
+        if has_x_full != has_dt_full:
+            raise ValueError(
+                "data.paths.x_full and data.paths.dates_full must be provided together."
+            )
+        if self.use_full_dataset_split:
+            return self.data.paths.x_full, self.data.paths.dates_full
+        return None, None
+
+    @property
+    def use_full_dataset_split(self) -> bool:
+        return (
+            self.data.paths.x_full is not None
+            and self.data.paths.dates_full is not None
+        )
 
     @property
     def use_AGVI(self) -> bool:

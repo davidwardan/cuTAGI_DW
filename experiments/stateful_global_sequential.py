@@ -26,6 +26,7 @@ from experiments.utils import (
     cosine_similarity_matrix,
     plot_similarity,
     calculate_updates,
+    load_true_split_arrays,
     States,
     EarlyStopping,
     LookBackBuffer,
@@ -64,17 +65,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     config.to_yaml(os.path.join(output_dir, "config.yaml"))
 
     # Prepare data loaders
-    train_data, val_data, test_data = prepare_data(
-        x_file=config.x_file,
-        date_file=config.date_file,
-        input_seq_len=config.window_len,
-        carry_split_context=config.data.loader.carry_split_context,
-        time_covariates=config.data.loader.time_covariates,
-        covariate_window_mode=config.data.loader.covariate_window_mode,
-        scale_method=config.data.loader.scale_method,
-        order_mode=config.data.loader.order_mode,
-        ts_to_use=config.ts_to_use,
-    )
+    train_data, val_data, test_data = prepare_data(**config.prepare_data_kwargs())
 
     # Embeddings
     embedding_dir = os.path.join(output_dir, "embeddings")
@@ -331,8 +322,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
         val_batch_iter = BatchLoader.create_data_loader(
             dataset=val_data.dataset,
-            order_mode="by_series_batch",
-            batch_size=config.data.loader.batch_size,
+            order_mode="by_series",
+            batch_size=1,
             shuffle=False,
         )
 
@@ -412,21 +403,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 time_step=time_steps,
             )
 
-            # Fake Update
-            m_post, v_post = calculate_updates(
-                net,
-                output_updater,
-                m_pred,
-                v_pred,
-                y.flatten(),
-                use_AGVI=config.use_AGVI,
-                var_y=var_y,
-                train_mode=False,  # Important to prevent actual parameter updates
-            )
-
             # Where y is available use y otherwuse use m_pred
-            y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+            # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+            y_lookback = m_pred.copy()
+            v_lookback = v_pred.copy()
 
             # Update look_back buffer
             look_back_buffer.update(
@@ -435,10 +416,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 indices=indices,
             )
 
-            # reset LSTM states
-            net.reset_lstm_states()
-
         # End of epoch
+        net.reset_lstm_states()
+
         # Calculate micro metrics for early stopping
         val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
         val_log_lik = metric.log_likelihood(
@@ -536,8 +516,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     test_batch_iter = BatchLoader.create_data_loader(
         dataset=test_data.dataset,
-        order_mode="by_series_batch",
-        batch_size=config.data.loader.batch_size,
+        order_mode="by_series",
+        batch_size=1,
         shuffle=False,
     )
 
@@ -611,21 +591,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             time_step=time_steps,
         )
 
-        # Fake Update
-        m_post, v_post = calculate_updates(
-            net,
-            output_updater,
-            m_pred,
-            v_pred,
-            y.flatten(),
-            use_AGVI=config.use_AGVI,
-            var_y=var_y,
-            train_mode=False,  # Important to prevent actual parameter updates
-        )
-
         # Where y is available use y otherwuse use m_pred
-        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+        # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+        # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+        y_lookback = m_pred.copy()
+        v_lookback = v_pred.copy()
 
         # Update look_back buffer
         look_back_buffer.update(
@@ -633,9 +603,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             new_var=v_lookback.reshape(B, -1),
             indices=indices,
         )
-
-        # reset LSTM states
-        net.reset_lstm_states()
 
     # Run over each time series and re_scale it
     if config.data.loader.scale_method == "standard":
@@ -690,27 +657,9 @@ def eval_model(
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
     test_states = np.load(input_dir / "test_states.npz")
-    true_train = pd.read_csv(
-        config.x_file[0],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
-    true_val = pd.read_csv(
-        config.x_file[1],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
-    true_test = pd.read_csv(
-        config.x_file[2],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
+    true_train, true_val, true_test = load_true_split_arrays(
+        **config.true_split_kwargs()
+    )
 
     def _trim_trailing_nans(x: np.ndarray):
         """Trim padded trailing NaNs in the *target* series, keep the same cut for datetime."""

@@ -11,13 +11,17 @@ from matplotlib import pyplot as plt
 class TimeSeriesDataBuilder:
     def __init__(
         self,
-        x_file: str,
-        date_time_file: str,
+        x_file: Optional[str],
+        date_time_file: Optional[str],
         input_seq_len: int,
         output_seq_len: int,
         stride: int,
+        x_array: Optional[np.ndarray] = None,
+        date_time_array: Optional[np.ndarray] = None,
         history_x_file: Optional[str] = None,
         history_date_time_file: Optional[str] = None,
+        history_x_files: Optional[List[str]] = None,
+        history_date_time_files: Optional[List[str]] = None,
         order_mode: str = "by_window",
         scale_method: Optional[str] = None,
         x_mean: Optional[
@@ -30,8 +34,12 @@ class TimeSeriesDataBuilder:
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
+        self.x_array = x_array
+        self.date_time_array = date_time_array
         self.history_x_file = history_x_file
         self.history_date_time_file = history_date_time_file
+        self.history_x_files = history_x_files
+        self.history_date_time_files = history_date_time_files
         self.input_seq_len = input_seq_len
         self.output_seq_len = output_seq_len
         self.stride = stride
@@ -213,33 +221,77 @@ class TimeSeriesDataBuilder:
         return x.astype(np.float32), np.asarray(dt, dtype="datetime64[ns]")
 
     def _process_all(self) -> Dict[str, np.ndarray]:
-        X_all = self._load_data_from_csv(self.x_file, col_to_use=self.ts_to_use)
-        DT_all = self._load_data_from_csv(
-            self.date_time_file, col_to_use=self.ts_to_use
-        )
+        if self.x_array is not None or self.date_time_array is not None:
+            if self.x_array is None or self.date_time_array is None:
+                raise ValueError(
+                    "x_array and date_time_array must be provided together for in-memory loading."
+                )
+            X_all = np.asarray(self.x_array)
+            DT_all = np.asarray(self.date_time_array)
+        else:
+            if self.x_file is None or self.date_time_file is None:
+                raise ValueError(
+                    "Either (x_file, date_time_file) or (x_array, date_time_array) must be provided."
+                )
+            X_all = self._load_data_from_csv(self.x_file, col_to_use=self.ts_to_use)
+            DT_all = self._load_data_from_csv(
+                self.date_time_file, col_to_use=self.ts_to_use
+            )
+
+        if X_all.ndim == 1:
+            X_all = X_all.reshape(-1, 1)
+        if DT_all.ndim == 1:
+            DT_all = DT_all.reshape(-1, 1)
 
         # if DT_all has only one column duplicate columns to make it same shape X_all
         if DT_all.shape[1] == 1 and X_all.shape[1] > 1:
             print("assuming single datetime column for all series, duplicating...")
             DT_all = np.tile(DT_all.reshape(-1, 1), (1, X_all.shape[1]))
 
-        X_hist_all = None
-        DT_hist_all = None
-        if self.history_x_file is not None and self.history_date_time_file is not None:
+        history_sources: List[Tuple[np.ndarray, np.ndarray]] = []
+        if self.history_x_files is not None or self.history_date_time_files is not None:
+            if self.history_x_files is None or self.history_date_time_files is None:
+                raise ValueError(
+                    "history_x_files and history_date_time_files must be provided together."
+                )
+            if len(self.history_x_files) != len(self.history_date_time_files):
+                raise ValueError(
+                    "history_x_files and history_date_time_files must have the same length."
+                )
+
+            for x_hist_path, dt_hist_path in zip(
+                self.history_x_files, self.history_date_time_files
+            ):
+                X_hist_all = self._load_data_from_csv(x_hist_path, col_to_use=self.ts_to_use)
+                DT_hist_all = self._load_data_from_csv(
+                    dt_hist_path, col_to_use=self.ts_to_use
+                )
+                if DT_hist_all.shape[1] == 1 and X_hist_all.shape[1] > 1:
+                    DT_hist_all = np.tile(
+                        DT_hist_all.reshape(-1, 1), (1, X_hist_all.shape[1])
+                    )
+                if (
+                    X_hist_all.shape[1] != X_all.shape[1]
+                    or DT_hist_all.shape[1] != DT_all.shape[1]
+                ):
+                    raise ValueError(
+                        "History split must contain the same series columns as the current split."
+                    )
+                history_sources.append((X_hist_all, DT_hist_all))
+        elif self.history_x_file is not None and self.history_date_time_file is not None:
             X_hist_all = self._load_data_from_csv(
                 self.history_x_file, col_to_use=self.ts_to_use
             )
             DT_hist_all = self._load_data_from_csv(
                 self.history_date_time_file, col_to_use=self.ts_to_use
             )
-
             if DT_hist_all.shape[1] == 1 and X_hist_all.shape[1] > 1:
                 DT_hist_all = np.tile(DT_hist_all.reshape(-1, 1), (1, X_hist_all.shape[1]))
-
             if X_hist_all.shape[1] != X_all.shape[1] or DT_hist_all.shape[1] != DT_all.shape[1]:
                 raise ValueError(
                     "History split must contain the same series columns as the current split."
                 )
+            history_sources.append((X_hist_all, DT_hist_all))
 
         assert X_all.shape == DT_all.shape, (
             f"Data and DateTime files must have the same shape. "
@@ -249,6 +301,11 @@ class TimeSeriesDataBuilder:
         T, N = X_all.shape
         self.max_len = T
         ts_indices = self.ts_to_use if self.ts_to_use is not None else list(range(N))
+        if len(ts_indices) != N:
+            raise ValueError(
+                "ts_to_use length must match number of loaded series columns. "
+                f"Got {len(ts_indices)} indices for {N} columns."
+            )
 
         rolled_per_ts = []
         scaling_info_per_ts = []  # To store calculated (mu, sd) tuples
@@ -257,8 +314,16 @@ class TimeSeriesDataBuilder:
         for j in range(N):
             xj, dtj = X_all[:, j], DT_all[:, j]
             xj, dtj = self._trim_trailing_nans(xj, dtj)
-            history_xj = None if X_hist_all is None else X_hist_all[:, j]
-            history_dtj = None if DT_hist_all is None else DT_hist_all[:, j]
+            if history_sources:
+                history_xj = np.concatenate(
+                    [x_hist_all[:, j] for x_hist_all, _ in history_sources], axis=0
+                )
+                history_dtj = np.concatenate(
+                    [dt_hist_all[:, j] for _, dt_hist_all in history_sources], axis=0
+                )
+            else:
+                history_xj = None
+                history_dtj = None
             xj, dtj = self._prepend_history_context(xj, dtj, history_xj, history_dtj)
             series_idx = ts_indices[j]
             covs = self._time_covariates_from_datetime_column(dtj)

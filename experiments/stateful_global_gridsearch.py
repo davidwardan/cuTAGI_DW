@@ -12,6 +12,7 @@ from tqdm import tqdm
 from experiments.config import Config
 from experiments.wandb_helpers import finish_run, init_run
 from experiments import stateful_global as base_script
+from experiments.utils import load_true_split_arrays
 
 from pytagi import Normalizer as normalizer
 from pytagi import cuda
@@ -45,20 +46,7 @@ def _compute_validation_metrics(
     input_dir = Path("out") / experiment_name
     val_states = np.load(input_dir / "val_states.npz")
 
-    true_train = pd.read_csv(
-        config.x_file[0],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
-    true_val = pd.read_csv(
-        config.x_file[1],
-        skiprows=1,
-        delimiter=",",
-        header=None,
-        usecols=config.ts_to_use,
-    ).values
+    true_train, true_val, _ = load_true_split_arrays(**config.true_split_kwargs())
 
     val_rmse_list = []
     val_log_lik_list = []
