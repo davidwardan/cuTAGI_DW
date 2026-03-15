@@ -540,8 +540,8 @@ void AttentionDeltaStates::set_size(int batch_size, int num_heads, int timestep,
 }
 
 MultiheadAttention::MultiheadAttention(size_t embed_dim, size_t num_heads,
-                                       size_t num_kv_heads, bool bias,
-                                       float gain_w, float gain_b,
+                                       size_t num_kv_heads, size_t seq_len_,
+                                       bool bias, float gain_w, float gain_b,
                                        std::string init_method, bool use_rope,
                                        float rope_theta, size_t max_seq_len,
                                        int device_idx)
@@ -556,6 +556,7 @@ MultiheadAttention::MultiheadAttention(size_t embed_dim, size_t num_heads,
       max_seq_len(max_seq_len) {
     this->input_size = embed_dim;
     this->output_size = this->embed_dim;
+    this->seq_len = seq_len_;
     this->head_dim = embed_dim / num_heads;
     this->bias = bias;
     this->device_idx = device_idx;
@@ -667,13 +668,9 @@ void MultiheadAttention::init_weight_bias() {
 void MultiheadAttention::forward(BaseHiddenStates &input_states,
                                  BaseHiddenStates &output_states,
                                  BaseTempStates &temp_states) {
+    // TODO: check it is correct for 2 consecutive attention layers
     int batch_size = input_states.block_size;
     this->set_cap_factor_udapte(batch_size);
-
-    // TODO: double check with LSTM layer
-    if (this->input_size * this->seq_len != input_states.actual_size) {
-        this->seq_len = input_states.actual_size / this->input_size;
-    }
 
     attn_states.set_size(batch_size, num_heads, this->seq_len, head_dim);
 
@@ -745,7 +742,8 @@ void MultiheadAttention::forward(BaseHiddenStates &input_states,
     output_states.height = this->out_height;
     output_states.depth = this->out_channels;
     output_states.block_size = batch_size;
-    output_states.actual_size = this->output_size * this->seq_len;
+    output_states.seq_len = this->seq_len;
+    output_states.actual_size = this->output_size;
 
     if (this->training) {
         this->storing_states_for_training(input_states, output_states);

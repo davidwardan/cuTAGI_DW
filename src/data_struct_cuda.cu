@@ -38,13 +38,14 @@ void HiddenStateCuda::deallocate_memory() {
 
 void HiddenStateCuda::set_input_x(const std::vector<float> &mu_x,
                                   const std::vector<float> &var_x,
-                                  const size_t block_size)
+                                  const size_t block_size, const size_t seq_len)
 /*
  */
 {
     size_t data_size = mu_x.size();
-    this->actual_size = data_size / block_size;
+    this->actual_size = data_size / (block_size * seq_len);
     this->block_size = block_size;
+    this->seq_len = seq_len;
 
     for (int i = 0; i < data_size; i++) {
         this->mu_a[i] = mu_x[i];
@@ -708,6 +709,16 @@ void LSTMStateCuda::set_num_states(size_t num_states, size_t num_inputs,
     this->allocate_memory();
 }
 
+void LSTMStateCuda::reset_prev_states()
+/*
+ */
+{
+    cudaSetDevice(this->device_idx);
+    cudaMemset(d_mu_h_prev, 0, this->num_states * sizeof(float));
+    cudaMemset(d_var_h_prev, 0, this->num_states * sizeof(float));
+    cudaMemset(d_mu_c_prev, 0, this->num_states * sizeof(float));
+    cudaMemset(d_var_c_prev, 0, this->num_states * sizeof(float));
+}
 void LSTMStateCuda::allocate_memory()
 /*
  */

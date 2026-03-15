@@ -21,7 +21,7 @@ from pytagi import exponential_scheduler
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 
 
-def main(num_epochs: int = 50, batch_size: int = 5, sigma_v: float = 1):
+def main(num_epochs: int = 100, batch_size: int = 16, sigma_v: float = 1.0):
     """Run training for time-series forecasting model"""
     # Dataset
     output_col = [0]
@@ -56,13 +56,12 @@ def main(num_epochs: int = 50, batch_size: int = 5, sigma_v: float = 1):
 
     # Network
     net = Sequential(
-        LSTM(1, 8, input_seq_len),
-        LSTM(8, 8, input_seq_len),
-        Linear(8 * input_seq_len, 1),
+        LSTM(1, 8, False, input_seq_len),
+        LSTM(8, 8, True, input_seq_len),
+        Linear(8, 1),
     )
-    # net.to_device("cuda")
-    net.set_threads(1)  # multi-processing is slow on a small net
-    # net.input_state_update = True
+    net.to_device("cuda")
+    # net.set_threads(1)  # multi-processing is slow on a small net
     out_updater = OutputUpdater(net.device)
 
     # -------------------------------------------------------------------------#
@@ -70,7 +69,7 @@ def main(num_epochs: int = 50, batch_size: int = 5, sigma_v: float = 1):
     mses = []
     pbar = tqdm(range(num_epochs), desc="Training Progress")
     for epoch in pbar:
-        batch_iter = train_dtl.create_data_loader(batch_size, False)
+        batch_iter = train_dtl.create_data_loader(batch_size, True)
 
         # Decaying observation's variance
         sigma_v = exponential_scheduler(
@@ -82,6 +81,7 @@ def main(num_epochs: int = 50, batch_size: int = 5, sigma_v: float = 1):
 
         for x, y in batch_iter:
             # Feed forward
+            x = x.reshape(-1, input_seq_len, 1)
             m_pred, _ = net(x)
 
             # Update output layer
@@ -125,6 +125,7 @@ def main(num_epochs: int = 50, batch_size: int = 5, sigma_v: float = 1):
 
     for x, y in test_batch_iter:
         # Predicion
+        x = x.reshape(-1, input_seq_len, 1)
         m_pred, v_pred = net(x)
 
         mu_preds.extend(m_pred)
