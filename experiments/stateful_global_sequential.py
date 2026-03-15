@@ -406,13 +406,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             # Where y is available use y otherwuse use m_pred
             # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
             # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
-            y_lookback = m_pred.copy()
-            v_lookback = v_pred.copy()
 
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=y_lookback.reshape(B, -1),
-                new_var=v_lookback.reshape(B, -1),
+                new_mu=m_pred.reshape(B, -1),
+                new_var=v_pred.reshape(B, -1),
                 indices=indices,
             )
 
@@ -594,13 +592,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         # Where y is available use y otherwuse use m_pred
         # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
         # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
-        y_lookback = m_pred.copy()
-        v_lookback = v_pred.copy()
 
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=y_lookback.reshape(B, -1),
-            new_var=v_lookback.reshape(B, -1),
+            new_mu=m_pred.reshape(B, -1),
+            new_var=v_pred.reshape(B, -1),
             indices=indices,
         )
 
@@ -1244,8 +1240,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Define experiment name
             experiment_name = (
-                f"seed{seed}/{ratio_tag}/"
-                f"Shuffled_{model_category}_{embed_category}"
+                f"seed{seed}/{ratio_tag}/" f"Shuffled_{model_category}_{embed_category}"
             )
 
             # Load configuration
