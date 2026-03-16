@@ -19,7 +19,7 @@ data:
     split_val_ratio: 0.15
     train_use_ratio: 1.0
     input_seq_len: 1
-    look_back_len: 12
+    look_back_len: 52
     batch_size: 16
     output_col:
     - 0

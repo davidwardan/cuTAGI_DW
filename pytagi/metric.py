@@ -120,6 +120,73 @@ def rmse(prediction: np.ndarray, observation: np.ndarray) -> float:
     return mse_val**0.5
 
 
+def mae(prediction: np.ndarray, observation: np.ndarray) -> float:
+    """Calculates the Mean Absolute Error (MAE).
+
+    MAE measures the average absolute difference between the predicted
+    and observed values.
+
+    :param prediction: The predicted values.
+    :type prediction: np.ndarray
+    :param observation: The actual (observed) values.
+    :type observation: np.ndarray
+    :return: The mean absolute error.
+    :rtype: float
+    """
+    return np.nanmean(np.abs(prediction - observation))
+
+
+def Np50(observation: np.ndarray, prediction_p50: np.ndarray) -> float:
+    """Computes normalized pinball loss at the 50th percentile.
+
+    This matches weighted quantile loss for q=0.5:
+    ``2 * sum(pinball_q=0.5) / sum(abs(observation))``.
+
+    :param observation: Ground-truth values.
+    :type observation: np.ndarray
+    :param prediction_p50: Predicted 50th percentile (median) values.
+    :type prediction_p50: np.ndarray
+    :return: Normalized pinball loss at p50.
+    :rtype: float
+    """
+
+    q = 0.5
+    delta = observation - prediction_p50
+    pinball = np.where(delta >= 0, q * delta, (1.0 - q) * (-delta))
+    denom = np.nansum(np.abs(observation))
+    return (2.0 * np.nansum(pinball)) / (denom + 1e-10)
+
+
+def Np90(
+    observation: np.ndarray,
+    prediction_mean: np.ndarray,
+    prediction_std: np.ndarray,
+) -> float:
+    """Computes normalized pinball loss at the 90th percentile.
+
+    The p90 quantile is approximated from Gaussian predictions:
+    ``prediction_mean + z_0.9 * prediction_std`` where ``z_0.9`` is
+    approximately 1.2815515655.
+
+    :param observation: Ground-truth values.
+    :type observation: np.ndarray
+    :param prediction_mean: Predicted mean values.
+    :type prediction_mean: np.ndarray
+    :param prediction_std: Predicted standard deviations.
+    :type prediction_std: np.ndarray
+    :return: Normalized pinball loss at p90.
+    :rtype: float
+    """
+
+    q = 0.9
+    z_p90 = 1.2815515655446004
+    prediction_p90 = prediction_mean + z_p90 * prediction_std
+    delta = observation - prediction_p90
+    pinball = np.where(delta >= 0, q * delta, (1.0 - q) * (-delta))
+    denom = np.nansum(np.abs(observation))
+    return (2.0 * np.nansum(pinball)) / (denom + 1e-10)
+
+
 def classification_error(prediction: np.ndarray, label: np.ndarray) -> float:
     """Computes the classification error rate.
 

@@ -100,7 +100,22 @@ class LSTMStateContainer:
         try:
             unpacked = {}
             for layer_idx, (mu_h, var_h, mu_c, var_c) in net_states.items():
-                state_dim = self.layer_state_shapes[layer_idx]
+                state_dim = self.layer_state_shapes.get(layer_idx)
+                if state_dim is None:
+                    if batch_size <= 0:
+                        raise ValueError("batch_size must be positive.")
+                    if len(mu_h) % batch_size != 0:
+                        raise ValueError(
+                            "Cannot infer state dimension from backend state sizes."
+                        )
+                    state_dim = len(mu_h) // batch_size
+                    self.layer_state_shapes[layer_idx] = state_dim
+                    self.states[layer_idx] = {
+                        "mu_h": np.zeros((self.num_series, state_dim), dtype=np.float32),
+                        "var_h": np.zeros((self.num_series, state_dim), dtype=np.float32),
+                        "mu_c": np.zeros((self.num_series, state_dim), dtype=np.float32),
+                        "var_c": np.zeros((self.num_series, state_dim), dtype=np.float32),
+                    }
                 # Reshape from flat array to (batch_size, state_dim)
                 unpacked[layer_idx] = {
                     "mu_h": np.asarray(mu_h).reshape(batch_size, state_dim),
@@ -143,6 +158,8 @@ class LSTMStateContainer:
             return
 
         net_states = net.get_lstm_states()
+        if len(net_states) == 0:
+            return
         batch_size = len(indices)
 
         unpacked_states = self._unpack_net_states(net_states, batch_size)
@@ -169,6 +186,16 @@ class LSTMStateContainer:
         Indices with a value of -1 are sent as zero-states.
         """
 
+        net_states = net.get_lstm_states()
+        if len(net_states) == 0:
+            return
+
+        available_layers = [
+            layer_idx for layer_idx in net_states.keys() if layer_idx in self.states
+        ]
+        if len(available_layers) == 0:
+            return
+
         batch_size = len(indices)
         if batch_size != 1:
             valid_mask = indices != -1
@@ -178,7 +205,8 @@ class LSTMStateContainer:
             valid_indices_to_read = indices
 
         batch_states = {}
-        for layer_idx, components in self.states.items():
+        for layer_idx in available_layers:
+            components = self.states[layer_idx]
             state_dim = self.layer_state_shapes[layer_idx]
 
             # 1. Create zero-filled arrays for the batch
@@ -208,7 +236,8 @@ class LSTMStateContainer:
             }
 
         packed_states = self._pack_for_net(batch_states)
-        net.set_lstm_states(packed_states)
+        if len(packed_states) > 0:
+            net.set_lstm_states(packed_states)
 
     def __call__(self, *args, **kwds):
         pass
@@ -822,52 +851,87 @@ def prepare_input(
     input_seq_len: Optional[int] = None,
     sequential_model: bool = False,
 ):
+    def infer_input_seq_len() -> Optional[int]:
+        if input_seq_len is not None:
+            return input_seq_len
+        if look_back_mu is not None:
+            return int(look_back_mu.shape[1])
+        if look_back_var is not None:
+            return int(look_back_var.shape[1])
+        return None
+
+    def require_input_seq_len(inferred_seq_len: Optional[int]) -> int:
+        if inferred_seq_len is None:
+            raise ValueError("input_seq_len must be provided when sequential_model=True.")
+        return inferred_seq_len
+
+    def to_sequence_view(arr: np.ndarray, inferred_seq_len: int) -> np.ndarray:
+        if arr.ndim == 3:
+            if arr.shape[1] != inferred_seq_len:
+                raise ValueError(
+                    "Sequential input has inconsistent sequence length. "
+                    f"Expected input_seq_len={inferred_seq_len}, got {arr.shape[1]}."
+                )
+            return arr
+        if arr.shape[1] % inferred_seq_len != 0:
+            raise ValueError(
+                "Sequential inputs must have width divisible by input_seq_len. "
+                f"Got width={arr.shape[1]} and input_seq_len={inferred_seq_len}."
+            )
+        step_width = arr.shape[1] // inferred_seq_len
+        return arr.reshape(-1, inferred_seq_len, step_width)
+
+    x = np.asarray(x)
     if var_x is None:
         var_x = np.zeros_like(x, dtype=np.float32)
+    else:
+        var_x = np.asarray(var_x)
 
+    indices = np.asarray(indices)
     active_mask = indices >= 0
-    inferred_input_seq_len = input_seq_len
-    if inferred_input_seq_len is None and look_back_mu is not None:
-        inferred_input_seq_len = look_back_mu.shape[1]
-    target_positions = None
-    if look_back_mu is not None:
-        target_positions = get_target_positions(x.shape[1], inferred_input_seq_len)
+    inferred_input_seq_len = infer_input_seq_len()
 
-    if look_back_mu is not None:
+    if look_back_mu is not None or look_back_var is not None:
         active_rows = np.where(active_mask)[0]
-        x[np.ix_(active_rows, target_positions)] = look_back_mu[indices[active_mask]]
-    if look_back_var is not None:
-        active_rows = np.where(active_mask)[0]
-        var_x[np.ix_(active_rows, target_positions)] = look_back_var[
-            indices[active_mask]
-        ]
+        if active_rows.size > 0:
+            if inferred_input_seq_len is None:
+                raise ValueError(
+                    "input_seq_len could not be inferred for look-back inputs."
+                )
+            target_positions = get_target_positions(x.shape[1], inferred_input_seq_len)
+            if look_back_mu is not None:
+                x[np.ix_(active_rows, target_positions)] = look_back_mu[
+                    indices[active_mask]
+                ]
+            if look_back_var is not None:
+                var_x[np.ix_(active_rows, target_positions)] = look_back_var[
+                    indices[active_mask]
+                ]
 
     if embeddings is not None:
         lookup_indices = indices.copy()
-        lookup_indices[lookup_indices == -1] = 0
+        lookup_indices[lookup_indices < 0] = 0
         embed_mu, embed_var = embeddings(lookup_indices)  # shape: (B, E)
 
         embed_mu[~active_mask] = 0.0
         embed_var[~active_mask] = 0.0
 
         if sequential_model:
-            if inferred_input_seq_len is None:
-                raise ValueError(
-                    "input_seq_len must be provided when sequential_model=True."
-                )
-            step_width = x.shape[1] // inferred_input_seq_len
-            x = x.reshape(-1, inferred_input_seq_len, step_width)
-            var_x = var_x.reshape(-1, inferred_input_seq_len, step_width)
+            inferred_input_seq_len = require_input_seq_len(inferred_input_seq_len)
+            x = to_sequence_view(x, inferred_input_seq_len)
+            var_x = to_sequence_view(var_x, inferred_input_seq_len)
             embed_mu = np.repeat(embed_mu[:, None, :], inferred_input_seq_len, axis=1)
-            embed_var = np.repeat(embed_var[:, None, :], inferred_input_seq_len, axis=1)
-            x = np.concatenate((x, embed_mu), axis=2).reshape(len(indices), -1)
-            var_x = np.concatenate((var_x, embed_var), axis=2).reshape(len(indices), -1)
+            embed_var = np.repeat(
+                embed_var[:, None, :], inferred_input_seq_len, axis=1
+            )
+            x = np.concatenate((x, embed_mu), axis=2)
+            var_x = np.concatenate((var_x, embed_var), axis=2)
         else:
             x = np.concatenate((x, embed_mu), axis=1)
             var_x = np.concatenate((var_x, embed_var), axis=1)
 
-    x = x.astype(np.float32, copy=False)
-    var_x = var_x.astype(np.float32, copy=False)
+    x = np.asarray(x, dtype=np.float32)
+    var_x = np.asarray(var_x, dtype=np.float32)
 
     np.nan_to_num(x, copy=False, nan=0.0)
     np.nan_to_num(var_x, copy=False, nan=0.0)
@@ -876,18 +940,8 @@ def prepare_input(
     var_x = np.clip(var_x, a_min=1e-6, a_max=2.0)
 
     if sequential_model:
-        if inferred_input_seq_len is None:
-            raise ValueError(
-                "input_seq_len must be provided when sequential_model=True."
-            )
-        if x.ndim != 3:
-            if x.shape[1] % inferred_input_seq_len != 0:
-                raise ValueError(
-                    "Sequential inputs must have width divisible by input_seq_len. "
-                    f"Got width={x.shape[1]} and input_seq_len={inferred_input_seq_len}."
-                )
-            step_width = x.shape[1] // inferred_input_seq_len
-            x = x.reshape(-1, inferred_input_seq_len, step_width)
+        inferred_input_seq_len = require_input_seq_len(inferred_input_seq_len)
+        x = to_sequence_view(x, inferred_input_seq_len)
         return x, var_x.reshape(-1)
 
     return x.reshape(-1), var_x.reshape(-1)
