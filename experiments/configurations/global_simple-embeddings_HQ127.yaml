@@ -27,9 +27,9 @@ data:
     nb_ts: 127
 model:
   Sigma_v_bounds:
-  - null
-  - null
-  decaying_factor: 0.99
+  - 1
+  - 0.1
+  decaying_factor: 0.5
   device: cuda
   hidden_sizes:
   - 40

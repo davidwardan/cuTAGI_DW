@@ -1276,7 +1276,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Model category
             model_category = "global"
-            embed_category = "no-embeddings"
+            embed_category = "simple-embeddings"
 
             # Define experiment name
             experiment_name = (
@@ -1298,6 +1298,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
             config_dict["model_type"] = f"{model_category}_{embed_category}"
+            config.evaluation.eval_plots = True  # Ensure evaluation plots are enabled for logging
 
             # Display config
             config.display()

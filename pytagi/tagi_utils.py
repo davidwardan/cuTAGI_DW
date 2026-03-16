@@ -364,6 +364,22 @@ class Normalizer:
         return (data - mu) / (std + 1e-10)
 
     @staticmethod
+    def standardize_std(std_data: np.ndarray, std: np.ndarray) -> np.ndarray:
+        """Scales a standard deviation into standardized space.
+
+        The transformation is given by: :math:`\\text{std_data} / (\\sigma + \\epsilon)`.
+
+        :param std_data: The standard deviation in the original data space.
+        :type std_data: numpy.ndarray
+        :param std: The original standard deviation of the data.
+        :type std: numpy.ndarray
+        :return: The standard deviation in standardized space.
+        :rtype: numpy.ndarray
+        """
+
+        return std_data / (std + 1e-10)
+
+    @staticmethod
     def unstandardize(
         norm_data: np.ndarray, mu: np.ndarray, std: np.ndarray
     ) -> np.ndarray:
