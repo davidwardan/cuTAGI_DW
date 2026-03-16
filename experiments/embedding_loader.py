@@ -100,6 +100,37 @@ class EmbeddingLayer:
         # Buffers for accumulating updates
         self.mu_buffer = None
         self.var_buffer = None
+        self.buffer_touched = None
+        self.buffer_update_count = 0
+
+    def _resolve_cap_factor(self, num_updates: int) -> float:
+        """Mirror TAGI's batch-size-dependent update cap heuristic."""
+        if num_updates <= 1:
+            return 0.1
+        if num_updates < 256:
+            return 2.0
+        return 3.0
+
+    def _apply_capped_updates(
+        self,
+        idx: np.ndarray,
+        mu_delta: np.ndarray,
+        var_delta: np.ndarray,
+        num_updates: int,
+    ):
+        if idx.size == 0:
+            return
+
+        cap_factor = self._resolve_cap_factor(num_updates)
+        current_var = np.maximum(self.var[idx], 1e-6)
+        delta_bar = np.sqrt(current_var) / cap_factor
+
+        mu_step = np.clip(mu_delta, -delta_bar, delta_bar)
+        var_step = np.clip(var_delta, -delta_bar, delta_bar)
+
+        self.mu[idx] += mu_step
+        self.var[idx] += var_step
+        self.var[idx] = np.clip(self.var[idx], 1e-6, 1.0)
 
     def __call__(self, idx: np.ndarray) -> tuple:
         """
@@ -167,38 +198,61 @@ class EmbeddingLayer:
         mu_delta_filtered = mu_delta[active_mask] * lr
         var_delta_filtered = var_delta[active_mask] * lr
 
+        unique_idx, inverse = np.unique(idx_filtered, return_inverse=True)
+        aggregated_mu = np.zeros(
+            (unique_idx.size, self.embedding_dim[1]), dtype=np.float32
+        )
+        aggregated_var = np.zeros_like(aggregated_mu)
+        np.add.at(aggregated_mu, inverse, mu_delta_filtered)
+        np.add.at(aggregated_var, inverse, var_delta_filtered)
+
         if accumulate:
             # Initialize buffers if needed
             if self.mu_buffer is None:
                 self.mu_buffer = np.zeros_like(self.mu)
             if self.var_buffer is None:
                 self.var_buffer = np.zeros_like(self.var)
+            if self.buffer_touched is None:
+                self.buffer_touched = np.zeros(self.embedding_dim[0], dtype=bool)
 
             # Accumulate updates
-            np.add.at(self.mu_buffer, idx_filtered, mu_delta_filtered)
-            np.add.at(self.var_buffer, idx_filtered, var_delta_filtered)
+            self.mu_buffer[unique_idx] += aggregated_mu
+            self.var_buffer[unique_idx] += aggregated_var
+            self.buffer_touched[unique_idx] = True
+            self.buffer_update_count += int(idx_filtered.size)
         else:
-            # Apply immediately
-            np.add.at(self.mu, idx_filtered, mu_delta_filtered)
-            np.add.at(self.var, idx_filtered, var_delta_filtered)
-
-            np.clip(self.var, 1e-6, 1.0, out=self.var)
+            self._apply_capped_updates(
+                unique_idx,
+                aggregated_mu,
+                aggregated_var,
+                num_updates=int(idx_filtered.size),
+            )
 
     def apply_accumulated_updates(self):
         """
         Applies any updates that have been accumulated in the buffers.
         Resets buffers to zero after application.
         """
-        if self.mu_buffer is not None:
-            self.mu += self.mu_buffer
-            self.mu_buffer.fill(0.0)
+        if (
+            self.mu_buffer is None
+            or self.var_buffer is None
+            or self.buffer_touched is None
+        ):
+            return
 
-        if self.var_buffer is not None:
-            self.var += self.var_buffer
-            self.var_buffer.fill(0.0)
+        touched_idx = np.flatnonzero(self.buffer_touched)
+        if touched_idx.size > 0:
+            self._apply_capped_updates(
+                touched_idx,
+                self.mu_buffer[touched_idx],
+                self.var_buffer[touched_idx],
+                num_updates=self.buffer_update_count,
+            )
 
-        # Ensure variance constraint
-        np.clip(self.var, 1e-6, 1.0, out=self.var)
+        self.mu_buffer.fill(0.0)
+        self.var_buffer.fill(0.0)
+        self.buffer_touched.fill(False)
+        self.buffer_update_count = 0
 
     def save(self, out_file: str):
         """Saves embeddings to a .npz file."""
@@ -218,6 +272,8 @@ class EmbeddingLayer:
         # Reset buffers on load
         self.mu_buffer = None
         self.var_buffer = None
+        self.buffer_touched = None
+        self.buffer_update_count = 0
 
     def as_coordinates(self, n: int) -> Tuple[np.ndarray, np.ndarray]:
         """
