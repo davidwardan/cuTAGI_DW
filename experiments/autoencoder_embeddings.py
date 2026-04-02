@@ -17,8 +17,8 @@ CONFIG = {
     # File Paths
     "train_csv": "data/traffic/traffic_2008_01_14_train.csv",
     "val_csv": "data/traffic/traffic_2008_01_14_val.csv",
-    "output_plot": "out/embeddings_pca_attn.svg",
-    "output_embedding_file": "out/autoencoder_embeddings_attn.npy",
+    "output_plot": "experiments/out/embeddings_pca_attn.svg",
+    "output_embedding_file": "experiments/out/autoencoder_embeddings_attn.npy",
     # Model Params
     "seq_len": 24,  # Window size
     "embedding_dim": 10,  # Latent vector size
@@ -397,8 +397,8 @@ if __name__ == "__main__":
         ax_attn.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig("out/attention_maps_sample.svg")
-    print("Attention maps saved to out/attention_maps_sample.svg")
+    plt.savefig("experiments/out/attention_maps_sample.svg")
+    print("Attention maps saved to experiments/out/attention_maps_sample.svg")
 
     # --- Step 6: Aggregation ---
     res_df = pd.DataFrame(all_embeddings)

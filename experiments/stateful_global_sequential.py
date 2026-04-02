@@ -25,6 +25,8 @@ from experiments.utils import (
     bhattacharyya_distance_matrix,
     cosine_similarity_matrix,
     plot_similarity,
+    predictive_std_components,
+    load_predictive_uncertainty,
     calculate_updates,
     load_true_split_arrays,
     States,
@@ -57,7 +59,7 @@ mpl.rcParams.update(
 def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
-    output_dir = f"out/{experiment_name}/"
+    output_dir = f"experiments/out/{experiment_name}/"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -181,6 +183,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             batch_size=config.data.loader.batch_size,
             shuffle=config.training.shuffle,
             seed=epoch_seed,
+            drop_series_count=config.training.series_dropout_count,
+            drop_series_seed=epoch_seed,
         )
 
         # Initialize look-back buffer and LSTM state container
@@ -244,7 +248,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            s_pred_total = np.sqrt(v_pred + var_y)
+            s_pred_total, s_pred_epistemic, s_pred_aleatoric = (
+                predictive_std_components(v_pred, var_y)
+            )
 
             # Compute metrics
             mask = ~np.isnan(y.flatten())
@@ -260,6 +266,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             train_states.update(
                 new_mu=m_pred.reshape(B, -1),
                 new_std=s_pred_total.reshape(B, -1),
+                new_epistemic_std=s_pred_epistemic.reshape(B, -1),
+                new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
                 indices=indices,
                 time_step=time_steps,
             )
@@ -383,7 +391,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            s_pred_total = np.sqrt(v_pred + var_y)
+            s_pred_total, s_pred_epistemic, s_pred_aleatoric = (
+                predictive_std_components(v_pred, var_y)
+            )
 
             # Store metrics
             mask = ~np.isnan(y.flatten())
@@ -399,6 +409,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             val_states.update(
                 new_mu=m_pred.reshape(B, -1),
                 new_std=s_pred_total.reshape(B, -1),
+                new_epistemic_std=s_pred_epistemic.reshape(B, -1),
+                new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
                 indices=indices,
                 time_step=time_steps,
             )
@@ -579,12 +591,16 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             v_pred = flat_v[::2]  # even indices
             var_y = flat_m[1::2]  # odd indices var_v
 
-        s_pred_total = np.sqrt(v_pred + var_y)
+        s_pred_total, s_pred_epistemic, s_pred_aleatoric = predictive_std_components(
+            v_pred, var_y
+        )
 
         # Store predictions
         test_states.update(
             new_mu=m_pred.reshape(B, -1),
             new_std=s_pred_total.reshape(B, -1),
+            new_epistemic_std=s_pred_epistemic.reshape(B, -1),
+            new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
             indices=indices,
             time_step=time_steps,
         )
@@ -616,26 +632,41 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             # re-scale
             train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
             train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
+            train_states.epistemic_std[i] = normalizer.unstandardize_std(
+                train_states.epistemic_std[i], std
+            )
+            train_states.aleatoric_std[i] = normalizer.unstandardize_std(
+                train_states.aleatoric_std[i], std
+            )
             val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
             val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
+            val_states.epistemic_std[i] = normalizer.unstandardize_std(
+                val_states.epistemic_std[i], std
+            )
+            val_states.aleatoric_std[i] = normalizer.unstandardize_std(
+                val_states.aleatoric_std[i], std
+            )
             test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
             test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
+            test_states.epistemic_std[i] = normalizer.unstandardize_std(
+                test_states.epistemic_std[i], std
+            )
+            test_states.aleatoric_std[i] = normalizer.unstandardize_std(
+                test_states.aleatoric_std[i], std
+            )
 
     # Save results
     np.savez(
         os.path.join(output_dir, "train_states.npz"),
-        mu=train_states.mu,
-        std=train_states.std,
+        **train_states.to_dict(include_total_std=False),
     )
     np.savez(
         os.path.join(output_dir, "val_states.npz"),
-        mu=val_states.mu,
-        std=val_states.std,
+        **val_states.to_dict(include_total_std=False),
     )
     np.savez(
         os.path.join(output_dir, "test_states.npz"),
-        mu=test_states.mu,
-        std=test_states.std,
+        **test_states.to_dict(include_total_std=False),
     )
 
 
@@ -648,7 +679,7 @@ def eval_model(
 
     from pathlib import Path
 
-    input_dir = Path(f"out/{experiment_name}/")
+    input_dir = Path(f"experiments/out/{experiment_name}/")
 
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
@@ -695,9 +726,19 @@ def eval_model(
         wandb_run.define_metric("p90", summary="last")
 
     # Iterate over each time series and calculate metrics
-    train_offset = config.split_target_offset("train")
-    val_offset = config.split_target_offset("val")
-    test_offset = config.split_target_offset("test")
+    train_offset = config.true_split_target_offset("train")
+    val_offset = config.true_split_target_offset("val")
+    test_offset = config.true_split_target_offset("test")
+
+    train_total_std, train_epistemic, train_aleatoric = load_predictive_uncertainty(
+        train_states
+    )
+    val_total_std, val_epistemic, val_aleatoric = load_predictive_uncertainty(
+        val_states
+    )
+    test_total_std, test_epistemic, test_aleatoric = load_predictive_uncertainty(
+        test_states
+    )
 
     for i in tqdm(config.ts_to_use, desc="Evaluating series"):
 
@@ -718,10 +759,45 @@ def eval_model(
         ypred_full = np.concatenate([ypred_train, ypred_val, ypred_test])
 
         # get std
-        spred_train = train_states["std"][i][: len(yt_train)]
-        spred_val = val_states["std"][i][: len(yt_val)]
-        spred_test = test_states["std"][i][: len(yt_test)]
+        if (
+            train_total_std is None
+            or val_total_std is None
+            or test_total_std is None
+        ):
+            raise ValueError(
+                "Missing predictive uncertainty. Expected stored std or both epistemic_std and aleatoric_std."
+            )
+
+        spred_train = train_total_std[i][: len(yt_train)]
+        spred_val = val_total_std[i][: len(yt_val)]
+        spred_test = test_total_std[i][: len(yt_test)]
         spred_full = np.concatenate([spred_train, spred_val, spred_test])
+
+        if (
+            train_epistemic is not None
+            and val_epistemic is not None
+            and test_epistemic is not None
+            and train_aleatoric is not None
+            and val_aleatoric is not None
+            and test_aleatoric is not None
+        ):
+            spred_epistemic_full = np.concatenate(
+                [
+                    train_epistemic[i][: len(yt_train)],
+                    val_epistemic[i][: len(yt_val)],
+                    test_epistemic[i][: len(yt_test)],
+                ]
+            )
+            spred_aleatoric_full = np.concatenate(
+                [
+                    train_aleatoric[i][: len(yt_train)],
+                    val_aleatoric[i][: len(yt_val)],
+                    test_aleatoric[i][: len(yt_test)],
+                ]
+            )
+        else:
+            spred_epistemic_full = None
+            spred_aleatoric_full = None
 
         # Store split indices
         val_test_indices = (len(yt_train), len(yt_train) + len(yt_val))
@@ -733,6 +809,8 @@ def eval_model(
                 y_true=yt_full,
                 y_pred=ypred_full,
                 s_pred=spred_full,
+                epistemic_std=spred_epistemic_full,
+                aleatoric_std=spred_aleatoric_full,
                 out_dir=input_dir / "figures",
                 val_test_indices=val_test_indices,
                 std_factor=1,
@@ -1223,7 +1301,7 @@ def eval_model(
                 )
 
 
-def main(Train=True, Eval=True, log_wandb=False):
+def main(Train=True, Eval=True, log_wandb=True):
 
     list_of_seeds = [42]
     list_of_train_use_ratios = [1.0]
@@ -1236,7 +1314,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Model category
             model_category = "sequential-global"
-            embed_category = "no-embeddings"
+            embed_category = "simple-embeddings"
 
             # Define experiment name
             experiment_name = (
@@ -1245,13 +1323,14 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
+                f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.loader.train_use_ratio = train_use_ratio
             config.data.loader.order_mode = "shuffled_filtered"  # forced
+            config.evaluation.eval_plots = True  # force plots for analysis
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

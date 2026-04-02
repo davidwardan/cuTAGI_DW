@@ -81,7 +81,7 @@ global_stateful, output_updater1 = build_model(
     use_AGVI=True,
     seed=seed,
     device=device,
-    init_params="out/seed5/train100/BySeries2_global_simple-embeddings/param/model.bin",
+    init_params="experiments/out/seed5/train100/BySeries2_global_simple-embeddings/param/model.bin",
     shift_biases=False,
 )
 
@@ -90,7 +90,7 @@ global_stateless, output_updater2 = build_model(
     use_AGVI=True,
     seed=seed,
     device=device,
-    init_params="out/seed5/train100/Shuffled_stateless_global_simple-embeddings/param/model.bin",
+    init_params="experiments/out/seed5/train100/Shuffled_stateless_global_simple-embeddings/param/model.bin",
     shift_biases=False,
 )
 
@@ -99,7 +99,7 @@ adjust_params(global_stateless, "add", value=0.01, which_layer=["LSTM.1", "LSTM.
 
 
 # Create output directory
-output_dir = f"out/zeroshot/"
+output_dir = f"experiments/out/zeroshot/"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 

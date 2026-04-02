@@ -86,7 +86,7 @@ global_stateful, output_updater1 = build_model(
     use_AGVI=True,
     seed=seed,
     device=device,
-    init_params="out/seed11/train100/BySeries_global_no-embeddings/param/model.bin",
+    init_params="experiments/out/seed11/train100/BySeries_global_no-embeddings/param/model.bin",
     shift_biases=False,
 )
 
@@ -95,7 +95,7 @@ global_stateless, output_updater2 = build_model(
     use_AGVI=True,
     seed=seed,
     device=device,
-    init_params="out/seed11/train100/Shuffled_global_no-embeddings/param/model.bin",
+    init_params="experiments/out/seed11/train100/Shuffled_global_no-embeddings/param/model.bin",
     shift_biases=False,
 )
 
@@ -107,7 +107,7 @@ adjust_params(
 # )
 
 # Create output directory
-output_dir = f"out/zeroshot/"
+output_dir = f"experiments/out/zeroshot/"
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 

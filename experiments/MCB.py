@@ -15,8 +15,8 @@ Usage:
   python -m experiments.MCB [--method hsu|nemenyi]
 
 Outputs:
-  - out/mcb_results/plots/*.svg
-  - out/mcb_results/mcb_summary.csv
+  - experiments/out/mcb_results/plots/*.svg
+  - experiments/out/mcb_results/mcb_summary.csv
 
 References:
   Hsu, J.C. (1996). Multiple Comparisons: Theory and Methods. Chapman & Hall.
@@ -499,8 +499,8 @@ def plot_nemenyi_cd(
 
 
 def run_mcb_analysis(
-    base_dir: Path = Path("./out"),
-    out_dir: Path = Path("./out/mcb_results"),
+    base_dir: Path = Path("./experiments/out"),
+    out_dir: Path = Path("./experiments/out/mcb_results"),
     alpha: float = 0.05,
     metrics: List[str] = None,
     method: Literal["hsu", "nemenyi"] = "nemenyi",
@@ -665,14 +665,14 @@ def main():
     parser.add_argument(
         "--base-dir",
         type=Path,
-        default=Path("./out"),
+        default=Path("./experiments/out"),
         help="Base directory with experiment results (default: ./out)",
     )
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("./out/mcb_results"),
-        help="Output directory (default: ./out/mcb_results)",
+        default=Path("./experiments/out/mcb_results"),
+        help="Output directory (default: ./experiments/out/mcb_results)",
     )
     args = parser.parse_args()
 

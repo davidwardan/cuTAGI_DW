@@ -16,6 +16,7 @@ from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddi
 from experiments.data_loader import BatchLoader
 from experiments.utils import (
     prepare_data,
+    add_parameter_process_noise,
     build_model,
     prepare_input,
     extract_target_history,
@@ -24,13 +25,17 @@ from experiments.utils import (
     bhattacharyya_distance_matrix,
     cosine_similarity_matrix,
     plot_similarity,
+    predictive_std_components,
+    load_predictive_uncertainty,
     calculate_updates,
     load_true_split_arrays,
+    randomly_mask_lookback_means,
     States,
     EarlyStopping,
     LookBackBuffer,
     LSTMStateContainer,
 )
+from experiments.tracking import EpistemicUncertaintyTracker
 
 from pytagi import Normalizer as normalizer
 from pytagi import cuda
@@ -56,7 +61,7 @@ mpl.rcParams.update(
 def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
-    output_dir = f"out/{experiment_name}/"
+    output_dir = f"experiments/out/{experiment_name}/"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -130,6 +135,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         nb_ts=config.data.loader.nb_ts, total_time_steps=test_data.max_len
     )
 
+    train_epistemic_tracker = EpistemicUncertaintyTracker()
+
     # Create progress bar
     pbar = tqdm(range(config.training.num_epochs), desc="Epochs")
 
@@ -169,6 +176,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             batch_size=config.data.loader.batch_size,
             shuffle=config.training.shuffle,
             seed=epoch_seed,
+            drop_series_count=config.training.series_dropout_count,
+            drop_series_seed=epoch_seed,
         )
 
         # Initialize look-back buffer and LSTM state container
@@ -201,6 +210,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         m_preds = []
         std_preds = []
         y_trues = []
+        look_back_mask_rng = np.random.default_rng(
+            None if epoch_seed is None else epoch_seed + 100_000
+        )
 
         for (x, y), ts_id, w_id in train_batch_iter:
 
@@ -233,23 +245,41 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     indices=indices,
                 )
 
+            look_back_mu_input = (
+                look_back_buffer.mu
+                if config.training.use_look_back_predictions
+                else None
+            )
+            look_back_var_input = (
+                look_back_buffer.var
+                if config.training.use_look_back_predictions
+                else None
+            )
+            if look_back_mu_input is not None:
+                look_back_mu_input = randomly_mask_lookback_means(
+                    look_back_mu=look_back_mu_input,
+                    indices=indices,
+                    mask_prob=config.training.look_back_random_mask_prob,
+                    max_mask_count=config.training.look_back_random_mask_count,
+                    rng=look_back_mask_rng,
+                )
+
             # prepare input
             x, var_x = prepare_input(
                 x=x,
                 var_x=None,
-                look_back_mu=(
-                    look_back_buffer.mu
-                    if config.training.use_look_back_predictions
-                    else None
-                ),
-                look_back_var=(
-                    look_back_buffer.var
-                    if config.training.use_look_back_predictions
-                    else None
-                ),
+                look_back_mu=look_back_mu_input,
+                look_back_var=look_back_var_input,
                 indices=ts_id,
                 embeddings=(embeddings if config.total_embedding_size != 0 else None),
             )
+
+            if config.training.parameter_process_noise != 0.0:
+                if epoch < config.training.warmup_epochs:
+                    add_parameter_process_noise(
+                        net,
+                        process_noise=config.training.parameter_process_noise,
+                    )
 
             # Feedforward
             m_pred, v_pred = net(x, var_x)
@@ -263,10 +293,14 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            s_pred_total = np.sqrt(v_pred + var_y)
+            s_pred_total, s_pred_epistemic, s_pred_aleatoric = (
+                predictive_std_components(v_pred, var_y)
+            )
 
             # Compute metrics
             mask = ~np.isnan(y.flatten())
+            train_epistemic_tracker.update(v_pred, mask=mask)
+
             y_masked = y.flatten()[mask]
             m_pred_masked = m_pred[mask]
             s_pred_masked = s_pred_total[mask]
@@ -279,6 +313,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             train_states.update(
                 new_mu=m_pred.reshape(B, -1),
                 new_std=s_pred_total.reshape(B, -1),
+                new_epistemic_std=s_pred_epistemic.reshape(B, -1),
+                new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
                 indices=indices,
                 time_step=time_steps,
             )
@@ -322,14 +358,18 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             # Where y is available use y otherwuse use m_pred
             y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+            # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=y_lookback.reshape(B, -1),
-                new_var=v_lookback.reshape(B, -1),
+                # new_mu=m_post.reshape(B, -1),
+                new_mu = y_lookback.reshape(B,-1),
+                new_var=v_post.reshape(B, -1),
+                # new_var = v_lookback.reshape(B,-1),
                 indices=indices,
             )
+
+        train_epistemic_tracker.step_epoch(epoch)
 
         # End of training
         train_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
@@ -408,10 +448,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 v_pred = flat_v[::2]  # even indices
                 var_y = flat_m[1::2]  # odd indices var_v
 
-            s_pred_total = np.sqrt(v_pred + var_y)
+            mask = ~np.isnan(y.flatten())
+
+            s_pred_total, s_pred_epistemic, s_pred_aleatoric = (
+                predictive_std_components(v_pred, var_y)
+            )
 
             # Store metrics
-            mask = ~np.isnan(y.flatten())
             y_masked = y.flatten()[mask]
             m_pred_masked = m_pred[mask]
             s_pred_masked = s_pred_total[mask]
@@ -424,6 +467,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             val_states.update(
                 new_mu=m_pred.reshape(B, -1),
                 new_std=s_pred_total.reshape(B, -1),
+                new_epistemic_std=s_pred_epistemic.reshape(B, -1),
+                new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
                 indices=indices,
                 time_step=time_steps,
             )
@@ -532,6 +577,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         elif config.use_standard_embeddings:
             embeddings.save(os.path.join(embedding_dir, "embeddings_final.npz"))
 
+    tracking_dir = os.path.join(output_dir, "tracking")
+    train_epistemic_tracker.save(tracking_dir)
+    train_epistemic_tracker.plot(tracking_dir)
+
     # --- Testing ---
     net.eval()
 
@@ -607,12 +656,16 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             v_pred = flat_v[::2]  # even indices
             var_y = flat_m[1::2]  # odd indices var_v
 
-        s_pred_total = np.sqrt(v_pred + var_y)
+        s_pred_total, s_pred_epistemic, s_pred_aleatoric = predictive_std_components(
+            v_pred, var_y
+        )
 
         # Store predictions
         test_states.update(
             new_mu=m_pred.reshape(B, -1),
             new_std=s_pred_total.reshape(B, -1),
+            new_epistemic_std=s_pred_epistemic.reshape(B, -1),
+            new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
             indices=indices,
             time_step=time_steps,
         )
@@ -656,26 +709,41 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             # re-scale
             train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
             train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
+            train_states.epistemic_std[i] = normalizer.unstandardize_std(
+                train_states.epistemic_std[i], std
+            )
+            train_states.aleatoric_std[i] = normalizer.unstandardize_std(
+                train_states.aleatoric_std[i], std
+            )
             val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
             val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
+            val_states.epistemic_std[i] = normalizer.unstandardize_std(
+                val_states.epistemic_std[i], std
+            )
+            val_states.aleatoric_std[i] = normalizer.unstandardize_std(
+                val_states.aleatoric_std[i], std
+            )
             test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
             test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
+            test_states.epistemic_std[i] = normalizer.unstandardize_std(
+                test_states.epistemic_std[i], std
+            )
+            test_states.aleatoric_std[i] = normalizer.unstandardize_std(
+                test_states.aleatoric_std[i], std
+            )
 
     # Save results
     np.savez(
         os.path.join(output_dir, "train_states.npz"),
-        mu=train_states.mu,
-        std=train_states.std,
+        **train_states.to_dict(include_total_std=False),
     )
     np.savez(
         os.path.join(output_dir, "val_states.npz"),
-        mu=val_states.mu,
-        std=val_states.std,
+        **val_states.to_dict(include_total_std=False),
     )
     np.savez(
         os.path.join(output_dir, "test_states.npz"),
-        mu=test_states.mu,
-        std=test_states.std,
+        **test_states.to_dict(include_total_std=False),
     )
 
 
@@ -688,7 +756,7 @@ def eval_model(
 
     from pathlib import Path
 
-    input_dir = Path(f"out/{experiment_name}/")
+    input_dir = Path(f"experiments/out/{experiment_name}/")
 
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
@@ -735,9 +803,19 @@ def eval_model(
         wandb_run.define_metric("p90", summary="last")
 
     # Iterate over each time series and calculate metrics
-    train_offset = config.split_target_offset("train")
-    val_offset = config.split_target_offset("val")
-    test_offset = config.split_target_offset("test")
+    train_offset = config.true_split_target_offset("train")
+    val_offset = config.true_split_target_offset("val")
+    test_offset = config.true_split_target_offset("test")
+
+    train_total_std, train_epistemic, train_aleatoric = load_predictive_uncertainty(
+        train_states
+    )
+    val_total_std, val_epistemic, val_aleatoric = load_predictive_uncertainty(
+        val_states
+    )
+    test_total_std, test_epistemic, test_aleatoric = load_predictive_uncertainty(
+        test_states
+    )
 
     for i in tqdm(config.ts_to_use, desc="Evaluating series"):
 
@@ -758,10 +836,41 @@ def eval_model(
         ypred_full = np.concatenate([ypred_train, ypred_val, ypred_test])
 
         # get std
-        spred_train = train_states["std"][i][: len(yt_train)]
-        spred_val = val_states["std"][i][: len(yt_val)]
-        spred_test = test_states["std"][i][: len(yt_test)]
+        if train_total_std is None or val_total_std is None or test_total_std is None:
+            raise ValueError(
+                "Missing predictive uncertainty. Expected stored std or both epistemic_std and aleatoric_std."
+            )
+
+        spred_train = train_total_std[i][: len(yt_train)]
+        spred_val = val_total_std[i][: len(yt_val)]
+        spred_test = test_total_std[i][: len(yt_test)]
         spred_full = np.concatenate([spred_train, spred_val, spred_test])
+
+        if (
+            train_epistemic is not None
+            and val_epistemic is not None
+            and test_epistemic is not None
+            and train_aleatoric is not None
+            and val_aleatoric is not None
+            and test_aleatoric is not None
+        ):
+            spred_epistemic_full = np.concatenate(
+                [
+                    train_epistemic[i][: len(yt_train)],
+                    val_epistemic[i][: len(yt_val)],
+                    test_epistemic[i][: len(yt_test)],
+                ]
+            )
+            spred_aleatoric_full = np.concatenate(
+                [
+                    train_aleatoric[i][: len(yt_train)],
+                    val_aleatoric[i][: len(yt_val)],
+                    test_aleatoric[i][: len(yt_test)],
+                ]
+            )
+        else:
+            spred_epistemic_full = None
+            spred_aleatoric_full = None
 
         # Store split indices
         val_test_indices = (len(yt_train), len(yt_train) + len(yt_val))
@@ -773,6 +882,8 @@ def eval_model(
                 y_true=yt_full,
                 y_pred=ypred_full,
                 s_pred=spred_full,
+                epistemic_std=spred_epistemic_full,
+                aleatoric_std=spred_aleatoric_full,
                 out_dir=input_dir / "figures",
                 val_test_indices=val_test_indices,
                 std_factor=1,
@@ -1265,7 +1376,7 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [43]
+    list_of_seeds = [17]
     list_of_train_use_ratios = [1.0]
 
     # Iterate over experiments and seeds
@@ -1276,29 +1387,28 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Model category
             model_category = "global"
-            embed_category = "simple-embeddings"
+            embed_category = "no-embeddings"
 
             # Define experiment name
             experiment_name = (
                 f"seed{seed}/{ratio_tag}/"
-                f"ByWindow_{model_category}_{embed_category}"
+                f"ByWindow_{model_category}_{embed_category}_lb26_ZO_whitenoise"
             )
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
+                f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.loader.train_use_ratio = train_use_ratio
-            config.data.loader.order_mode = "by_window"
+            # config.data.loader.order_mode = "by_series_batch"
             config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
             config_dict["model_type"] = f"{model_category}_{embed_category}"
-            config.evaluation.eval_plots = True  # Ensure evaluation plots are enabled for logging
 
             # Display config
             config.display()

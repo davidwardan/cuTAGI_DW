@@ -55,7 +55,7 @@ mpl.rcParams.update(
 def run_model(config, experiment_name: Optional[str] = None):
 
     # Create output directory
-    output_dir = f"out/{experiment_name}/"
+    output_dir = f"experiments/out/{experiment_name}/"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -459,7 +459,7 @@ def eval_model(
 
     from pathlib import Path
 
-    input_dir = Path(f"out/{experiment_name}/")
+    input_dir = Path(f"experiments/out/{experiment_name}/")
 
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
@@ -504,9 +504,9 @@ def eval_model(
         wandb_run.define_metric("p90", summary="last")
 
     # Iterate over each time series and calculate metrics
-    train_offset = config.split_target_offset("train")
-    val_offset = config.split_target_offset("val")
-    test_offset = config.split_target_offset("test")
+    train_offset = config.true_split_target_offset("train")
+    val_offset = config.true_split_target_offset("val")
+    test_offset = config.true_split_target_offset("test")
 
     for i in tqdm(config.ts_to_use, desc="Evaluating series"):
 
@@ -1055,14 +1055,14 @@ def main(Train=True, Eval=True):
 
             # Load configuration
             config = Config.from_yaml(
-                f"out/seed{seed}/{ratio_tag}/experiment01_global-shuffled_no-embeddings/config.yaml"
+                f"experiments/out/seed{seed}/{ratio_tag}/experiment01_global-shuffled_no-embeddings/config.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.loader.train_use_ratio = train_use_ratio
             config.model.initialization.from_file = (
-                f"out/seed{seed}/{ratio_tag}/"
+                f"experiments/out/seed{seed}/{ratio_tag}/"
                 f"experiment01_global-shuffled_no-embeddings/param/model.bin"
             )
             config.evaluation.eval_plots = True

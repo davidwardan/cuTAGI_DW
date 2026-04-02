@@ -112,6 +112,10 @@ class Training(BaseModel):
     warmup_epochs: int = 0
     shuffle: bool = True
     use_look_back_predictions: bool = True
+    parameter_process_noise: float = 0.0
+    series_dropout_count: int = Field(default=0, ge=0)
+    look_back_random_mask_prob: float = Field(default=0.0, ge=0.0, le=1.0)
+    look_back_random_mask_count: int = Field(default=0, ge=0)
 
 
 class Evaluation(BaseModel):
@@ -296,6 +300,13 @@ class Config(BaseModel):
                 return 0
             return self.window_len
         raise ValueError(f"Unknown split '{split}'. Expected train, val, or test.")
+
+    def true_split_target_offset(self, split: str) -> int:
+        """Returns leading context rows to drop for arrays from load_true_split_arrays."""
+        if self.use_full_dataset_split:
+            # Full-dataset splitting returns core truth arrays without prepended context.
+            return 0
+        return self.split_target_offset(split)
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":

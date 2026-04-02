@@ -477,8 +477,8 @@ def plot_metrics(agg: pd.DataFrame, out_dir: Path) -> None:
 
 def main():
 
-    base_dir = Path("./out").expanduser()
-    out_dir = Path("./out/summarized_metrics").expanduser()
+    base_dir = Path("./experiments/out").expanduser()
+    out_dir = Path("./experiments/out/summarized_metrics").expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = collect_all(base_dir)

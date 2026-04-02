@@ -43,9 +43,9 @@ if __name__ == "__main__":
     # plot heat map of similarity matrix
     # plot_similarity(
     #     sim_matrix,
-    #     "out/matrix_profile_matrix.pdf",
+    #     "experiments/out/matrix_profile_matrix.pdf",
     #     "Matrix Profile Similarity Matrix",
     #     vmin=0.0,
     # )
 
-    plot_similarity_graph(sim_matrix, out_path="./out/", threshold=0.4)
+    plot_similarity_graph(sim_matrix, out_path="./experiments/out/", threshold=0.4)

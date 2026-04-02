@@ -53,7 +53,7 @@ mpl.rcParams.update(
 def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Create output directory
-    output_dir = f"out/{experiment_name}/"
+    output_dir = f"experiments/out/{experiment_name}/"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -557,7 +557,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 def eval_model(config, experiment_name: Optional[str] = None):
     """Evaluates forecasts stored in the .npz format."""
 
-    input_dir = Path(f"out/{experiment_name}/")
+    input_dir = Path(f"experiments/out/{experiment_name}/")
 
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
@@ -596,9 +596,9 @@ def eval_model(config, experiment_name: Optional[str] = None):
     all_spred_test = []
 
     # Iterate over each time series and calculate metrics
-    train_offset = config.split_target_offset("train")
-    val_offset = config.split_target_offset("val")
-    test_offset = config.split_target_offset("test")
+    train_offset = config.true_split_target_offset("train")
+    val_offset = config.true_split_target_offset("val")
+    test_offset = config.true_split_target_offset("test")
 
     for local_idx, ts_id in tqdm(
         enumerate(config.ts_to_use),
@@ -746,7 +746,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             model_category = "locals"
 
             # Create folders for storing results
-            output_base_dir = f"out/seed{seed}/{ratio_tag}"
+            output_base_dir = f"experiments/out/seed{seed}/{ratio_tag}"
             if not os.path.exists(output_base_dir):
                 os.makedirs(output_base_dir)
 
@@ -755,7 +755,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Create configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_HQ127.yaml"
+                f"experiments/config/{model_category}_HQ127.yaml"
             )
 
             config.seed = seed

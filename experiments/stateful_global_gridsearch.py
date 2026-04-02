@@ -12,16 +12,16 @@ from tqdm import tqdm
 from experiments.config import Config
 from experiments.wandb_helpers import finish_run, init_run
 from experiments import stateful_global as base_script
-from experiments.utils import load_true_split_arrays
+from experiments.utils import load_predictive_uncertainty, load_true_split_arrays
 
 from pytagi import Normalizer as normalizer
 from pytagi import cuda
 import pytagi.metric as metric
 
 DEFAULT_SEEDS: Sequence[int] = (
-    11,
-    42,
-    235,
+    2016,
+    2005,
+    2012,
 )
 DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (1.0,)
 
@@ -43,8 +43,14 @@ def _compute_validation_metrics(
     config: Config,
     experiment_name: str,
 ) -> Dict[str, float]:
-    input_dir = Path("out") / experiment_name
+    input_dir = Path("experiments/out") / experiment_name
     val_states = np.load(input_dir / "val_states.npz")
+    val_total_std, _, _ = load_predictive_uncertainty(val_states)
+    if val_total_std is None:
+        raise ValueError(
+            "Missing predictive uncertainty in val_states.npz. "
+            "Expected either `std` or both `epistemic_std` and `aleatoric_std`."
+        )
 
     true_train, true_val, _ = load_true_split_arrays(**config.true_split_kwargs())
 
@@ -56,8 +62,8 @@ def _compute_validation_metrics(
     all_stand_y_pred = []
     all_stand_s_pred = []
 
-    train_offset = config.split_target_offset("train")
-    val_offset = config.split_target_offset("val")
+    train_offset = config.true_split_target_offset("train")
+    val_offset = config.true_split_target_offset("val")
 
     for ts_idx in tqdm(config.ts_to_use, desc="Scoring validation series", leave=False):
         local_idx = config.ts_to_use.index(ts_idx)
@@ -69,7 +75,7 @@ def _compute_validation_metrics(
             continue
 
         ypred_val = val_states["mu"][local_idx][: len(yt_val)]
-        spred_val = val_states["std"][local_idx][: len(yt_val)]
+        spred_val = val_total_std[local_idx][: len(yt_val)]
 
         if config.data.loader.scale_method == "standard":
             train_mean = np.nanmean(yt_train)
@@ -187,7 +193,7 @@ def optimize_lookback(
     if any(value < 2 for value in candidate_values):
         raise ValueError("All lookback candidates must be >= 2.")
 
-    output_dir = Path("out") / experiment_name
+    output_dir = Path("experiments/out") / experiment_name
     os.makedirs(output_dir, exist_ok=True)
     config.to_yaml(output_dir / "config.yaml")
 
@@ -302,20 +308,20 @@ def main(
             print(f"Running experiment: {ratio_tag} with seed {seed}")
 
             model_category = "global"
-            embed_category = "no-embeddings"
+            embed_category = "hierarchical-embeddings"
             experiment_name = (
                 f"seed{seed}/{ratio_tag}/"
-                f"experiment01_{model_category}_{embed_category}_gridsearch"
+                f"experiment01_{model_category}_{embed_category}_gridsearch_tagiv"
             )
 
             config = Config.from_yaml(
-                "experiments/configurations/global_no-embeddings_HQ127_gridsearch.yaml"
+                f"experiments/config/{model_category}_{embed_category}_HQ127_gridsearch.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.loader.train_use_ratio = train_use_ratio
-            config.data.loader.order_mode = "by_window"
+            # config.data.loader.order_mode = "by_window"
 
             config_dict = config.wandb_dict()
             config_dict["model_type"] = f"{model_category}_{embed_category}_gridsearch"
@@ -347,7 +353,7 @@ def main(
                 )
             elif Eval:
                 summary_path = (
-                    Path("out") / experiment_name / "lookback_search_summary.json"
+                    Path("experiments/out") / experiment_name / "lookback_search_summary.json"
                 )
                 if not summary_path.exists():
                     raise FileNotFoundError(

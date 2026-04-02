@@ -424,7 +424,7 @@ class TimeSeriesDataBuilder:
         # plt.tight_layout()
         # plt.xlim(-1, len(all_means))
         # plt.ylim(-5, 5)
-        # plt.savefig(f"out/dist_{pdf_name}.svg")
+        # plt.savefig(f"experiments/out/dist_{pdf_name}.svg")
         # plt.close()
 
         # --- Concatenation Logic ---
@@ -583,6 +583,117 @@ class TimeSeriesDataBuilder:
 
 class BatchLoader:
     # -- Data Loader Generators ---
+    @staticmethod
+    def _drop_random_series(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        drop_series_count: int,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Removes all windows belonging to a random subset of series."""
+        if drop_series_count < 0:
+            raise ValueError("drop_series_count must be non-negative.")
+        if drop_series_count == 0 or len(S) == 0:
+            return X, Y, S, K
+
+        active_series_ids = np.unique(S[S >= 0])
+        n_active_series = len(active_series_ids)
+        if n_active_series == 0:
+            return X, Y, S, K
+        if drop_series_count >= n_active_series:
+            raise ValueError(
+                "drop_series_count must be smaller than the number of active "
+                f"series in the dataset. Got {drop_series_count} for "
+                f"{n_active_series} active series."
+            )
+
+        if rng is None:
+            dropped_series_ids = np.random.choice(
+                active_series_ids,
+                size=drop_series_count,
+                replace=False,
+            )
+        else:
+            dropped_series_ids = rng.choice(
+                active_series_ids,
+                size=drop_series_count,
+                replace=False,
+            )
+
+        keep_mask = ~np.isin(S, dropped_series_ids)
+        return X[keep_mask], Y[keep_mask], S[keep_mask], K[keep_mask]
+
+    @staticmethod
+    def create_data_loader(
+        dataset: Dict[str, np.ndarray],
+        order_mode: str,
+        batch_size: int,
+        shuffle: bool = False,
+        seed: Optional[int] = None,
+        drop_series_count: int = 0,
+        drop_series_seed: Optional[int] = None,
+    ) -> Generator[
+        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
+    ]:
+        """
+        Creates a batch generator from a global time series dataset.
+
+        Args:
+            dataset: Prepared dataset dictionary returned by TimeSeriesDataBuilder.
+            order_mode: Batch ordering strategy.
+            batch_size: Number of samples per batch.
+            shuffle: Whether to shuffle according to the selected order mode.
+            seed: RNG seed for loader ordering/shuffling.
+            drop_series_count: Number of full series to exclude from this loader.
+            drop_series_seed: Optional separate RNG seed for series dropout.
+        """
+        (X, Y) = dataset["value"]
+        S = dataset["series_id"]
+        K = dataset["window_id"]
+
+        if len(X) == 0:
+            return
+
+        rng = np.random.default_rng(seed) if seed is not None else None
+        dropout_rng = (
+            np.random.default_rng(drop_series_seed)
+            if drop_series_seed is not None
+            else rng
+        )
+
+        if drop_series_count > 0:
+            X, Y, S, K = BatchLoader._drop_random_series(
+                X, Y, S, K, drop_series_count, dropout_rng
+            )
+            if len(X) == 0:
+                return
+
+        # Call the other static methods using the class name
+        if order_mode == "by_series":
+            yield from BatchLoader._loader_by_series(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "by_series_batch":
+            yield from BatchLoader._loader_by_series_batch(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "by_window":
+            yield from BatchLoader._loader_by_window(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "shuffled":
+            yield from BatchLoader._loader_shuffled(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        elif order_mode == "shuffled_filtered":
+            yield from BatchLoader._loader_shuffled(
+                X, Y, S, K, batch_size, shuffle, rng
+            )
+        else:
+            raise ValueError(f"Unknown order_mode: {order_mode}")
+
     @staticmethod
     def _loader_by_window(
         X: np.ndarray,
@@ -869,59 +980,3 @@ class BatchLoader:
                 yield (np.array(x_batch_list), np.array(y_batch_list)), np.array(
                     s_batch_list
                 ), np.array(k_batch_list)
-
-    def create_data_loader(
-        dataset: Dict[str, np.ndarray],
-        order_mode: str,
-        batch_size: int,
-        shuffle: bool = False,
-        seed: Optional[int] = None,
-    ) -> Generator[
-        Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
-    ]:
-        """
-        Creates a batch generator from a global time series dataset.
-
-        Usage:
-        loader_instance = GlobalTimeSeriesDataloader(...)
-        my_dataset = loader_instance.dataset
-
-        # Call the static method on the class itself
-        loader = GlobalTimeSeriesDataloader.create_data_loader(
-            my_dataset, 'by_window', 32
-        )
-        for (x, y), s, k in loader:
-            #... training logic ...
-        """
-        (X, Y) = dataset["value"]
-        S = dataset["series_id"]
-        K = dataset["window_id"]
-
-        if len(X) == 0:
-            return
-
-        rng = np.random.default_rng(seed) if seed is not None else None
-
-        # Call the other static methods using the class name
-        if order_mode == "by_series":
-            yield from BatchLoader._loader_by_series(
-                X, Y, S, K, batch_size, shuffle, rng
-            )
-        elif order_mode == "by_series_batch":
-            yield from BatchLoader._loader_by_series_batch(
-                X, Y, S, K, batch_size, shuffle, rng
-            )
-        elif order_mode == "by_window":
-            yield from BatchLoader._loader_by_window(
-                X, Y, S, K, batch_size, shuffle, rng
-            )
-        elif order_mode == "shuffled":
-            yield from BatchLoader._loader_shuffled(
-                X, Y, S, K, batch_size, shuffle, rng
-            )
-        elif order_mode == "shuffled_filtered":
-            yield from BatchLoader._loader_shuffled(
-                X, Y, S, K, batch_size, shuffle, rng
-            )
-        else:
-            raise ValueError(f"Unknown order_mode: {order_mode}")

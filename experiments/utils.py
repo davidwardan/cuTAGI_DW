@@ -84,6 +84,7 @@ class LSTMStateContainer:
         self.num_series = num_series
         self.layer_state_shapes = layer_state_shapes
         self.states = {}
+        self._runtime_layout_initialized = False
 
         # Initialize NumPy arrays for each layer and state component
         for layer_idx, state_dim in layer_state_shapes.items():
@@ -95,27 +96,65 @@ class LSTMStateContainer:
                 "var_c": np.zeros((num_series, state_dim), dtype=np.float32),
             }
 
+    def _ensure_layer_state_shape(self, layer_idx: int, state_dim: int) -> None:
+        """Ensures storage exists for `layer_idx` with shape (num_series, state_dim)."""
+        if state_dim <= 0:
+            raise ValueError(f"State dimension must be positive, got {state_dim}.")
+
+        current_dim = self.layer_state_shapes.get(layer_idx)
+        has_layer = layer_idx in self.states
+        needs_resize = (
+            current_dim != state_dim
+            or not has_layer
+            or self.states[layer_idx]["mu_h"].shape != (self.num_series, state_dim)
+        )
+        if needs_resize:
+            self.layer_state_shapes[layer_idx] = state_dim
+            self.states[layer_idx] = {
+                "mu_h": np.zeros((self.num_series, state_dim), dtype=np.float32),
+                "var_h": np.zeros((self.num_series, state_dim), dtype=np.float32),
+                "mu_c": np.zeros((self.num_series, state_dim), dtype=np.float32),
+                "var_c": np.zeros((self.num_series, state_dim), dtype=np.float32),
+            }
+
+    @staticmethod
+    def _validate_state_component_sizes(
+        layer_idx: int,
+        mu_h,
+        var_h,
+        mu_c,
+        var_c,
+    ) -> int:
+        """Checks that all LSTM state components for a layer have matching flat sizes."""
+        sizes = (len(mu_h), len(var_h), len(mu_c), len(var_c))
+        if not (sizes[0] == sizes[1] == sizes[2] == sizes[3]):
+            raise ValueError(
+                f"Inconsistent state component sizes for layer {layer_idx}: "
+                f"mu_h={sizes[0]}, var_h={sizes[1]}, mu_c={sizes[2]}, var_c={sizes[3]}."
+            )
+        return sizes[0]
+
     def _unpack_net_states(self, net_states: dict, batch_size: int):
         """Helper to unpack the flat state arrays from the network into a structured dict."""
         try:
             unpacked = {}
             for layer_idx, (mu_h, var_h, mu_c, var_c) in net_states.items():
-                state_dim = self.layer_state_shapes.get(layer_idx)
-                if state_dim is None:
-                    if batch_size <= 0:
-                        raise ValueError("batch_size must be positive.")
-                    if len(mu_h) % batch_size != 0:
-                        raise ValueError(
-                            "Cannot infer state dimension from backend state sizes."
-                        )
-                    state_dim = len(mu_h) // batch_size
-                    self.layer_state_shapes[layer_idx] = state_dim
-                    self.states[layer_idx] = {
-                        "mu_h": np.zeros((self.num_series, state_dim), dtype=np.float32),
-                        "var_h": np.zeros((self.num_series, state_dim), dtype=np.float32),
-                        "mu_c": np.zeros((self.num_series, state_dim), dtype=np.float32),
-                        "var_c": np.zeros((self.num_series, state_dim), dtype=np.float32),
-                    }
+                if batch_size <= 0:
+                    raise ValueError("batch_size must be positive.")
+
+                flat_size = self._validate_state_component_sizes(
+                    layer_idx, mu_h, var_h, mu_c, var_c
+                )
+                if flat_size == 0:
+                    continue
+                if flat_size % batch_size != 0:
+                    raise ValueError(
+                        "Cannot infer state dimension from backend state sizes."
+                    )
+
+                state_dim = flat_size // batch_size
+                self._ensure_layer_state_shape(layer_idx, state_dim)
+
                 # Reshape from flat array to (batch_size, state_dim)
                 unpacked[layer_idx] = {
                     "mu_h": np.asarray(mu_h).reshape(batch_size, state_dim),
@@ -125,6 +164,8 @@ class LSTMStateContainer:
                 }
             return unpacked
         except Exception as e:
+            layer_idx = locals().get("layer_idx", "unknown")
+            state_dim = locals().get("state_dim", "unknown")
             raise ValueError(
                 f"Error unpacking network states: {e}. "
                 f"Check that the network states match expected shapes."
@@ -163,6 +204,9 @@ class LSTMStateContainer:
         batch_size = len(indices)
 
         unpacked_states = self._unpack_net_states(net_states, batch_size)
+        if len(unpacked_states) == 0:
+            return
+        self._runtime_layout_initialized = True
 
         # Vectorized update using advanced indexing
         for layer_idx, components in unpacked_states.items():
@@ -185,29 +229,36 @@ class LSTMStateContainer:
 
         Indices with a value of -1 are sent as zero-states.
         """
+        indices = np.asarray(indices)
+        batch_size = len(indices)
+        if batch_size <= 0:
+            return
+        # Avoid touching backend LSTM buffers before first forward has initialized them.
+        if not self._runtime_layout_initialized:
+            return
 
         net_states = net.get_lstm_states()
         if len(net_states) == 0:
             return
 
-        available_layers = [
-            layer_idx for layer_idx in net_states.keys() if layer_idx in self.states
-        ]
-        if len(available_layers) == 0:
-            return
-
-        batch_size = len(indices)
-        if batch_size != 1:
-            valid_mask = indices != -1
-            valid_indices_to_read = indices[valid_mask]
-        else:
-            valid_mask = np.array([True], dtype=bool)
-            valid_indices_to_read = indices
+        valid_mask = indices != -1
+        valid_indices_to_read = indices[valid_mask]
 
         batch_states = {}
-        for layer_idx in available_layers:
+        for layer_idx, (mu_h, var_h, mu_c, var_c) in net_states.items():
+            flat_size = self._validate_state_component_sizes(
+                layer_idx, mu_h, var_h, mu_c, var_c
+            )
+            # Skip layers that are not initialized yet on the backend.
+            if flat_size == 0:
+                continue
+            # If the backend reports a non-batch-aligned size, avoid sending states.
+            if flat_size % batch_size != 0:
+                continue
+
+            state_dim = flat_size // batch_size
+            self._ensure_layer_state_shape(layer_idx, state_dim)
             components = self.states[layer_idx]
-            state_dim = self.layer_state_shapes[layer_idx]
 
             # 1. Create zero-filled arrays for the batch
             batch_mu_h = np.zeros((batch_size, state_dim), dtype=np.float32)
@@ -361,19 +412,35 @@ class EarlyStopping:
 # --- States Class for plotting ---
 class States:
     def __init__(self, nb_ts, total_time_steps):
-        """Initializes storage for mean and variance for time series states."""
+        """Initializes storage for predictions and uncertainty components."""
         self.mu = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
         self.std = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
+        self.epistemic_std = np.full(
+            (nb_ts, total_time_steps), np.nan, dtype=np.float32
+        )
+        self.aleatoric_std = np.full(
+            (nb_ts, total_time_steps), np.nan, dtype=np.float32
+        )
 
-    def update(self, new_mu, new_std, indices, time_step):
+    def update(
+        self,
+        new_mu,
+        new_std,
+        indices,
+        time_step,
+        new_epistemic_std=None,
+        new_aleatoric_std=None,
+    ):
         """
         Efficiently updates states using vectorized NumPy indexing.
 
         Args:
             new_mu: Array of new mean values.
-            new_std: Array of new std values.
+            new_std: Array of new total predictive std values.
             indices: Array of time series indices to update.
             time_step: Array of time steps to update.
+            new_epistemic_std: Optional array of epistemic std values.
+            new_aleatoric_std: Optional array of aleatoric std values.
         """
         indices = np.asarray(indices)
         valid_mask = indices >= 0
@@ -387,22 +454,89 @@ class States:
 
         indices = indices[valid_mask]
 
-        # Handle new_mu / new_std if they match indices size
-        if not np.isscalar(new_mu) and len(new_mu) == len(valid_mask):
-            new_mu = new_mu[valid_mask]
-        if not np.isscalar(new_std) and len(new_std) == len(valid_mask):
-            new_std = new_std[valid_mask]
+        def _filter_values(values):
+            if values is None or np.isscalar(values):
+                return values
+            if len(values) == len(valid_mask):
+                return values[valid_mask]
+            return values
+
+        new_mu = _filter_values(new_mu)
+        new_std = _filter_values(new_std)
+        new_epistemic_std = _filter_values(new_epistemic_std)
+        new_aleatoric_std = _filter_values(new_aleatoric_std)
+
+        if new_std is None:
+            if new_epistemic_std is None or new_aleatoric_std is None:
+                raise ValueError(
+                    "new_std must be provided unless both uncertainty components are given."
+                )
+            new_std = np.sqrt(new_epistemic_std**2 + new_aleatoric_std**2)
 
         self.mu[indices, time_step] = new_mu.flatten()
         self.std[indices, time_step] = new_std.flatten()
+        if new_epistemic_std is not None:
+            self.epistemic_std[indices, time_step] = new_epistemic_std.flatten()
+        if new_aleatoric_std is not None:
+            self.aleatoric_std[indices, time_step] = new_aleatoric_std.flatten()
 
     def __getitem__(self, idx):
         """Allows retrieving a full time series' states via my_states[idx]."""
         return self.mu[idx], self.std[idx]
 
     def __setitem__(self, idx, value):
-        """Allows setting a full time series' states via my_states[idx] = (mu_array, var_array)."""
-        self.mu[idx], self.std[idx] = value
+        """Allows setting a full time series' states via my_states[idx] = (...)."""
+        if len(value) == 2:
+            self.mu[idx], self.std[idx] = value
+            return
+        if len(value) == 4:
+            (
+                self.mu[idx],
+                self.std[idx],
+                self.epistemic_std[idx],
+                self.aleatoric_std[idx],
+            ) = value
+            return
+        raise ValueError("States assignment expects either 2 or 4 arrays.")
+
+    def to_dict(self, include_total_std=True):
+        state_dict = {
+            "mu": self.mu,
+            "epistemic_std": self.epistemic_std,
+            "aleatoric_std": self.aleatoric_std,
+        }
+        if include_total_std:
+            state_dict["std"] = self.std
+        return state_dict
+
+
+def predictive_std_components(epistemic_var, aleatoric_var):
+    total_std = np.sqrt(epistemic_var + aleatoric_var)
+    epistemic_std = np.sqrt(epistemic_var)
+    aleatoric_std = np.sqrt(aleatoric_var)
+    return total_std, epistemic_std, aleatoric_std
+
+
+def combine_predictive_std(epistemic_std, aleatoric_std):
+    return np.sqrt(np.square(epistemic_std) + np.square(aleatoric_std))
+
+
+def load_predictive_uncertainty(states):
+    if hasattr(states, "files"):
+        available_keys = set(states.files)
+        getter = lambda key: states[key] if key in available_keys else None
+    else:
+        available_keys = set(states.keys())
+        getter = lambda key: states.get(key)
+
+    epistemic_std = getter("epistemic_std")
+    aleatoric_std = getter("aleatoric_std")
+    total_std = getter("std")
+
+    if epistemic_std is not None and aleatoric_std is not None:
+        total_std = combine_predictive_std(epistemic_std, aleatoric_std)
+
+    return total_std, epistemic_std, aleatoric_std
 
 
 # --- Helper functions ---
@@ -771,7 +905,7 @@ def build_model(
     use_AGVI,
     seed,
     device,
-    hidden_sizes=[40, 40, 40],
+    hidden_sizes=[50],
     input_seq_len=1,
     init_params=None,
     shift_biases=False,
@@ -862,7 +996,9 @@ def prepare_input(
 
     def require_input_seq_len(inferred_seq_len: Optional[int]) -> int:
         if inferred_seq_len is None:
-            raise ValueError("input_seq_len must be provided when sequential_model=True.")
+            raise ValueError(
+                "input_seq_len must be provided when sequential_model=True."
+            )
         return inferred_seq_len
 
     def to_sequence_view(arr: np.ndarray, inferred_seq_len: int) -> np.ndarray:
@@ -921,9 +1057,7 @@ def prepare_input(
             x = to_sequence_view(x, inferred_input_seq_len)
             var_x = to_sequence_view(var_x, inferred_input_seq_len)
             embed_mu = np.repeat(embed_mu[:, None, :], inferred_input_seq_len, axis=1)
-            embed_var = np.repeat(
-                embed_var[:, None, :], inferred_input_seq_len, axis=1
-            )
+            embed_var = np.repeat(embed_var[:, None, :], inferred_input_seq_len, axis=1)
             x = np.concatenate((x, embed_mu), axis=2)
             var_x = np.concatenate((var_x, embed_var), axis=2)
         else:
@@ -958,6 +1092,41 @@ def get_target_positions(total_width: int, input_seq_len: int) -> np.ndarray:
 
 def extract_target_history(x: np.ndarray, input_seq_len: int) -> np.ndarray:
     return x[:, get_target_positions(x.shape[1], input_seq_len)]
+
+
+def randomly_mask_lookback_means(
+    look_back_mu: np.ndarray,
+    indices: np.ndarray,
+    mask_prob: float,
+    max_mask_count: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    if look_back_mu is None:
+        return look_back_mu
+    if mask_prob <= 0.0 or max_mask_count <= 0:
+        return look_back_mu
+
+    indices = np.asarray(indices)
+    active_indices = np.unique(indices[indices >= 0])
+    if active_indices.size == 0:
+        return look_back_mu
+
+    seq_len = int(look_back_mu.shape[1])
+    max_mask_count = min(int(max_mask_count), seq_len)
+    if max_mask_count <= 0:
+        return look_back_mu
+
+    series_to_mask = active_indices[rng.random(active_indices.shape[0]) < mask_prob]
+    if series_to_mask.size == 0:
+        return look_back_mu
+
+    masked_mu = look_back_mu.copy()
+    for ts_idx in series_to_mask:
+        n_to_mask = int(rng.integers(1, max_mask_count + 1))
+        mask_positions = rng.choice(seq_len, size=n_to_mask, replace=False)
+        masked_mu[int(ts_idx), mask_positions] = 0.0
+
+    return masked_mu
 
 
 def extract_embedding_deltas(
@@ -1243,6 +1412,66 @@ def adjust_params(net, mode="add", value=1e-2, threshold=5e-4, which_layer=None)
     net.load_state_dict(state_dict)
 
 
+def add_parameter_process_noise(net, process_noise, which_layer=None):
+    """
+    Add process noise to the parameter variances stored in the model state dict.
+
+    Args:
+        net: The neural network whose parameter variances will be modified.
+        process_noise (float): Scalar variance increment applied to weights and biases.
+        which_layer (list or None): Optional list of layer names to update. If None,
+            noise is added to every layer in the state dict.
+
+    Returns:
+        None. The network is updated in-place via load_state_dict.
+    """
+    process_noise = float(process_noise)
+    if process_noise < 0.0:
+        raise ValueError("process_noise must be non-negative.")
+    if process_noise == 0.0:
+        return
+
+    target_layers = None if which_layer is None else set(which_layer)
+    state_dict = net.state_dict()
+    updated_any_layer = False
+
+    def _add_noise(values):
+        if values is None:
+            return None, False
+
+        if isinstance(values, np.ndarray) and values.flags.writeable:
+            np.add(values, values.dtype.type(process_noise), out=values)
+            return values, False
+
+        updated_values = np.array(values, copy=True)
+        np.add(
+            updated_values,
+            updated_values.dtype.type(process_noise),
+            out=updated_values,
+        )
+        return updated_values, True
+
+    for layer_name, (mu_w, var_w, mu_b, var_b) in state_dict.items():
+        if target_layers is not None and layer_name not in target_layers:
+            continue
+
+        updated_var_w, replaced_var_w = _add_noise(var_w)
+        updated_var_b, replaced_var_b = _add_noise(var_b)
+
+        if replaced_var_w or replaced_var_b:
+            state_dict[layer_name] = (
+                mu_w,
+                updated_var_w,
+                mu_b,
+                updated_var_b,
+            )
+
+        updated_any_layer = True
+
+    if updated_any_layer:
+        net.load_state_dict(state_dict)
+
+
 def reset_param_variance(net, param_dir):
     """
     Reset the variances on `net` while loading the means from `param_to_load`.
@@ -1311,7 +1540,15 @@ def bhattacharyya_distance_matrix(mu: np.ndarray, var: np.ndarray) -> np.ndarray
 
 # --- Eval Helper Functions ---
 def plot_series(
-    ts_idx, y_true, y_pred, s_pred, out_dir, val_test_indices=None, std_factor=1
+    ts_idx,
+    y_true,
+    y_pred,
+    s_pred,
+    out_dir,
+    val_test_indices=None,
+    std_factor=1,
+    epistemic_std=None,
+    aleatoric_std=None,
 ):
     """Plot truth, prediction, and std_factor band for a single series."""
 
@@ -1324,20 +1561,6 @@ def plot_series(
 
     plt.figure(figsize=(10, 3))
     plt.plot(x, yt, label=r"$y_{true}$", color="red")
-    if yp is not None:
-        plt.plot(x, yp, label=r"$\mathbb{E}[Y']$", color="blue")
-    if sp is not None and yp is not None:
-        lower = yp - std_factor * sp
-        upper = yp + std_factor * sp
-        plt.fill_between(
-            x,
-            lower,
-            upper,
-            color="blue",
-            alpha=0.3,
-            label=r"$\mathbb{{E}}[Y'] \pm {} \sigma$".format(std_factor),
-        )
-
     # Shade validation and test regions
     if val_test_indices is not None:
         val_start, test_start = val_test_indices
@@ -1346,27 +1569,68 @@ def plot_series(
             plt.axvspan(
                 val_start,
                 test_start - 1,
-                color="green",
-                alpha=0.15,
+                color="k",
+                alpha=0.1,
                 label="Validation",
-                linewidth=0,
+                ec = "none",
             )
         if test_start < end_time:
             plt.axvspan(
                 test_start,
                 end_time,
-                color="purple",
-                alpha=0.15,
+                color="m",
+                alpha=0.1,
                 label="Test",
                 linewidth=0,
+                ec = "none",
             )
+    if yp is not None:
+        plt.plot(x, yp, label=r"$\mathbb{E}[Y']$", color="blue")
+    if epistemic_std is not None and aleatoric_std is not None and yp is not None:
+        epistemic_std = np.asarray(epistemic_std)
+        aleatoric_std = np.asarray(aleatoric_std)
+        total_std = combine_predictive_std(epistemic_std, aleatoric_std)
+
+        epi_lower = yp - std_factor * epistemic_std
+        epi_upper = yp + std_factor * epistemic_std
+        total_lower = yp - std_factor * total_std
+        total_upper = yp + std_factor * total_std
+
+        plt.fill_between(
+            x,
+            epi_lower,
+            epi_upper,
+            color="b",
+            alpha=0.25,
+            ec="none",
+            label=rf"$\mathbb{{E}}[Y'] \pm {std_factor}\,\sigma_{{\theta}}$"
+        )
+        plt.fill_between(
+            x,
+            total_lower,
+            epi_lower,
+            color="g",
+            alpha=0.2,
+            ec="none",
+            label=rf"$\mathbb{{E}}[Y'] \pm {std_factor}\,\sigma_{{v}}$"
+        )
+        plt.fill_between(
+            x,
+            epi_upper,
+            total_upper,
+            color="g",
+            ec="none",
+            alpha=0.2,
+        )
+    else:
+        print("Bonjour comment ca va?")
 
     plt.xlabel("Time Index")
     plt.ylabel("Value")
     plt.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, 1.15),
-        ncol=5,
+        ncol=6,
         frameon=False,
     )
     out_path = out_dir / f"series_{ts_idx:03d}.svg"

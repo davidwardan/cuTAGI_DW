@@ -5,7 +5,7 @@ from experiments.config import Config
 
 from pytagi import cuda
 
-DEFAULT_SEEDS: Sequence[int] = [11]
+DEFAULT_SEEDS: Sequence[int] = [2016, 2005, 2012]
 DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (
     0.35,
     0.5,
@@ -21,26 +21,24 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import stateless_locals as parent_script
+    from experiments import stateful_global as parent_script
 
     # Model category
-    model_category = "locals"
-    # embed_category = "no-embeddings"
+    model_category = "global"
+    embed_category = "no-embeddings"
     ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{ratio_tag}/experiment01_{model_category}-shuffled"
+    experiment_name = f"seed{seed}/{ratio_tag}/ByWindow_{model_category}"
 
     # Load configuration
     config = Config.from_yaml(
-        f"experiments/configurations/{model_category}_HQ127.yaml"
+        f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
     )
 
     config.seed = seed
     config.model.device = "cuda" if cuda.is_available() else "cpu"
     config.data.loader.train_use_ratio = train_use_ratio
-    config.data.loader.order_mode = "shuffled_filtered"
-    config.evaluation.eval_plots = True
 
     # Display config
     config.display()
@@ -61,7 +59,7 @@ def run_experiments(
     seeds: Iterable[int] = DEFAULT_SEEDS,
     train_use_ratios: Iterable[float] = DEFAULT_TRAIN_USE_RATIOS,
     *,
-    train: bool = False,
+    train: bool = True,
     evaluate: bool = True,
 ) -> None:
     ctx = mp.get_context("spawn")

@@ -21,7 +21,9 @@ data/imagenet
 test_model/
 wandb/
 saved_results/param_viz
-out/
+experiments/out/
+experiments/config/
+
 
 # VSCode
 .vscode
@@ -35,6 +37,9 @@ out/
 CLAUDE.md
 ai_context
 .claude
+
+# codex
+.codex
 
 
 !test/data/*.csv
