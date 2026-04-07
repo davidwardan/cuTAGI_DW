@@ -20,6 +20,7 @@ from experiments.utils import (
     prepare_input,
     extract_embedding_deltas,
     extract_target_history,
+    extract_target_history_var,
     plot_series,
     plot_embeddings,
     bhattacharyya_distance_matrix,
@@ -359,7 +360,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 initial_mu = extract_target_history(x, config.window_len)
                 look_back_buffer.initialize(
                     initial_mu=initial_mu,
-                    initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                    initial_var=extract_target_history_var(x, config.window_len),
                     indices=indices,
                 )
 
@@ -559,7 +560,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             initial_mu = extract_target_history(x, config.window_len)
             look_back_buffer.initialize(
                 initial_mu=initial_mu,
-                initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                initial_var=extract_target_history_var(x, config.window_len),
                 indices=indices,
             )
 

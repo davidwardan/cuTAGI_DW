@@ -5,12 +5,13 @@ from experiments.config import Config
 
 from pytagi import cuda
 
-DEFAULT_SEEDS: Sequence[int] = [2016, 2005, 2012]
+DEFAULT_SEEDS: Sequence[int] = [2016]
+# DEFAULT_SEEDS: Sequence[int] = [2016, 2005, 2012]
 DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (
-    0.35,
-    0.5,
-    0.65,
-    0.8,
+    # 0.35,
+    # 0.5,
+    # 0.65,
+    # 0.8,
     1.0,
 )
 
@@ -29,7 +30,7 @@ def _run_experiment(
     ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{ratio_tag}/ByWindow_{model_category}"
+    experiment_name = f"seed{seed}/{ratio_tag}/Testing2_{model_category}"
 
     # Load configuration
     config = Config.from_yaml(

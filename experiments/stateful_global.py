@@ -20,6 +20,7 @@ from experiments.utils import (
     build_model,
     prepare_input,
     extract_target_history,
+    extract_target_history_var,
     plot_series,
     plot_embeddings,
     bhattacharyya_distance_matrix,
@@ -241,7 +242,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 initial_mu = extract_target_history(x, config.window_len)
                 look_back_buffer.initialize(
                     initial_mu=initial_mu,
-                    initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                    initial_var=extract_target_history_var(x, config.window_len),
                     indices=indices,
                 )
 
@@ -328,6 +329,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 y.flatten(),
                 use_AGVI=config.use_AGVI,
                 var_y=var_y,
+                overfit_mu=True,
             )
 
             # Update embeddings if used
@@ -358,13 +360,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             # Where y is available use y otherwuse use m_pred
             y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-            # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
             # Update look_back buffer
             look_back_buffer.update(
                 # new_mu=m_post.reshape(B, -1),
-                new_mu = y_lookback.reshape(B,-1),
                 new_var=v_post.reshape(B, -1),
+                new_mu=y_lookback.reshape(B, -1),
                 # new_var = v_lookback.reshape(B,-1),
                 indices=indices,
             )
@@ -419,7 +421,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 initial_mu = extract_target_history(x, config.window_len)
                 look_back_buffer.initialize(
                     initial_mu=initial_mu,
-                    initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                    initial_var=extract_target_history_var(x, config.window_len),
                     indices=indices,
                 )
 
@@ -626,7 +628,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             initial_mu = extract_target_history(x, config.window_len)
             look_back_buffer.initialize(
                 initial_mu=initial_mu,
-                initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                initial_var=extract_target_history_var(x, config.window_len),
                 indices=indices,
             )
 
@@ -1392,7 +1394,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             # Define experiment name
             experiment_name = (
                 f"seed{seed}/{ratio_tag}/"
-                f"ByWindow_{model_category}_{embed_category}_lb26_ZO_whitenoise"
+                f"Width512_{model_category}_{embed_category}"
             )
 
             # Load configuration
@@ -1403,7 +1405,6 @@ def main(Train=True, Eval=True, log_wandb=False):
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.loader.train_use_ratio = train_use_ratio
-            # config.data.loader.order_mode = "by_series_batch"
             config.evaluation.eval_plots = True
 
             # Convert config object to a dictionary for W&B

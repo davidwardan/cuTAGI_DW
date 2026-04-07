@@ -1,4 +1,4 @@
-from typing import Any, List, Optional, Dict, Tuple
+from typing import Any, List, Optional, Dict, Tuple, Literal
 import yaml
 from pydantic import BaseModel, Field
 
@@ -128,6 +128,8 @@ class Evaluation(BaseModel):
 class LookbackSearch(BaseModel):
     enabled: bool = False
     candidate_values: List[int] = Field(default_factory=list)
+    hidden_size_candidate_values: List[int] = Field(default_factory=list)
+    search_target: Literal["lookback", "hidden_size", "both"] = "lookback"
     metric: str = "rmse"
     evaluate_best_on_test: bool = True
 
@@ -290,10 +292,20 @@ class Config(BaseModel):
 
         return self.look_back_len + num_covariates + self.total_embedding_size
 
+    @property
+    def uses_training_dummy_context(self) -> bool:
+        return self.data.loader.order_mode in {
+            "by_window",
+            "by_series",
+            "by_series_batch",
+        }
+
     def split_target_offset(self, split: str) -> int:
         """Returns how many leading rows in a split are context-only."""
         split_name = split.lower()
         if split_name == "train":
+            if self.uses_training_dummy_context:
+                return 0
             return self.window_len
         if split_name in {"val", "validation", "test"}:
             if self.data.loader.carry_split_context:

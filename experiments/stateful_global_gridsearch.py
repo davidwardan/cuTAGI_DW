@@ -2,8 +2,9 @@ import os
 import json
 import argparse
 import multiprocessing as mp
+from itertools import product
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -20,10 +21,11 @@ import pytagi.metric as metric
 
 DEFAULT_SEEDS: Sequence[int] = (
     2016,
-    2005,
-    2012,
+    17,
+    42,
 )
 DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (1.0,)
+GRIDSEARCH_OUTPUT_ROOT = Path("experiments/out/gridsearch")
 
 
 def _trim_trailing_nans(x: np.ndarray) -> np.ndarray:
@@ -39,11 +41,25 @@ def _trim_trailing_nans(x: np.ndarray) -> np.ndarray:
     return x[: last + 1].astype(np.float32)
 
 
+def _gridsearch_output_path(experiment_name: str) -> Path:
+    experiment_path = Path(experiment_name)
+    if experiment_path.parts and experiment_path.parts[0] == "gridsearch":
+        return Path("experiments/out") / experiment_path
+    return GRIDSEARCH_OUTPUT_ROOT / experiment_path
+
+
+def _gridsearch_experiment_name(experiment_name: str) -> str:
+    experiment_path = Path(experiment_name)
+    if experiment_path.parts and experiment_path.parts[0] == "gridsearch":
+        return experiment_name
+    return str(Path("gridsearch") / experiment_path)
+
+
 def _compute_validation_metrics(
     config: Config,
     experiment_name: str,
 ) -> Dict[str, float]:
-    input_dir = Path("experiments/out") / experiment_name
+    input_dir = _gridsearch_output_path(experiment_name)
     val_states = np.load(input_dir / "val_states.npz")
     val_total_std, _, _ = load_predictive_uncertainty(val_states)
     if val_total_std is None:
@@ -172,9 +188,72 @@ def _run_lookback_trial_in_subprocess(
     if process.exitcode:
         raise RuntimeError(
             "Lookback trial failed "
-            f"(look_back_len={trial_config.look_back_len}) "
+            f"(look_back_len={trial_config.look_back_len}, "
+            f"hidden_sizes={trial_config.model.hidden_sizes}) "
             f"with exit code {process.exitcode}."
         )
+
+
+def _apply_hidden_size(config: Config, hidden_size: int) -> None:
+    if hidden_size <= 0:
+        raise ValueError("All hidden_size candidates must be > 0.")
+
+    config.model.hidden_sizes = [int(hidden_size)]
+
+
+def _resolve_search_space(
+    config: Config,
+    search_target: Optional[str] = None,
+    lookback_candidates: Optional[Sequence[int]] = None,
+    hidden_size_candidates: Optional[Sequence[int]] = None,
+) -> Tuple[str, List[int], List[int]]:
+    resolved_search_target = (
+        search_target or config.lookback_search.search_target or "lookback"
+    ).lower()
+    valid_targets = {"lookback", "hidden_size", "both"}
+    if resolved_search_target not in valid_targets:
+        valid_targets_str = ", ".join(sorted(valid_targets))
+        raise ValueError(
+            f"Unsupported search target '{resolved_search_target}'. "
+            f"Expected one of: {valid_targets_str}."
+        )
+
+    default_hidden = (
+        int(config.model.hidden_sizes[0]) if config.model.hidden_sizes else 1
+    )
+
+    resolved_lookbacks = list(
+        dict.fromkeys(
+            list(lookback_candidates)
+            if lookback_candidates is not None
+            else list(config.lookback_search.candidate_values)
+        )
+    )
+    if not resolved_lookbacks:
+        resolved_lookbacks = [int(config.look_back_len)]
+    if any(int(value) < 2 for value in resolved_lookbacks):
+        raise ValueError("All lookback candidates must be >= 2.")
+    resolved_lookbacks = [int(value) for value in resolved_lookbacks]
+
+    resolved_hidden_sizes = list(
+        dict.fromkeys(
+            list(hidden_size_candidates)
+            if hidden_size_candidates is not None
+            else list(config.lookback_search.hidden_size_candidate_values)
+        )
+    )
+    if not resolved_hidden_sizes:
+        resolved_hidden_sizes = [default_hidden]
+    if any(int(value) <= 0 for value in resolved_hidden_sizes):
+        raise ValueError("All hidden_size candidates must be > 0.")
+    resolved_hidden_sizes = [int(value) for value in resolved_hidden_sizes]
+
+    if resolved_search_target == "lookback":
+        resolved_hidden_sizes = [default_hidden]
+    elif resolved_search_target == "hidden_size":
+        resolved_lookbacks = [int(config.look_back_len)]
+
+    return resolved_search_target, resolved_lookbacks, resolved_hidden_sizes
 
 
 def optimize_lookback(
@@ -182,18 +261,27 @@ def optimize_lookback(
     experiment_name: Optional[str] = None,
     wandb_run: Optional[Any] = None,
     evaluate_best_on_test: Optional[bool] = None,
+    search_target: Optional[str] = None,
+    lookback_candidates: Optional[Sequence[int]] = None,
+    hidden_size_candidates: Optional[Sequence[int]] = None,
 ) -> Dict[str, Any]:
     if experiment_name is None:
         raise ValueError("experiment_name must be provided for lookback search.")
+    experiment_name = _gridsearch_experiment_name(experiment_name)
 
-    candidate_values = list(dict.fromkeys(config.lookback_search.candidate_values))
-    if not candidate_values:
-        candidate_values = [config.look_back_len]
+    (
+        resolved_search_target,
+        lookback_candidate_values,
+        hidden_size_candidate_values,
+    ) = _resolve_search_space(
+        config,
+        search_target=search_target,
+        lookback_candidates=lookback_candidates,
+        hidden_size_candidates=hidden_size_candidates,
+    )
+    search_hidden_size = resolved_search_target in {"hidden_size", "both"}
 
-    if any(value < 2 for value in candidate_values):
-        raise ValueError("All lookback candidates must be >= 2.")
-
-    output_dir = Path("experiments/out") / experiment_name
+    output_dir = _gridsearch_output_path(experiment_name)
     os.makedirs(output_dir, exist_ok=True)
     config.to_yaml(output_dir / "config.yaml")
 
@@ -206,12 +294,30 @@ def optimize_lookback(
             "Lookback trials run in subprocesses and will train without live W&B trial logs."
         )
 
-    for lookback in candidate_values:
+    for lookback, hidden_size in product(
+        lookback_candidate_values,
+        hidden_size_candidate_values,
+    ):
         trial_config = config.model_copy(deep=True)
         trial_config.data.loader.look_back_len = int(lookback)
-        trial_experiment_name = f"{experiment_name}/lookback_{lookback}"
+        if search_hidden_size:
+            _apply_hidden_size(trial_config, int(hidden_size))
+            trial_hidden_size = int(hidden_size)
+            trial_experiment_name = (
+                f"{experiment_name}/lookback_{lookback}_hidden_size_{hidden_size}"
+            )
+        else:
+            trial_hidden_size = (
+                int(trial_config.model.hidden_sizes[0])
+                if trial_config.model.hidden_sizes
+                else 1
+            )
+            trial_experiment_name = f"{experiment_name}/lookback_{lookback}"
 
-        print(f"Running lookback search trial with look_back_len={lookback}")
+        print(
+            "Running grid search trial with "
+            f"look_back_len={lookback}, hidden_size={trial_hidden_size}"
+        )
         _run_lookback_trial_in_subprocess(
             ctx=ctx,
             trial_config=trial_config,
@@ -225,6 +331,8 @@ def optimize_lookback(
 
         trial_result = {
             "lookback": lookback,
+            "hidden_size": trial_hidden_size,
+            "hidden_sizes": list(trial_config.model.hidden_sizes),
             "experiment_name": trial_experiment_name,
             **val_metrics,
         }
@@ -240,17 +348,29 @@ def optimize_lookback(
     results_df = pd.DataFrame(results)
     best_trial = _select_best_trial(results_df, config.lookback_search.metric)
 
+    results_df.to_csv(output_dir / "gridsearch_results.csv", index=False)
     results_df.to_csv(output_dir / "lookback_search_results.csv", index=False)
 
     best_config = config.model_copy(deep=True)
     best_config.data.loader.look_back_len = int(best_trial["lookback"])
+    if search_hidden_size:
+        _apply_hidden_size(best_config, int(best_trial["hidden_size"]))
     best_config.to_yaml(output_dir / "best_config.yaml")
+
+    best_hidden_size = (
+        int(best_config.model.hidden_sizes[0]) if best_config.model.hidden_sizes else 1
+    )
 
     summary = {
         "search_mode": "gridsearch",
+        "search_target": resolved_search_target,
         "selection_metric": config.lookback_search.metric,
-        "candidate_values": candidate_values,
+        "lookback_candidate_values": lookback_candidate_values,
+        "hidden_size_candidate_values": hidden_size_candidate_values,
+        "candidate_values": lookback_candidate_values,
         "best_lookback": int(best_trial["lookback"]),
+        "best_hidden_size": best_hidden_size,
+        "best_hidden_sizes": list(best_config.model.hidden_sizes),
         "best_experiment_name": best_trial["experiment_name"],
         "best_scores": {
             "macro_rmse": float(best_trial["macro_rmse"]),
@@ -261,12 +381,16 @@ def optimize_lookback(
             "micro_mae": float(best_trial["micro_mae"]),
         },
     }
+    with open(output_dir / "gridsearch_summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
     with open(output_dir / "lookback_search_summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
     print(
-        "Selected best lookback:"
-        f" {summary['best_lookback']} using {summary['selection_metric']}"
+        "Selected best trial:"
+        f" look_back_len={summary['best_lookback']},"
+        f" hidden_size={summary['best_hidden_size']}"
+        f" using {summary['selection_metric']}"
     )
 
     should_evaluate_best = config.lookback_search.evaluate_best_on_test
@@ -289,6 +413,9 @@ def main(
     log_wandb: bool = False,
     seeds: Optional[Sequence[int]] = None,
     train_use_ratios: Optional[Sequence[float]] = None,
+    search_target: Optional[str] = None,
+    lookback_candidates: Optional[Sequence[int]] = None,
+    hidden_size_candidates: Optional[Sequence[int]] = None,
 ):
     list_of_seeds = list(seeds) if seeds is not None else list(DEFAULT_SEEDS)
     list_of_train_use_ratios = (
@@ -308,11 +435,12 @@ def main(
             print(f"Running experiment: {ratio_tag} with seed {seed}")
 
             model_category = "global"
-            embed_category = "hierarchical-embeddings"
+            embed_category = "no-embeddings"
             experiment_name = (
                 f"seed{seed}/{ratio_tag}/"
                 f"experiment01_{model_category}_{embed_category}_gridsearch_tagiv"
             )
+            experiment_name = _gridsearch_experiment_name(experiment_name)
 
             config = Config.from_yaml(
                 f"experiments/config/{model_category}_{embed_category}_HQ127_gridsearch.yaml"
@@ -350,11 +478,15 @@ def main(
                     experiment_name=experiment_name,
                     wandb_run=run,
                     evaluate_best_on_test=Eval,
+                    search_target=search_target,
+                    lookback_candidates=lookback_candidates,
+                    hidden_size_candidates=hidden_size_candidates,
                 )
             elif Eval:
-                summary_path = (
-                    Path("experiments/out") / experiment_name / "lookback_search_summary.json"
-                )
+                summary_dir = _gridsearch_output_path(experiment_name)
+                summary_path = summary_dir / "gridsearch_summary.json"
+                if not summary_path.exists():
+                    summary_path = summary_dir / "lookback_search_summary.json"
                 if not summary_path.exists():
                     raise FileNotFoundError(
                         f"Missing search summary at {summary_path}. Run training first."
@@ -364,6 +496,12 @@ def main(
 
                 best_config = config.model_copy(deep=True)
                 best_config.data.loader.look_back_len = int(summary["best_lookback"])
+                if "best_hidden_sizes" in summary and summary["best_hidden_sizes"]:
+                    best_config.model.hidden_sizes = [
+                        int(v) for v in summary["best_hidden_sizes"]
+                    ]
+                elif "best_hidden_size" in summary:
+                    _apply_hidden_size(best_config, int(summary["best_hidden_size"]))
                 base_script.eval_model(
                     best_config,
                     experiment_name=summary["best_experiment_name"],
@@ -375,7 +513,9 @@ def main(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Stateful global lookback gridsearch")
+    parser = argparse.ArgumentParser(
+        description="Stateful global gridsearch (lookback, hidden_size, or both)"
+    )
     parser.add_argument(
         "--seeds",
         type=int,
@@ -391,6 +531,34 @@ if __name__ == "__main__":
         help="One or more train_use_ratio values to run (e.g. 0.3 0.6 1.0).",
     )
     parser.add_argument(
+        "--search-target",
+        choices=["lookback", "hidden_size", "both"],
+        default=None,
+        help=(
+            "What to search: lookback_len only, hidden_size only, or both. "
+            "If omitted, uses lookback_search.search_target from the config."
+        ),
+    )
+    parser.add_argument(
+        "--lookback-candidates",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional override for lookback candidates (e.g. --lookback-candidates 12 26 52)."
+        ),
+    )
+    parser.add_argument(
+        "--hidden-size-candidates",
+        type=int,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional override for hidden_size candidates "
+            "(e.g. --hidden-size-candidates 32 50 64)."
+        ),
+    )
+    parser.add_argument(
         "--log-wandb",
         action="store_true",
         help="Enable Weights & Biases logging.",
@@ -403,7 +571,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no-eval",
         action="store_true",
-        help="Skip evaluation of the selected best lookback.",
+        help="Skip evaluation of the selected best trial.",
     )
     args = parser.parse_args()
 
@@ -413,4 +581,7 @@ if __name__ == "__main__":
         log_wandb=args.log_wandb,
         seeds=args.seeds,
         train_use_ratios=args.train_use_ratios,
+        search_target=args.search_target,
+        lookback_candidates=args.lookback_candidates,
+        hidden_size_candidates=args.hidden_size_candidates,
     )

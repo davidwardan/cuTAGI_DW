@@ -17,6 +17,8 @@ import matplotlib.pyplot as plt
 from pytagi import manual_seed
 from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential, EvenExp
 
+TRAIN_DUMMY_ORDER_MODES = {"by_window", "by_series", "by_series_batch"}
+
 
 # --- Buffer Classes ---
 class LookBackBuffer:
@@ -550,6 +552,24 @@ def _pad_series_columns(series_list: List[np.ndarray], fill_value, dtype) -> np.
     return out
 
 
+def _should_prepend_training_dummy(order_mode: str) -> bool:
+    return order_mode in TRAIN_DUMMY_ORDER_MODES
+
+
+def _apply_training_dummy_prior(
+    x: np.ndarray, var_x: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    dummy_mask = np.asarray(x) == TimeSeriesDataBuilder.TRAIN_DUMMY_SENTINEL
+    if not np.any(dummy_mask):
+        return x, var_x
+
+    x_out = np.array(x, dtype=np.float32, copy=True)
+    var_out = np.array(var_x, dtype=np.float32, copy=True)
+    x_out[dummy_mask] = TimeSeriesDataBuilder.TRAIN_DUMMY_MEAN
+    var_out[dummy_mask] = TimeSeriesDataBuilder.TRAIN_DUMMY_VAR
+    return x_out, var_out
+
+
 def _split_single_series(
     x: np.ndarray,
     dt: np.ndarray,
@@ -811,6 +831,7 @@ def prepare_data(
             scale_method=scale_method,
             order_mode=order_mode,
             ts_to_use=ts_to_use,
+            prepend_dummy_context=_should_prepend_training_dummy(order_mode),
         )
 
         val_data = TimeSeriesDataBuilder(
@@ -859,6 +880,7 @@ def prepare_data(
         scale_method=scale_method,
         order_mode=order_mode,
         ts_to_use=ts_to_use,
+        prepend_dummy_context=_should_prepend_training_dummy(order_mode),
     )
 
     val_data = TimeSeriesDataBuilder(
@@ -1044,6 +1066,8 @@ def prepare_input(
                     indices[active_mask]
                 ]
 
+    x, var_x = _apply_training_dummy_prior(x, var_x)
+
     if embeddings is not None:
         lookup_indices = indices.copy()
         lookup_indices[lookup_indices < 0] = 0
@@ -1091,7 +1115,25 @@ def get_target_positions(total_width: int, input_seq_len: int) -> np.ndarray:
 
 
 def extract_target_history(x: np.ndarray, input_seq_len: int) -> np.ndarray:
-    return x[:, get_target_positions(x.shape[1], input_seq_len)]
+    history = np.asarray(
+        x[:, get_target_positions(x.shape[1], input_seq_len)], dtype=np.float32
+    )
+    dummy_mask = history == TimeSeriesDataBuilder.TRAIN_DUMMY_SENTINEL
+    if np.any(dummy_mask):
+        history = history.copy()
+        history[dummy_mask] = TimeSeriesDataBuilder.TRAIN_DUMMY_MEAN
+    return history
+
+
+def extract_target_history_var(x: np.ndarray, input_seq_len: int) -> np.ndarray:
+    history = np.asarray(
+        x[:, get_target_positions(x.shape[1], input_seq_len)], dtype=np.float32
+    )
+    initial_var = np.zeros_like(history, dtype=np.float32)
+    initial_var[history == TimeSeriesDataBuilder.TRAIN_DUMMY_SENTINEL] = (
+        TimeSeriesDataBuilder.TRAIN_DUMMY_VAR
+    )
+    return initial_var
 
 
 def randomly_mask_lookback_means(
@@ -1206,14 +1248,11 @@ def calculate_updates(
     K = v_pred / (v_pred + var_y)  # Kalman gain
     v_post = (1.0 - K) * v_pred  # posterior variance
     if overfit_mu:
-        m_post = m_pred + (v_pred / (v_pred + 1e-4)) * (y - m_pred)  # posterior mean
+        m_post = m_pred + (v_pred / (v_pred + 1e-3)) * (y - m_pred)  # posterior mean
     else:
         m_post = m_pred + K * (y - m_pred)  # posterior mean
     if has_nan:
         np.copyto(v_post, v_pred, where=nan_indices)
-
-    # clip v_post to avoid numerical issues
-    v_post = np.clip(v_post, a_min=1e-6, a_max=2.0)
 
     return m_post, v_post
 
@@ -1572,7 +1611,7 @@ def plot_series(
                 color="k",
                 alpha=0.1,
                 label="Validation",
-                ec = "none",
+                ec="none",
             )
         if test_start < end_time:
             plt.axvspan(
@@ -1582,7 +1621,7 @@ def plot_series(
                 alpha=0.1,
                 label="Test",
                 linewidth=0,
-                ec = "none",
+                ec="none",
             )
     if yp is not None:
         plt.plot(x, yp, label=r"$\mathbb{E}[Y']$", color="blue")
@@ -1603,7 +1642,7 @@ def plot_series(
             color="b",
             alpha=0.25,
             ec="none",
-            label=rf"$\mathbb{{E}}[Y'] \pm {std_factor}\,\sigma_{{\theta}}$"
+            label=rf"$\mathbb{{E}}[Y'] \pm {std_factor}\,\sigma_{{\theta}}$",
         )
         plt.fill_between(
             x,
@@ -1612,7 +1651,7 @@ def plot_series(
             color="g",
             alpha=0.2,
             ec="none",
-            label=rf"$\mathbb{{E}}[Y'] \pm {std_factor}\,\sigma_{{v}}$"
+            label=rf"$\mathbb{{E}}[Y'] \pm {std_factor}\,\sigma_{{v}}$",
         )
         plt.fill_between(
             x,

@@ -31,6 +31,7 @@ from experiments.utils import (
     prepare_data,
     prepare_input,
     extract_target_history,
+    extract_target_history_var,
     load_true_split_arrays,
 )
 
@@ -278,7 +279,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     initial_mu = extract_target_history(x, config.window_len)
                     look_back_buffer.initialize(
                         initial_mu=initial_mu,
-                        initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                        initial_var=extract_target_history_var(x, config.window_len),
                         indices=[0],
                     )
 
@@ -463,7 +464,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 initial_mu = extract_target_history(x, config.window_len)
                 look_back_buffer.initialize(
                     initial_mu=initial_mu,
-                    initial_var=np.zeros_like(initial_mu, dtype=np.float32),
+                    initial_var=extract_target_history_var(x, config.window_len),
                     indices=[0],
                 )
 

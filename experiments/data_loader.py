@@ -9,6 +9,10 @@ from matplotlib import pyplot as plt
 
 
 class TimeSeriesDataBuilder:
+    TRAIN_DUMMY_MEAN = np.float32(0.0)
+    TRAIN_DUMMY_VAR = np.float32(1.0)
+    TRAIN_DUMMY_SENTINEL = np.float32(-1.2345679e30)
+
     def __init__(
         self,
         x_file: Optional[str],
@@ -31,6 +35,7 @@ class TimeSeriesDataBuilder:
         time_covariates: Optional[List[str]] = None,
         ts_to_use: Optional[List[int]] = None,
         covariate_window_mode: str = "last_step",
+        prepend_dummy_context: bool = False,
     ) -> None:
         self.x_file = x_file
         self.date_time_file = date_time_file
@@ -51,6 +56,7 @@ class TimeSeriesDataBuilder:
         self.ts_to_use = ts_to_use
         self.num_features = 1 + len(self.time_covariates)
         self.covariate_window_mode = covariate_window_mode.lower()
+        self.prepend_dummy_context = bool(prepend_dummy_context)
         if self.covariate_window_mode not in {"last_step", "all_steps"}:
             raise ValueError(
                 "covariate_window_mode must be one of {'last_step', 'all_steps'}."
@@ -220,6 +226,17 @@ class TimeSeriesDataBuilder:
         dt = np.concatenate([history_dt[-prefix_len:], dt], axis=0)
         return x.astype(np.float32), np.asarray(dt, dtype="datetime64[ns]")
 
+    def _prepend_training_dummy_context(self, X: np.ndarray) -> np.ndarray:
+        """Prepends synthetic context so the first real targets are trainable."""
+        if not self.prepend_dummy_context or self.input_seq_len <= 0 or X.shape[0] == 0:
+            return X
+
+        prefix = np.repeat(X[:1], repeats=self.input_seq_len, axis=0).astype(
+            np.float32, copy=True
+        )
+        prefix[:, 0] = self.TRAIN_DUMMY_SENTINEL
+        return np.concatenate([prefix, X], axis=0).astype(np.float32, copy=False)
+
     def _process_all(self) -> Dict[str, np.ndarray]:
         if self.x_array is not None or self.date_time_array is not None:
             if self.x_array is None or self.date_time_array is None:
@@ -372,6 +389,8 @@ class TimeSeriesDataBuilder:
             norm_len = min(Xj.shape[0], X_all_norm.shape[0])
             if norm_len > 0:
                 X_all_norm[:norm_len, j] = Xj[-norm_len:, 0]
+
+            Xj = self._prepend_training_dummy_context(Xj)
 
             x_rolled, y_rolled, window_ids = self._create_rolling_windows(
                 Xj,
