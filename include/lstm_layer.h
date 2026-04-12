@@ -25,8 +25,6 @@ void lstm_cov_input_cell_states(std::vector<float> &var_ha,
                                 std::vector<float> &jcb_c_ga, int w_pos_i,
                                 int w_pos_c, int ni, int no, int start_idx,
                                 int end_idx, int seq_len, int time_step,
-                                int w_pos_c, int ni, int no, int start_idx,
-                                int end_idx, int seq_len, int time_step,
                                 std::vector<float> &cov_i_c);
 
 void lstm_cell_state_mean_var(
@@ -37,9 +35,6 @@ void lstm_cell_state_mean_var(
     std::vector<float> &cov_i_c, int no, int start_idx, int end_idx,
     int seq_len, int time_step, std::vector<float> &mu_c,
     std::vector<float> &var_c);
-    std::vector<float> &cov_i_c, int no, int start_idx, int end_idx,
-    int seq_len, int time_step, std::vector<float> &mu_c,
-    std::vector<float> &var_c);
 
 void lstm_cov_output_tanh_cell_states(
     std::vector<float> &mu_w, std::vector<float> &var_ha,
@@ -47,8 +42,6 @@ void lstm_cov_output_tanh_cell_states(
     std::vector<float> &jcb_f_ga, std::vector<float> &mu_i_ga,
     std::vector<float> &jcb_i_ga, std::vector<float> &mu_c_ga,
     std::vector<float> &jcb_c_ga, std::vector<float> &jcb_o_ga, int w_pos_f,
-    int w_pos_i, int w_pos_c, int w_pos_o, int ni, int no, int start_idx,
-    int end_idx, int seq_len, int time_step, std::vector<float> &cov_tanh_c);
     int w_pos_i, int w_pos_c, int w_pos_o, int ni, int no, int start_idx,
     int end_idx, int seq_len, int time_step, std::vector<float> &cov_tanh_c);
 
@@ -71,8 +64,6 @@ void lstm_delta_mean_var_z(std::vector<float> &mw, std::vector<float> &Jf_ga,
                            std::vector<float> &delta_mu_out,
                            std::vector<float> &delta_var_out, int w_pos_f,
                            int w_pos_i, int w_pos_c, int w_pos_o, int no,
-                           int ni, int start_idx, int end_idx, int seq_len,
-                           int time_step, std::vector<float> &delta_mu,
                            int ni, int start_idx, int end_idx, int seq_len,
                            int time_step, std::vector<float> &delta_mu,
                            std::vector<float> &delta_var);
