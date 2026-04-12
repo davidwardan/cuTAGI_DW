@@ -5,13 +5,15 @@ from experiments.config import Config
 
 from pytagi import cuda
 
-DEFAULT_SEEDS: Sequence[int] = [2016]
-# DEFAULT_SEEDS: Sequence[int] = [2016, 2005, 2012]
+DEFAULT_SEEDS: Sequence[int] = [
+    2016,
+    17,
+    42,
+]
 DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (
-    # 0.35,
-    # 0.5,
-    # 0.65,
-    # 0.8,
+    0.4,
+    0.6,
+    0.8,
     1.0,
 )
 
@@ -22,24 +24,29 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import stateful_global as parent_script
+    from experiments import stateful_locals as parent_script
 
     # Model category
-    model_category = "global"
+    model_category = "locals"
     embed_category = "no-embeddings"
     ratio_tag = f"train_use_{int(round(train_use_ratio * 100)):03d}"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{ratio_tag}/Testing2_{model_category}"
+    experiment_name = f"seed{seed}/{ratio_tag}/Forecasting_{model_category}"
 
     # Load configuration
     config = Config.from_yaml(
-        f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
+        # f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
+        f"experiments/config/{model_category}_HQ127.yaml"
     )
 
     config.seed = seed
     config.model.device = "cuda" if cuda.is_available() else "cpu"
     config.data.loader.train_use_ratio = train_use_ratio
+    if train_use_ratio == 1.0:
+        config.evaluation.eval_plots = True
+    else:
+        config.evaluation.eval_plots = False
 
     # Display config
     config.display()

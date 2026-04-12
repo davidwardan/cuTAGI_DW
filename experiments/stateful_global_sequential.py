@@ -288,6 +288,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             if embeddings is not None:
                 mu_delta, var_delta = net.get_input_states()
 
+                # Sanitize deltas from the C++ backend to prevent NaN
+                # from propagating into embeddings permanently
+                np.nan_to_num(mu_delta, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+                np.nan_to_num(var_delta, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
                 mu_delta = mu_delta * var_x
                 var_delta = var_x * var_delta * var_x
 
@@ -336,7 +341,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             shuffle=False,
         )
 
+        prev_ts_id = None
         for (x, y), ts_id, w_id in val_batch_iter:
+
+            # Reset LSTM states when switching to a new series
+            if prev_ts_id is not None and ts_id[0] != prev_ts_id:
+                net.reset_lstm_states()
+            prev_ts_id = ts_id[0]
 
             # get current batch size and indices
             B = x.shape[0]
@@ -427,8 +438,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 indices=indices,
             )
 
-        # End of epoch
-        net.reset_lstm_states()
+            net.reset_lstm_states()
 
         # Calculate micro metrics for early stopping
         val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
@@ -617,6 +627,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             indices=indices,
         )
 
+        net.reset_lstm_states()
+
     # Run over each time series and re_scale it
     if config.data.loader.scale_method == "standard":
         for i in range(config.data.loader.nb_ts):
@@ -760,11 +772,7 @@ def eval_model(
         ypred_full = np.concatenate([ypred_train, ypred_val, ypred_test])
 
         # get std
-        if (
-            train_total_std is None
-            or val_total_std is None
-            or test_total_std is None
-        ):
+        if train_total_std is None or val_total_std is None or test_total_std is None:
             raise ValueError(
                 "Missing predictive uncertainty. Expected stored std or both epistemic_std and aleatoric_std."
             )
@@ -1304,7 +1312,7 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=True):
 
-    list_of_seeds = [42]
+    list_of_seeds = [17]
     list_of_train_use_ratios = [1.0]
 
     # Iterate over experiments and seeds
@@ -1332,6 +1340,7 @@ def main(Train=True, Eval=True, log_wandb=True):
             config.data.loader.train_use_ratio = train_use_ratio
             config.data.loader.order_mode = "shuffled_filtered"  # forced
             config.evaluation.eval_plots = True  # force plots for analysis
+            config.evaluation.embed_plots = True  # force plots for analysis
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

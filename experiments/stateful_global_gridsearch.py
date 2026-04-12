@@ -20,9 +20,11 @@ from pytagi import cuda
 import pytagi.metric as metric
 
 DEFAULT_SEEDS: Sequence[int] = (
-    2016,
-    17,
-    42,
+    1,
+    2,
+    3,
+    4,
+    5,
 )
 DEFAULT_TRAIN_USE_RATIOS: Sequence[float] = (1.0,)
 GRIDSEARCH_OUTPUT_ROOT = Path("experiments/out/gridsearch")

@@ -52,12 +52,14 @@ void lstm_cov_output_tanh_cell_states(
     int w_pos_i, int w_pos_c, int w_pos_o, int ni, int no, int start_idx,
     int end_idx, int seq_len, int time_step, std::vector<float> &cov_tanh_c);
 
-void lstm_hidden_state_mean_var(
-    std::vector<float> &mu_o_ga, std::vector<float> &var_o_ga,
-    std::vector<float> &mu_ca, std::vector<float> &var_ca,
-    std::vector<float> &cov_o_tanh_c, int no, int start_idx, int end_idx,
-    int seq_len, int time_step, std::vector<float> &mu_z,
-    std::vector<float> &var_z);
+void lstm_hidden_state_mean_var(std::vector<float> &mu_o_ga,
+                                std::vector<float> &var_o_ga,
+                                std::vector<float> &mu_ca,
+                                std::vector<float> &var_ca,
+                                std::vector<float> &cov_o_tanh_c, int no,
+                                int start_idx, int end_idx, int seq_len,
+                                int time_step, std::vector<float> &mu_z,
+                                std::vector<float> &var_z);
 
 // Backward functions
 void lstm_delta_mean_var_z(std::vector<float> &mw, std::vector<float> &Jf_ga,
@@ -81,8 +83,8 @@ void lstm_delta_mean_var_w(
     std::vector<float> &mc_ga, std::vector<float> &Jc_ga,
     std::vector<float> &mo_ga, std::vector<float> &Jo_ga,
     std::vector<float> &mc_prev, std::vector<float> &mca,
-    std::vector<float> &Jc, std::vector<float> &delta_m,
-    std::vector<float> &delta_S, int w_pos_f, int w_pos_i, int w_pos_c,
+    std::vector<float> &Jc, std::vector<float> &delta_mu,
+    std::vector<float> &delta_var, int w_pos_f, int w_pos_i, int w_pos_c,
     int w_pos_o, int no, int ni, int start_idx, int end_idx, int batch_size,
     int seq_len, int time_step, std::vector<float> &sum_mu_w_f,
     std::vector<float> &sum_var_w_f, std::vector<float> &sum_mu_w_i,
@@ -96,7 +98,7 @@ void lstm_delta_mean_var_b(
     std::vector<float> &Jc_ga, std::vector<float> &mo_ga,
     std::vector<float> &Jo_ga, std::vector<float> &mc_prev,
     std::vector<float> &mca, std::vector<float> &Jc,
-    std::vector<float> &delta_m, std::vector<float> &delta_S, int no,
+    std::vector<float> &delta_mu, std::vector<float> &delta_var, int no,
     int start_idx, int end_idx, int batch_size, int seq_len, int time_step,
     std::vector<float> &sum_mu_b_f, std::vector<float> &sum_var_b_f,
     std::vector<float> &sum_mu_b_i, std::vector<float> &sum_var_b_i,

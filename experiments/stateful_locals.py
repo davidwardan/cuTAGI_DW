@@ -857,8 +857,8 @@ def eval_model(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [11, 42, 27, 3, 99]
-    list_of_train_use_ratios = [0.35, 0.5, 0.65, 0.8, 1.0]
+    list_of_seeds = [17]
+    list_of_train_use_ratios = [1.0]
 
     for seed in list_of_seeds:
         for train_use_ratio in list_of_train_use_ratios:
@@ -874,7 +874,7 @@ def main(Train=True, Eval=True, log_wandb=False):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{ratio_tag}/BySeries_{model_category}"
+            experiment_name = f"seed{seed}/{ratio_tag}/Test_{model_category}"
 
             # Create configuration
             config = Config.from_yaml(

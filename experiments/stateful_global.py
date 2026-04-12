@@ -1394,7 +1394,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             # Define experiment name
             experiment_name = (
                 f"seed{seed}/{ratio_tag}/"
-                f"Width512_{model_category}_{embed_category}"
+                f"Test_{model_category}_{embed_category}"
             )
 
             # Load configuration
