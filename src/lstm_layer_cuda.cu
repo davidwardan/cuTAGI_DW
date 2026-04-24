@@ -591,7 +591,8 @@ void LSTMCuda::forward(BaseHiddenStates &input_states,
     output_states.actual_size = this->output_size;
 
     cudaSetDevice(this->device_idx);
-    if (seq_len == 1 && batch_size == 1) {
+    // if (seq_len == 1 && batch_size == 1) {
+    if (seq_len == 1) {
         int n = lstm_state.num_states;
         cudaMemcpy(lstm_state.d_mu_h_prev, lstm_state.d_mu_h_prior,
                    n * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -710,7 +711,8 @@ void LSTMCuda::forward(BaseHiddenStates &input_states,
     }
 
     // Save priors from last timestep
-    if (seq_len == 1 && batch_size == 1) {
+    // if (seq_len == 1 && batch_size == 1) {
+    if (seq_len == 1) {
         int n = lstm_state.num_states;
         cudaMemcpy(lstm_state.d_mu_h_prior, cu_out->d_mu_a, n * sizeof(float),
                    cudaMemcpyDeviceToDevice);
@@ -767,7 +769,8 @@ void LSTMCuda::backward(BaseDeltaStates &input_delta_states,
     unsigned int blocks_no = (no + threads - 1) / threads;
 
     // Update priors (seq_len==1 && batch_size==1)
-    if (seq_len == 1 && batch_size == 1) {
+    // if (seq_len == 1 && batch_size == 1) {
+    if (seq_len == 1) {
         int total = batch_size * no;
         lstm_update_hidden_posterior_cuda<<<blocks_no_b, threads>>>(
             lstm_state.d_mu_h_prior, lstm_state.d_var_h_prior, d_buf_rec_mu,

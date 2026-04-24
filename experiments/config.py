@@ -15,8 +15,6 @@ class DataPaths(BaseModel):
 
 
 class DataLoader(BaseModel):
-    # Deprecated: feature count is inferred from target + configured covariates.
-    num_features: Optional[int] = None
     time_covariates: List[str] = Field(default_factory=lambda: ["week_of_year"])
     covariate_window_mode: str = "last_step"
     scale_method: str = "standard"
@@ -26,7 +24,7 @@ class DataLoader(BaseModel):
     train_use_ratio: float = 1.0
     look_back_len: Optional[int] = None
     input_seq_len: int = 52
-    carry_split_context: bool = False
+    carry_split_context: bool = True
     batch_size: int = 16
     output_col: List[int] = Field(default_factory=lambda: [0])
     nb_ts: int = 127
@@ -80,13 +78,6 @@ class Embeddings(BaseModel):
     mapped: MappedEmbeddings = Field(default_factory=MappedEmbeddings)
 
 
-class Initialization(BaseModel):
-    from_file: Optional[str] = None
-    variance_inject: float = 0.0
-    variance_threshold: float = 1.0
-    variance_action: str = "add"
-
-
 class Model(BaseModel):
     Sigma_v_bounds: Tuple[Optional[float], Optional[float]] = (None, None)
     decaying_factor: float = 0.99
@@ -94,7 +85,6 @@ class Model(BaseModel):
     cpu_threads: int = 1
     hidden_sizes: List[int] = Field(default_factory=lambda: [40, 40])
     sequential_model: bool = False
-    initialization: Initialization = Field(default_factory=Initialization)
 
 
 class Forecasting(BaseModel):
@@ -114,8 +104,6 @@ class Training(BaseModel):
     use_look_back_predictions: bool = True
     parameter_process_noise: float = 0.0
     series_dropout_count: int = Field(default=0, ge=0)
-    look_back_random_mask_prob: float = Field(default=0.0, ge=0.0, le=1.0)
-    look_back_random_mask_count: int = Field(default=0, ge=0)
 
 
 class Evaluation(BaseModel):

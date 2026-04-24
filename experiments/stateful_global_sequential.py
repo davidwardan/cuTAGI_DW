@@ -12,7 +12,6 @@ from experiments.wandb_helpers import (
 )
 from experiments.config import Config
 
-from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
 from experiments.data_loader import BatchLoader
 from experiments.utils import (
     prepare_data,
@@ -33,6 +32,11 @@ from experiments.utils import (
     States,
     EarlyStopping,
     LookBackBuffer,
+    setup_matplotlib,
+    setup_embeddings,
+    rescale_states,
+    save_states,
+    macro_metrics,
 )
 
 
@@ -44,17 +48,7 @@ import pytagi.metric as metric
 import matplotlib as mpl
 import plotly.graph_objects as go
 
-# Update matplotlib parameters in a single dictionary
-mpl.rcParams.update(
-    {
-        "pgf.texsystem": "pdflatex",
-        "font.family": "serif",
-        "text.usetex": False,
-        "pgf.rcfonts": False,
-        "pgf.preamble": r"\usepackage{amsfonts}\usepackage{amssymb}\usepackage{amsmath}",
-        "lines.linewidth": 1,  # Set line width to 1
-    }
-)
+setup_matplotlib()
 
 
 def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
@@ -71,42 +65,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     train_data, val_data, test_data = prepare_data(**config.prepare_data_kwargs())
 
     # Embeddings
-    embedding_dir = os.path.join(output_dir, "embeddings")
-
-    if config.use_mapped_embeddings:
-        print(
-            f"Using MappedTimeSeriesEmbeddings. Total embedding size: {config.total_embedding_size}"
-        )
-        embeddings = MappedTimeSeriesEmbeddings(
-            map_file_path=config.embeddings.mapped.embedding_map_dir,
-            embedding_sizes=config.embeddings.mapped.embedding_map_sizes,
-            encoding_types=config.embeddings.mapped.embedding_map_initializer,
-            seed=config.seed,
-        )
-        if not os.path.exists(embedding_dir):
-            os.makedirs(embedding_dir, exist_ok=True)
-        # Mapped save uses a file prefix
-        embeddings.save(os.path.join(embedding_dir, "embeddings_start"))
-
-    elif config.use_standard_embeddings:
-        print(
-            f"Using standard EmbeddingLayer. Embedding size: {config.total_embedding_size}"
-        )
-        embeddings = EmbeddingLayer(
-            num_embeddings=config.data.loader.nb_ts,
-            embedding_size=config.embeddings.standard.embedding_size,
-            encoding_type=config.embeddings.standard.embedding_initializer,
-            seed=config.seed,
-            init_file=config.embeddings.standard.embedding_init_file,
-        )
-        if not os.path.exists(embedding_dir):
-            os.makedirs(embedding_dir, exist_ok=True)
-        # Standard save uses a full file name
-        embeddings.save(os.path.join(embedding_dir, "embeddings_start.npz"))
-
-    else:
-        embeddings = None
-        print("No embeddings will be used.")
+    embeddings = setup_embeddings(config, output_dir)
 
     # Build model
     net, output_updater = build_model(
@@ -210,6 +169,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         m_preds = []
         std_preds = []
         y_trues = []
+        series_ids = []
 
         for (x, y), ts_id, w_id in train_batch_iter:
 
@@ -262,11 +222,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             m_preds.append(m_pred_masked)
             std_preds.append(s_pred_masked)
             y_trues.append(y_masked)
+            series_ids.append(np.asarray(indices)[mask])
 
             # Store predictions
             train_states.update(
                 new_mu=m_pred.reshape(B, -1),
-                new_std=s_pred_total.reshape(B, -1),
                 new_epistemic_std=s_pred_epistemic.reshape(B, -1),
                 new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
                 indices=indices,
@@ -320,9 +280,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             net.reset_lstm_states()
 
         # End of epoch
-        train_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
-        train_log_lik = metric.log_likelihood(
-            np.concatenate(m_preds), np.concatenate(y_trues), np.concatenate(std_preds)
+        train_mse, train_log_lik = macro_metrics(
+            np.concatenate(m_preds), np.concatenate(y_trues),
+            np.concatenate(std_preds), np.concatenate(series_ids),
         )
 
         # Validation
@@ -330,6 +290,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         m_preds = []
         std_preds = []
         y_trues = []
+        series_ids = []
 
         # reset look-back buffer
         look_back_buffer.reset()
@@ -416,11 +377,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             m_preds.append(m_pred_masked)
             std_preds.append(s_pred_masked)
             y_trues.append(y_masked)
+            series_ids.append(np.asarray(indices)[mask])
 
             # Store predictions
             val_states.update(
                 new_mu=m_pred.reshape(B, -1),
-                new_std=s_pred_total.reshape(B, -1),
                 new_epistemic_std=s_pred_epistemic.reshape(B, -1),
                 new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
                 indices=indices,
@@ -440,10 +401,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             net.reset_lstm_states()
 
-        # Calculate micro metrics for early stopping
-        val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
-        val_log_lik = metric.log_likelihood(
-            np.concatenate(m_preds), np.concatenate(y_trues), np.concatenate(std_preds)
+        # Calculate macro metrics for early stopping
+        val_mse, val_log_lik = macro_metrics(
+            np.concatenate(m_preds), np.concatenate(y_trues),
+            np.concatenate(std_preds), np.concatenate(series_ids),
         )
 
         # Update progress bar
@@ -609,7 +570,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         # Store predictions
         test_states.update(
             new_mu=m_pred.reshape(B, -1),
-            new_std=s_pred_total.reshape(B, -1),
             new_epistemic_std=s_pred_epistemic.reshape(B, -1),
             new_aleatoric_std=s_pred_aleatoric.reshape(B, -1),
             indices=indices,
@@ -629,58 +589,14 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
         net.reset_lstm_states()
 
-    # Run over each time series and re_scale it
+    # Rescale and save
     if config.data.loader.scale_method == "standard":
-        for i in range(config.data.loader.nb_ts):
-
-            if i not in config.ts_to_use:
-                continue
-
-            i = config.ts_to_use.index(i)
-
-            # get mean and std
-            mean = train_data.x_mean[i][0]
-            std = train_data.x_std[i][0]
-
-            # re-scale
-            train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
-            train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
-            train_states.epistemic_std[i] = normalizer.unstandardize_std(
-                train_states.epistemic_std[i], std
-            )
-            train_states.aleatoric_std[i] = normalizer.unstandardize_std(
-                train_states.aleatoric_std[i], std
-            )
-            val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
-            val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
-            val_states.epistemic_std[i] = normalizer.unstandardize_std(
-                val_states.epistemic_std[i], std
-            )
-            val_states.aleatoric_std[i] = normalizer.unstandardize_std(
-                val_states.aleatoric_std[i], std
-            )
-            test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
-            test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
-            test_states.epistemic_std[i] = normalizer.unstandardize_std(
-                test_states.epistemic_std[i], std
-            )
-            test_states.aleatoric_std[i] = normalizer.unstandardize_std(
-                test_states.aleatoric_std[i], std
-            )
-
-    # Save results
-    np.savez(
-        os.path.join(output_dir, "train_states.npz"),
-        **train_states.to_dict(include_total_std=False),
-    )
-    np.savez(
-        os.path.join(output_dir, "val_states.npz"),
-        **val_states.to_dict(include_total_std=False),
-    )
-    np.savez(
-        os.path.join(output_dir, "test_states.npz"),
-        **test_states.to_dict(include_total_std=False),
-    )
+        rescale_states(
+            (train_states, val_states, test_states),
+            train_data.x_mean, train_data.x_std,
+            config.ts_to_use, normalizer,
+        )
+    save_states(output_dir, train_states, val_states, test_states)
 
 
 def eval_model(
@@ -753,22 +669,20 @@ def eval_model(
         test_states
     )
 
-    for i in tqdm(config.ts_to_use, desc="Evaluating series"):
-
-        i = config.ts_to_use.index(i)
+    for pos, ts_id in enumerate(tqdm(config.ts_to_use, desc="Evaluating series")):
 
         # Get true values
         yt_train, yt_val, yt_test = (
-            _trim_trailing_nans(true_train[train_offset:, i]),
-            _trim_trailing_nans(true_val[val_offset:, i]),
-            _trim_trailing_nans(true_test[test_offset:, i]),
+            _trim_trailing_nans(true_train[train_offset:, pos]),
+            _trim_trailing_nans(true_val[val_offset:, pos]),
+            _trim_trailing_nans(true_test[test_offset:, pos]),
         )
         yt_full = np.concatenate([yt_train, yt_val, yt_test])
 
         # get expected value
-        ypred_train = train_states["mu"][i][: len(yt_train)]
-        ypred_val = val_states["mu"][i][: len(yt_val)]
-        ypred_test = test_states["mu"][i][: len(yt_test)]
+        ypred_train = train_states["mu"][pos][: len(yt_train)]
+        ypred_val = val_states["mu"][pos][: len(yt_val)]
+        ypred_test = test_states["mu"][pos][: len(yt_test)]
         ypred_full = np.concatenate([ypred_train, ypred_val, ypred_test])
 
         # get std
@@ -777,9 +691,9 @@ def eval_model(
                 "Missing predictive uncertainty. Expected stored std or both epistemic_std and aleatoric_std."
             )
 
-        spred_train = train_total_std[i][: len(yt_train)]
-        spred_val = val_total_std[i][: len(yt_val)]
-        spred_test = test_total_std[i][: len(yt_test)]
+        spred_train = train_total_std[pos][: len(yt_train)]
+        spred_val = val_total_std[pos][: len(yt_val)]
+        spred_test = test_total_std[pos][: len(yt_test)]
         spred_full = np.concatenate([spred_train, spred_val, spred_test])
 
         if (
@@ -792,16 +706,16 @@ def eval_model(
         ):
             spred_epistemic_full = np.concatenate(
                 [
-                    train_epistemic[i][: len(yt_train)],
-                    val_epistemic[i][: len(yt_val)],
-                    test_epistemic[i][: len(yt_test)],
+                    train_epistemic[pos][: len(yt_train)],
+                    val_epistemic[pos][: len(yt_val)],
+                    test_epistemic[pos][: len(yt_test)],
                 ]
             )
             spred_aleatoric_full = np.concatenate(
                 [
-                    train_aleatoric[i][: len(yt_train)],
-                    val_aleatoric[i][: len(yt_val)],
-                    test_aleatoric[i][: len(yt_test)],
+                    train_aleatoric[pos][: len(yt_train)],
+                    val_aleatoric[pos][: len(yt_val)],
+                    test_aleatoric[pos][: len(yt_test)],
                 ]
             )
         else:
@@ -814,7 +728,7 @@ def eval_model(
         # Forecast Plotting
         if config.evaluation.eval_plots:
             plot_series(
-                ts_idx=i,
+                ts_idx=ts_id,
                 y_true=yt_full,
                 y_pred=ypred_full,
                 s_pred=spred_full,
@@ -897,13 +811,12 @@ def eval_model(
         # save metrics to a table per series and overall
         with open(input_dir / "evaluation_metrics.txt", "w") as f:
             f.write("Series_ID,RMSE,LogLik,MAE,P50,P90\n")
-            for i in config.ts_to_use:
-                i = config.ts_to_use.index(i)
+            for pos, ts_id in enumerate(config.ts_to_use):
 
                 f.write(
-                    f"{config.ts_to_use[i]},{test_rmse_list[i]:.4f},{test_log_lik_list[i]:.4f},"
-                    f"{test_mae_list[i]:.4f},{test_p50_list[i]:.4f},"
-                    f"{test_p90_list[i]:.4f}\n"
+                    f"{ts_id},{test_rmse_list[pos]:.4f},{test_log_lik_list[pos]:.4f},"
+                    f"{test_mae_list[pos]:.4f},{test_p50_list[pos]:.4f},"
+                    f"{test_p90_list[pos]:.4f}\n"
                 )
             f.write(
                 f"Macro_Average,{macro_rmse:.4f},{macro_log_lik:.4f},"

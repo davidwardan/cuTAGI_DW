@@ -27,7 +27,6 @@ from experiments.utils import (
     LookBackBuffer,
     EarlyStopping,
     calculate_updates,
-    adjust_params,
     prepare_data,
     prepare_input,
     extract_target_history,
@@ -35,22 +34,15 @@ from experiments.utils import (
     load_true_split_arrays,
     predictive_std_components,
     load_predictive_uncertainty,
+    setup_matplotlib,
+    save_states,
 )
 
 # Plotting defaults
 import matplotlib as mpl
 
 # Update matplotlib parameters in a single dictionary
-mpl.rcParams.update(
-    {
-        "pgf.texsystem": "pdflatex",
-        "font.family": "serif",
-        "text.usetex": False,
-        "pgf.rcfonts": False,
-        "pgf.preamble": r"\usepackage{amsfonts}\usepackage{amssymb}\usepackage{amsmath}",
-        "lines.linewidth": 1,  # Set line width to 1
-    }
-)
+setup_matplotlib()
 
 
 def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
@@ -90,21 +82,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             seed=config.seed,
             device=config.model.device,
             cpu_threads=config.model.cpu_threads,
-            init_params=config.model.initialization.from_file,
             hidden_sizes=config.model.hidden_sizes,
         )
-
-        # Add plasticity
-        if (
-            config.model.initialization.from_file
-            and config.model.initialization.variance_inject != 0.0
-        ):
-            adjust_params(
-                net,
-                mode=config.model.initialization.variance_action,
-                value=config.model.initialization.variance_inject,
-                threshold=config.model.initialization.variance_threshold,
-            )
 
         # Create progress bar
         pbar = tqdm(range(config.training.num_epochs), desc=f"Epochs (TS {ts})")
@@ -236,7 +215,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 # Store predictions
                 train_states.update(
                     new_mu=m_pred,
-                    new_std=s_pred_total,
                     new_epistemic_std=s_pred_epistemic,
                     new_aleatoric_std=s_pred_aleatoric,
                     indices=[ts],
@@ -359,7 +337,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 # Store predictions
                 val_states.update(
                     new_mu=m_pred,
-                    new_std=s_pred_total,
                     new_epistemic_std=s_pred_epistemic,
                     new_aleatoric_std=s_pred_aleatoric,
                     indices=[ts],
@@ -551,7 +528,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             # Store predictions
             test_states.update(
                 new_mu=m_pred,
-                new_std=s_pred_total,
                 new_epistemic_std=s_pred_epistemic,
                 new_aleatoric_std=s_pred_aleatoric,
                 indices=[ts],
@@ -586,55 +562,21 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
     # Run over each time series and re_scale it
     if config.data.loader.scale_method == "standard":
-        for i in range(config.data.loader.nb_ts):
+        for ts_id in config.ts_to_use:
+            mean = x_means[ts_id]
+            std = x_stds[ts_id]
 
-            # skip if not in ts_to_use
-            if i not in config.ts_to_use:
-                continue
-
-            # get mean and std
-            mean = x_means[i]
-            std = x_stds[i]
-
-            # re-scale
-            train_states.mu[i] = normalizer.unstandardize(train_states.mu[i], mean, std)
-            train_states.std[i] = normalizer.unstandardize_std(train_states.std[i], std)
-            train_states.epistemic_std[i] = normalizer.unstandardize_std(
-                train_states.epistemic_std[i], std
-            )
-            train_states.aleatoric_std[i] = normalizer.unstandardize_std(
-                train_states.aleatoric_std[i], std
-            )
-            val_states.mu[i] = normalizer.unstandardize(val_states.mu[i], mean, std)
-            val_states.std[i] = normalizer.unstandardize_std(val_states.std[i], std)
-            val_states.epistemic_std[i] = normalizer.unstandardize_std(
-                val_states.epistemic_std[i], std
-            )
-            val_states.aleatoric_std[i] = normalizer.unstandardize_std(
-                val_states.aleatoric_std[i], std
-            )
-            test_states.mu[i] = normalizer.unstandardize(test_states.mu[i], mean, std)
-            test_states.std[i] = normalizer.unstandardize_std(test_states.std[i], std)
-            test_states.epistemic_std[i] = normalizer.unstandardize_std(
-                test_states.epistemic_std[i], std
-            )
-            test_states.aleatoric_std[i] = normalizer.unstandardize_std(
-                test_states.aleatoric_std[i], std
-            )
+            for states in (train_states, val_states, test_states):
+                states.mu[ts_id] = normalizer.unstandardize(states.mu[ts_id], mean, std)
+                states.epistemic_std[ts_id] = normalizer.unstandardize_std(
+                    states.epistemic_std[ts_id], std
+                )
+                states.aleatoric_std[ts_id] = normalizer.unstandardize_std(
+                    states.aleatoric_std[ts_id], std
+                )
 
     # Save results
-    np.savez(
-        os.path.join(output_dir, "train_states.npz"),
-        **train_states.to_dict(include_total_std=False),
-    )
-    np.savez(
-        os.path.join(output_dir, "val_states.npz"),
-        **val_states.to_dict(include_total_std=False),
-    )
-    np.savez(
-        os.path.join(output_dir, "test_states.npz"),
-        **test_states.to_dict(include_total_std=False),
-    )
+    save_states(output_dir, train_states, val_states, test_states)
 
 
 def eval_model(config, experiment_name: Optional[str] = None):

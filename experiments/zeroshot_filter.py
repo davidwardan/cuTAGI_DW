@@ -183,7 +183,8 @@ def filter(net, output_updater, data, stateless: Optional[bool] = False):
         # Store prior states
         prior_states.update(
             new_mu=m_pred,
-            new_std=s_epistemic,
+            new_epistemic_std=s_epistemic,
+            new_aleatoric_std=s_aleatoric,
             indices=[0],
             time_step=w_id.item(),
         )
@@ -205,7 +206,8 @@ def filter(net, output_updater, data, stateless: Optional[bool] = False):
         # Store posterior states
         posterior_states.update(
             new_mu=m_post,
-            new_std=s_post_epistemic,
+            new_epistemic_std=s_post_epistemic,
+            new_aleatoric_std=s_aleatoric,
             indices=[0],
             time_step=w_id.item(),
         )

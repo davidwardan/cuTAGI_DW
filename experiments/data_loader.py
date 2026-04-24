@@ -22,10 +22,6 @@ class TimeSeriesDataBuilder:
         stride: int,
         x_array: Optional[np.ndarray] = None,
         date_time_array: Optional[np.ndarray] = None,
-        history_x_file: Optional[str] = None,
-        history_date_time_file: Optional[str] = None,
-        history_x_files: Optional[List[str]] = None,
-        history_date_time_files: Optional[List[str]] = None,
         order_mode: str = "by_window",
         scale_method: Optional[str] = None,
         x_mean: Optional[
@@ -41,10 +37,6 @@ class TimeSeriesDataBuilder:
         self.date_time_file = date_time_file
         self.x_array = x_array
         self.date_time_array = date_time_array
-        self.history_x_file = history_x_file
-        self.history_date_time_file = history_date_time_file
-        self.history_x_files = history_x_files
-        self.history_date_time_files = history_date_time_files
         self.input_seq_len = input_seq_len
         self.output_seq_len = output_seq_len
         self.stride = stride
@@ -206,26 +198,6 @@ class TimeSeriesDataBuilder:
         X_scaled = Normalizer.standardize(X, mu=mu, std=std)
         return X_scaled
 
-    def _prepend_history_context(
-        self,
-        x: np.ndarray,
-        dt: np.ndarray,
-        history_x: Optional[np.ndarray],
-        history_dt: Optional[np.ndarray],
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Prepends up to input_seq_len rows of history for cross-split lookback."""
-        if history_x is None or history_dt is None or self.input_seq_len <= 0:
-            return x, dt
-
-        history_x, history_dt = self._trim_trailing_nans(history_x, history_dt)
-        if history_x.size == 0:
-            return x, dt
-
-        prefix_len = min(len(history_x), self.input_seq_len)
-        x = np.concatenate([history_x[-prefix_len:], x], axis=0)
-        dt = np.concatenate([history_dt[-prefix_len:], dt], axis=0)
-        return x.astype(np.float32), np.asarray(dt, dtype="datetime64[ns]")
-
     def _prepend_training_dummy_context(self, X: np.ndarray) -> np.ndarray:
         """Prepends synthetic context so the first real targets are trainable."""
         if not self.prepend_dummy_context or self.input_seq_len <= 0 or X.shape[0] == 0:
@@ -265,51 +237,6 @@ class TimeSeriesDataBuilder:
             print("assuming single datetime column for all series, duplicating...")
             DT_all = np.tile(DT_all.reshape(-1, 1), (1, X_all.shape[1]))
 
-        history_sources: List[Tuple[np.ndarray, np.ndarray]] = []
-        if self.history_x_files is not None or self.history_date_time_files is not None:
-            if self.history_x_files is None or self.history_date_time_files is None:
-                raise ValueError(
-                    "history_x_files and history_date_time_files must be provided together."
-                )
-            if len(self.history_x_files) != len(self.history_date_time_files):
-                raise ValueError(
-                    "history_x_files and history_date_time_files must have the same length."
-                )
-
-            for x_hist_path, dt_hist_path in zip(
-                self.history_x_files, self.history_date_time_files
-            ):
-                X_hist_all = self._load_data_from_csv(x_hist_path, col_to_use=self.ts_to_use)
-                DT_hist_all = self._load_data_from_csv(
-                    dt_hist_path, col_to_use=self.ts_to_use
-                )
-                if DT_hist_all.shape[1] == 1 and X_hist_all.shape[1] > 1:
-                    DT_hist_all = np.tile(
-                        DT_hist_all.reshape(-1, 1), (1, X_hist_all.shape[1])
-                    )
-                if (
-                    X_hist_all.shape[1] != X_all.shape[1]
-                    or DT_hist_all.shape[1] != DT_all.shape[1]
-                ):
-                    raise ValueError(
-                        "History split must contain the same series columns as the current split."
-                    )
-                history_sources.append((X_hist_all, DT_hist_all))
-        elif self.history_x_file is not None and self.history_date_time_file is not None:
-            X_hist_all = self._load_data_from_csv(
-                self.history_x_file, col_to_use=self.ts_to_use
-            )
-            DT_hist_all = self._load_data_from_csv(
-                self.history_date_time_file, col_to_use=self.ts_to_use
-            )
-            if DT_hist_all.shape[1] == 1 and X_hist_all.shape[1] > 1:
-                DT_hist_all = np.tile(DT_hist_all.reshape(-1, 1), (1, X_hist_all.shape[1]))
-            if X_hist_all.shape[1] != X_all.shape[1] or DT_hist_all.shape[1] != DT_all.shape[1]:
-                raise ValueError(
-                    "History split must contain the same series columns as the current split."
-                )
-            history_sources.append((X_hist_all, DT_hist_all))
-
         assert X_all.shape == DT_all.shape, (
             f"Data and DateTime files must have the same shape. "
             f"Got {X_all.shape} vs {DT_all.shape}."
@@ -331,17 +258,6 @@ class TimeSeriesDataBuilder:
         for j in range(N):
             xj, dtj = X_all[:, j], DT_all[:, j]
             xj, dtj = self._trim_trailing_nans(xj, dtj)
-            if history_sources:
-                history_xj = np.concatenate(
-                    [x_hist_all[:, j] for x_hist_all, _ in history_sources], axis=0
-                )
-                history_dtj = np.concatenate(
-                    [dt_hist_all[:, j] for _, dt_hist_all in history_sources], axis=0
-                )
-            else:
-                history_xj = None
-                history_dtj = None
-            xj, dtj = self._prepend_history_context(xj, dtj, history_xj, history_dtj)
             series_idx = ts_indices[j]
             covs = self._time_covariates_from_datetime_column(dtj)
 
@@ -420,31 +336,6 @@ class TimeSeriesDataBuilder:
             means, stds = zip(*scaling_info_per_ts)
             self.x_mean = list(means)
             self.x_std = list(stds)
-
-        # # Plot distribution for each time Series
-        # pdf_name = self.x_file.split("/")[-1].replace(".csv", "")
-
-        # all_means = np.nanmean(X_all_norm, axis=0)
-        # all_stds = np.nanstd(X_all_norm, axis=0)
-        # plt.figure(figsize=(min(12, len(all_means) * 0.1), 3))
-        # plt.errorbar(
-        #     x=np.arange(len(all_means)),
-        #     y=all_means,
-        #     yerr=all_stds,
-        #     fmt="o",
-        #     markersize=3,
-        #     ecolor="r",
-        #     capsize=3,
-        # )
-        # plt.xlabel("Time Series Index")
-        # plt.ylabel("Value")
-        # plt.title(f"{pdf_name}")
-        # plt.grid(True)
-        # plt.tight_layout()
-        # plt.xlim(-1, len(all_means))
-        # plt.ylim(-5, 5)
-        # plt.savefig(f"experiments/out/dist_{pdf_name}.svg")
-        # plt.close()
 
         # --- Concatenation Logic ---
         if self.order_mode == "by_series" or self.order_mode == "by_series_batch":

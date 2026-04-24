@@ -1,3 +1,4 @@
+import os
 import numpy as np
 
 from sklearn.decomposition import PCA
@@ -292,9 +293,6 @@ class LSTMStateContainer:
         if len(packed_states) > 0:
             net.set_lstm_states(packed_states)
 
-    def __call__(self, *args, **kwds):
-        pass
-
     def get_statistics(self):
         stats = {}
         for layer_idx, components in self.states.items():
@@ -414,9 +412,9 @@ class EarlyStopping:
 # --- States Class for plotting ---
 class States:
     def __init__(self, nb_ts, total_time_steps):
-        """Initializes storage for predictions and uncertainty components."""
+        """Initializes storage for predictions and uncertainty components.
+        Total std is not stored; it is derived from epistemic and aleatoric."""
         self.mu = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
-        self.std = np.full((nb_ts, total_time_steps), np.nan, dtype=np.float32)
         self.epistemic_std = np.full(
             (nb_ts, total_time_steps), np.nan, dtype=np.float32
         )
@@ -424,30 +422,23 @@ class States:
             (nb_ts, total_time_steps), np.nan, dtype=np.float32
         )
 
+    @property
+    def std(self):
+        """Total predictive std, derived from epistemic and aleatoric components."""
+        return combine_predictive_std(self.epistemic_std, self.aleatoric_std)
+
     def update(
         self,
         new_mu,
-        new_std,
         indices,
         time_step,
-        new_epistemic_std=None,
-        new_aleatoric_std=None,
+        new_epistemic_std,
+        new_aleatoric_std,
     ):
-        """
-        Efficiently updates states using vectorized NumPy indexing.
-
-        Args:
-            new_mu: Array of new mean values.
-            new_std: Array of new total predictive std values.
-            indices: Array of time series indices to update.
-            time_step: Array of time steps to update.
-            new_epistemic_std: Optional array of epistemic std values.
-            new_aleatoric_std: Optional array of aleatoric std values.
-        """
+        """Updates states using vectorized NumPy indexing."""
         indices = np.asarray(indices)
         valid_mask = indices >= 0
 
-        # Handle scalar time_step
         if np.isscalar(time_step):
             pass
         else:
@@ -464,52 +455,19 @@ class States:
             return values
 
         new_mu = _filter_values(new_mu)
-        new_std = _filter_values(new_std)
         new_epistemic_std = _filter_values(new_epistemic_std)
         new_aleatoric_std = _filter_values(new_aleatoric_std)
 
-        if new_std is None:
-            if new_epistemic_std is None or new_aleatoric_std is None:
-                raise ValueError(
-                    "new_std must be provided unless both uncertainty components are given."
-                )
-            new_std = np.sqrt(new_epistemic_std**2 + new_aleatoric_std**2)
-
         self.mu[indices, time_step] = new_mu.flatten()
-        self.std[indices, time_step] = new_std.flatten()
-        if new_epistemic_std is not None:
-            self.epistemic_std[indices, time_step] = new_epistemic_std.flatten()
-        if new_aleatoric_std is not None:
-            self.aleatoric_std[indices, time_step] = new_aleatoric_std.flatten()
+        self.epistemic_std[indices, time_step] = new_epistemic_std.flatten()
+        self.aleatoric_std[indices, time_step] = new_aleatoric_std.flatten()
 
-    def __getitem__(self, idx):
-        """Allows retrieving a full time series' states via my_states[idx]."""
-        return self.mu[idx], self.std[idx]
-
-    def __setitem__(self, idx, value):
-        """Allows setting a full time series' states via my_states[idx] = (...)."""
-        if len(value) == 2:
-            self.mu[idx], self.std[idx] = value
-            return
-        if len(value) == 4:
-            (
-                self.mu[idx],
-                self.std[idx],
-                self.epistemic_std[idx],
-                self.aleatoric_std[idx],
-            ) = value
-            return
-        raise ValueError("States assignment expects either 2 or 4 arrays.")
-
-    def to_dict(self, include_total_std=True):
-        state_dict = {
+    def to_dict(self):
+        return {
             "mu": self.mu,
             "epistemic_std": self.epistemic_std,
             "aleatoric_std": self.aleatoric_std,
         }
-        if include_total_std:
-            state_dict["std"] = self.std
-        return state_dict
 
 
 def predictive_std_components(epistemic_var, aleatoric_var):
@@ -539,6 +497,106 @@ def load_predictive_uncertainty(states):
         total_std = combine_predictive_std(epistemic_std, aleatoric_std)
 
     return total_std, epistemic_std, aleatoric_std
+
+
+def setup_matplotlib():
+    """Configures matplotlib defaults for publication-quality figures."""
+    import matplotlib as mpl
+
+    mpl.rcParams.update(
+        {
+            "pgf.texsystem": "pdflatex",
+            "font.family": "serif",
+            "text.usetex": False,
+            "pgf.rcfonts": False,
+            "pgf.preamble": r"\usepackage{amsfonts}\usepackage{amssymb}\usepackage{amsmath}",
+            "lines.linewidth": 1,
+        }
+    )
+
+
+def setup_embeddings(config, output_dir):
+    """Creates and saves initial embeddings based on config.
+
+    Returns the embedding object (EmbeddingLayer, MappedTimeSeriesEmbeddings,
+    or None if no embeddings configured).
+    """
+    from experiments.embedding_loader import EmbeddingLayer, MappedTimeSeriesEmbeddings
+
+    embedding_dir = os.path.join(output_dir, "embeddings")
+
+    if config.use_mapped_embeddings:
+        print(
+            f"Using MappedTimeSeriesEmbeddings. Total embedding size: {config.total_embedding_size}"
+        )
+        embeddings = MappedTimeSeriesEmbeddings(
+            map_file_path=config.embeddings.mapped.embedding_map_dir,
+            embedding_sizes=config.embeddings.mapped.embedding_map_sizes,
+            encoding_types=config.embeddings.mapped.embedding_map_initializer,
+            seed=config.seed,
+        )
+        os.makedirs(embedding_dir, exist_ok=True)
+        embeddings.save(os.path.join(embedding_dir, "embeddings_start"))
+
+    elif config.use_standard_embeddings:
+        print(
+            f"Using standard EmbeddingLayer. Embedding size: {config.total_embedding_size}"
+        )
+        embeddings = EmbeddingLayer(
+            num_embeddings=config.data.loader.nb_ts,
+            embedding_size=config.embeddings.standard.embedding_size,
+            encoding_type=config.embeddings.standard.embedding_initializer,
+            seed=config.seed,
+            init_file=config.embeddings.standard.embedding_init_file,
+        )
+        os.makedirs(embedding_dir, exist_ok=True)
+        embeddings.save(os.path.join(embedding_dir, "embeddings_start.npz"))
+
+    else:
+        embeddings = None
+        print("No embeddings will be used.")
+
+    return embeddings
+
+
+def rescale_states(states_tuple, x_mean, x_std, ts_indices, normalizer):
+    """Unstandardize mu, epistemic_std, aleatoric_std for all series.
+
+    Args:
+        states_tuple: Tuple of States objects (e.g. train, val, test).
+        x_mean: List of per-series mean arrays (positional, one per ts_indices entry).
+        x_std: List of per-series std arrays (positional, one per ts_indices entry).
+        ts_indices: List of time series indices to rescale.
+        normalizer: Object with unstandardize / unstandardize_std methods.
+    """
+    for pos, ts_id in enumerate(ts_indices):
+        mean = x_mean[pos][0]
+        std = x_std[pos][0]
+
+        for states in states_tuple:
+            states.mu[ts_id] = normalizer.unstandardize(states.mu[ts_id], mean, std)
+            states.epistemic_std[ts_id] = normalizer.unstandardize_std(
+                states.epistemic_std[ts_id], std
+            )
+            states.aleatoric_std[ts_id] = normalizer.unstandardize_std(
+                states.aleatoric_std[ts_id], std
+            )
+
+
+def save_states(output_dir, train_states, val_states, test_states):
+    """Save prediction states to .npz files."""
+    np.savez(
+        os.path.join(output_dir, "train_states.npz"),
+        **train_states.to_dict(),
+    )
+    np.savez(
+        os.path.join(output_dir, "val_states.npz"),
+        **val_states.to_dict(),
+    )
+    np.savez(
+        os.path.join(output_dir, "test_states.npz"),
+        **test_states.to_dict(),
+    )
 
 
 # --- Helper functions ---
@@ -886,8 +944,6 @@ def prepare_data(
     val_data = TimeSeriesDataBuilder(
         x_file=x_file[1],
         date_time_file=date_file[1],
-        history_x_file=x_file[0] if carry_split_context else None,
-        history_date_time_file=date_file[0] if carry_split_context else None,
         input_seq_len=input_seq_len,
         output_seq_len=1,
         stride=1,
@@ -899,13 +955,10 @@ def prepare_data(
         order_mode="by_window",
         ts_to_use=ts_to_use,
     )
+
     test_data = TimeSeriesDataBuilder(
         x_file=x_file[2],
         date_time_file=date_file[2],
-        history_x_files=([x_file[0], x_file[1]] if carry_split_context else None),
-        history_date_time_files=(
-            [date_file[0], date_file[1]] if carry_split_context else None
-        ),
         input_seq_len=input_seq_len,
         output_seq_len=1,
         stride=1,
@@ -919,6 +972,21 @@ def prepare_data(
     )
 
     return train_data, val_data, test_data
+
+
+def macro_metrics(m_preds, y_trues, std_preds, series_ids):
+    """Compute macro-averaged RMSE and log-likelihood across series."""
+    import pytagi.metric as metric
+
+    unique_ids = np.unique(series_ids)
+    unique_ids = unique_ids[unique_ids >= 0]  # exclude dummy indices
+    rmses = []
+    logliks = []
+    for sid in unique_ids:
+        sel = series_ids == sid
+        rmses.append(metric.rmse(m_preds[sel], y_trues[sel]))
+        logliks.append(metric.log_likelihood(m_preds[sel], y_trues[sel], std_preds[sel]))
+    return float(np.mean(rmses)), float(np.mean(logliks))
 
 
 # Define model
@@ -950,8 +1018,9 @@ def build_model(
             )
             current_input_size = hidden_size
     else:
-        for hidden_size in hidden_sizes:
-            layers.append(LSTM(current_input_size, hidden_size, 1))
+        for layer_idx, hidden_size in enumerate(hidden_sizes):
+            last_timestep = layer_idx == len(hidden_sizes) - 1
+            layers.append(LSTM(current_input_size, hidden_size, last_timestep))
             current_input_size = hidden_size
 
     linear_input_size = current_input_size
@@ -1134,41 +1203,6 @@ def extract_target_history_var(x: np.ndarray, input_seq_len: int) -> np.ndarray:
         TimeSeriesDataBuilder.TRAIN_DUMMY_VAR
     )
     return initial_var
-
-
-def randomly_mask_lookback_means(
-    look_back_mu: np.ndarray,
-    indices: np.ndarray,
-    mask_prob: float,
-    max_mask_count: int,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    if look_back_mu is None:
-        return look_back_mu
-    if mask_prob <= 0.0 or max_mask_count <= 0:
-        return look_back_mu
-
-    indices = np.asarray(indices)
-    active_indices = np.unique(indices[indices >= 0])
-    if active_indices.size == 0:
-        return look_back_mu
-
-    seq_len = int(look_back_mu.shape[1])
-    max_mask_count = min(int(max_mask_count), seq_len)
-    if max_mask_count <= 0:
-        return look_back_mu
-
-    series_to_mask = active_indices[rng.random(active_indices.shape[0]) < mask_prob]
-    if series_to_mask.size == 0:
-        return look_back_mu
-
-    masked_mu = look_back_mu.copy()
-    for ts_idx in series_to_mask:
-        n_to_mask = int(rng.integers(1, max_mask_count + 1))
-        mask_positions = rng.choice(seq_len, size=n_to_mask, replace=False)
-        masked_mu[int(ts_idx), mask_positions] = 0.0
-
-    return masked_mu
 
 
 def extract_embedding_deltas(
@@ -1661,8 +1695,6 @@ def plot_series(
             ec="none",
             alpha=0.2,
         )
-    else:
-        print("Bonjour comment ca va?")
 
     plt.xlabel("Time Index")
     plt.ylabel("Value")
