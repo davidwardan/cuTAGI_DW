@@ -279,8 +279,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             if embeddings is not None:
                 mu_delta, var_delta = net.get_input_states()
 
-                mu_delta = mu_delta * var_x
-                var_delta = var_x * var_delta * var_x
+                var_x_flat = var_x.reshape(-1)
+                mu_delta = mu_delta.reshape(-1) * var_x_flat
+                var_delta = var_x_flat * var_delta.reshape(-1) * var_x_flat
 
                 mu_delta = mu_delta.reshape(B, -1)
                 var_delta = var_delta.reshape(B, -1)
@@ -1229,7 +1230,7 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [42]
+    list_of_seeds = [100]
     list_of_experiments = ["train100"]
 
     # Iterate over experiments and seeds
@@ -1239,7 +1240,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Model category
             model_category = "sequential-global"
-            embed_category = "no-embeddings"
+            embed_category = "simple-embeddings"
 
             # Define experiment name
             experiment_name = (
@@ -1248,7 +1249,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
+                f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
             )
 
             config.seed = seed

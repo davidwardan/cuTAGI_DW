@@ -741,15 +741,26 @@ def build_model(
     layers = []
     current_input_size = input_size
     if sequential_model:
-        for hidden_size in hidden_sizes:
-            layers.append(LSTM(current_input_size, hidden_size, input_seq_len))
+        for layer_idx, hidden_size in enumerate(hidden_sizes):
+            layers.append(
+                LSTM(
+                    current_input_size,
+                    hidden_size,
+                    last_timestep=layer_idx == len(hidden_sizes) - 1,
+                    seq_len=input_seq_len,
+                )
+            )
             current_input_size = hidden_size
     else:
         for hidden_size in hidden_sizes:
-            layers.append(LSTM(current_input_size, hidden_size, 1))
+            layers.append(
+                LSTM(current_input_size, hidden_size, last_timestep=True, seq_len=1)
+            )
             current_input_size = hidden_size
 
-    linear_input_size = current_input_size * input_seq_len if sequential_model else current_input_size
+    linear_input_size = current_input_size
+    if sequential_model and not hidden_sizes:
+        linear_input_size = current_input_size * input_seq_len
 
     if use_AGVI:
         layers.append(Linear(linear_input_size, 2))
@@ -820,6 +831,21 @@ def prepare_input(
             indices[active_mask]
         ]
 
+    if sequential_model and inferred_input_seq_len is None:
+        raise ValueError("input_seq_len must be provided when sequential_model=True.")
+
+    use_sequence_shape = sequential_model and inferred_input_seq_len > 1
+
+    if use_sequence_shape:
+        if x.shape[1] % inferred_input_seq_len != 0:
+            raise ValueError(
+                f"Sequential input width {x.shape[1]} is not divisible by "
+                f"input_seq_len={inferred_input_seq_len}."
+            )
+        step_width = x.shape[1] // inferred_input_seq_len
+        x = x.reshape(-1, inferred_input_seq_len, step_width)
+        var_x = var_x.reshape(-1, inferred_input_seq_len, step_width)
+
     if embeddings is not None:
         lookup_indices = indices.copy()
         lookup_indices[lookup_indices == -1] = 0
@@ -828,23 +854,28 @@ def prepare_input(
         embed_mu[~active_mask] = 0.0
         embed_var[~active_mask] = 0.0
 
-        if sequential_model:
-            if inferred_input_seq_len is None:
-                raise ValueError(
-                    "input_seq_len must be provided when sequential_model=True."
-                )
-            step_width = x.shape[1] // inferred_input_seq_len
-            x = x.reshape(-1, inferred_input_seq_len, step_width)
-            var_x = var_x.reshape(-1, inferred_input_seq_len, step_width)
+        if use_sequence_shape:
             embed_mu = np.repeat(embed_mu[:, None, :], inferred_input_seq_len, axis=1)
             embed_var = np.repeat(
                 embed_var[:, None, :], inferred_input_seq_len, axis=1
             )
-            x = np.concatenate((x, embed_mu), axis=2).reshape(len(indices), -1)
-            var_x = np.concatenate((var_x, embed_var), axis=2).reshape(len(indices), -1)
+            x = np.concatenate((x, embed_mu), axis=2)
+            var_x = np.concatenate((var_x, embed_var), axis=2)
         else:
             x = np.concatenate((x, embed_mu), axis=1)
             var_x = np.concatenate((var_x, embed_var), axis=1)
+
+    if use_sequence_shape:
+        x = x.astype(np.float32, copy=False)
+        var_x = var_x.astype(np.float32, copy=False)
+
+        np.nan_to_num(x, copy=False, nan=0.0)
+        np.nan_to_num(var_x, copy=False, nan=0.0)
+
+        # clip variance
+        var_x = np.clip(var_x, a_min=1e-6, a_max=2.0)
+
+        return x, var_x
 
     flat_x = x.astype(np.float32).reshape(-1)
     flat_var = var_x.astype(np.float32).reshape(-1)

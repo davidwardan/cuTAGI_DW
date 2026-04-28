@@ -1298,7 +1298,7 @@ def main(Train=True, Eval=True, log_wandb=False):
 
             # Load configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_{embed_category}_HQ127.yaml"
+                f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
             )
 
             config.seed = seed
