@@ -15,11 +15,19 @@ from tqdm import tqdm
 
 import pytagi.cuda as cuda
 from pytagi import exponential_scheduler
-from pytagi.nn import LSTM, OutputUpdater, Sequential
+from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 
 
-TRAIN_CSV = "data/traffic/traffic_2008_01_14_train.csv"
+TRAIN_CSV = "data/hq/ts_weekly_values_final.csv"
 SAVE_DIR = "saved_results"
+
+
+def _trim_trailing_nans(series: np.ndarray) -> np.ndarray:
+    """Drop NaN-only tail values from one time series."""
+    valid_idx = np.flatnonzero(~np.isnan(series))
+    if valid_idx.size == 0:
+        return series[:0]
+    return series[: valid_idx[-1] + 1]
 
 
 def load_traffic_windows(csv_path: str, window_len: int, stride: int):
@@ -29,26 +37,49 @@ def load_traffic_windows(csv_path: str, window_len: int, stride: int):
     Returns
     -------
     windows : (N, window_len, 1) float32
-    raw_std : (T, num_series) float32, standardised series (used later to
-              embed one representative window per series)
+    first_windows : (num_series, window_len, 1) float32, first valid window
+                    for every series with at least one usable window
     """
     df = pd.read_csv(csv_path, skiprows=1, delimiter=",", header=None)
     data = df.values.astype(np.float32)  # (T, num_series)
 
-    series_mean = data.mean(axis=0)
-    series_std = data.std(axis=0)
-    series_std[series_std < 1e-6] = 1.0
-    raw_std = (data - series_mean) / series_std
-
-    T, num_series = raw_std.shape
     windows = []
+    first_windows = []
+    num_series = data.shape[1]
     for s in range(num_series):
-        series = raw_std[:, s]
-        for start in range(0, T - window_len + 1, stride):
-            windows.append(series[start : start + window_len])
+        series = _trim_trailing_nans(data[:, s])
+        if series.size < window_len:
+            continue
+
+        series_mean = np.nanmean(series)
+        series_std = np.nanstd(series)
+        if np.isnan(series_mean) or np.isnan(series_std):
+            continue
+        if series_std < 1e-6:
+            series_std = 1.0
+
+        series = (series - series_mean) / series_std
+        first_valid_window = None
+        for start in range(0, series.size - window_len + 1, stride):
+            window = series[start : start + window_len]
+            if np.isnan(window).any():
+                continue
+            windows.append(window)
+            if first_valid_window is None:
+                first_valid_window = window
+
+        if first_valid_window is not None:
+            first_windows.append(first_valid_window)
+
+    if not windows:
+        raise ValueError(
+            f"No valid windows found in {csv_path!r}; "
+            f"window_len={window_len}, stride={stride}."
+        )
 
     windows = np.stack(windows).astype(np.float32)[..., np.newaxis]
-    return windows, raw_std
+    first_windows = np.stack(first_windows).astype(np.float32)[..., np.newaxis]
+    return windows, first_windows
 
 
 def pca_3d(X: np.ndarray) -> np.ndarray:
@@ -56,6 +87,30 @@ def pca_3d(X: np.ndarray) -> np.ndarray:
     Xc = X - X.mean(axis=0, keepdims=True)
     _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
     return Xc @ Vt[:3].T
+
+
+def repeat_embedding(
+    m_z: np.ndarray,
+    v_z: np.ndarray,
+    window_len: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Repeat one embedding per sample across all decoder timesteps."""
+    m_dec = np.repeat(m_z[:, np.newaxis, :], window_len, axis=1).astype(np.float32)
+    v_dec = np.repeat(v_z[:, np.newaxis, :], window_len, axis=1).astype(np.float32)
+    return m_dec, v_dec
+
+
+def aggregate_repeat_deltas(
+    delta_mu: np.ndarray,
+    delta_var: np.ndarray,
+    batch_size: int,
+    window_len: int,
+    embed_size: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fold decoder-input deltas from repeated z_t copies back to z."""
+    delta_mu = delta_mu.reshape(batch_size, window_len, embed_size).sum(axis=1)
+    delta_var = delta_var.reshape(batch_size, window_len, embed_size).sum(axis=1)
+    return delta_mu.reshape(-1), delta_var.reshape(-1)
 
 
 def reconstruct(
@@ -83,27 +138,17 @@ def reconstruct(
         x_batch = x_padded[start : start + batch_size]
 
         m_enc, v_enc = encoder(x_batch)
-        m_enc = np.asarray(m_enc, dtype=np.float32).reshape(
-            batch_size, embed_size
-        )
-        v_enc = np.asarray(v_enc, dtype=np.float32).reshape(
-            batch_size, embed_size
-        )
+        m_enc = np.asarray(m_enc, dtype=np.float32).reshape(batch_size, embed_size)
+        v_enc = np.asarray(v_enc, dtype=np.float32).reshape(batch_size, embed_size)
 
-        m_dec_in = np.zeros(
-            (batch_size, window_len, embed_size), dtype=np.float32
-        )
-        v_dec_in = np.zeros_like(m_dec_in)
-        m_dec_in[:, 0, :] = m_enc
-        v_dec_in[:, 0, :] = v_enc
-
+        m_dec_in, v_dec_in = repeat_embedding(m_enc, v_enc, window_len)
         m_pred, v_pred = decoder(m_dec_in, v_dec_in)
-        mean[start : start + batch_size] = np.asarray(
-            m_pred, dtype=np.float32
-        ).reshape(batch_size, window_len)
-        var[start : start + batch_size] = np.asarray(
-            v_pred, dtype=np.float32
-        ).reshape(batch_size, window_len)
+        mean[start : start + batch_size] = np.asarray(m_pred, dtype=np.float32).reshape(
+            batch_size, window_len
+        )
+        var[start : start + batch_size] = np.asarray(v_pred, dtype=np.float32).reshape(
+            batch_size, window_len
+        )
 
     return mean[:n], var[:n]
 
@@ -170,14 +215,16 @@ def plot_reconstructions(
 
 
 def main(
-    num_epochs: int = 20,
-    batch_size: int = 128,
+    num_epochs: int = 30,
+    batch_size: int = 64,
     sigma_v: float = 1.0,
-    window_len: int = 24,
-    embed_size: int = 10,
-    hidden_size: int = 64,
-    stride: int = 6,
+    window_len: int = 52,
+    embed_size: int = 20,
+    hidden_size: int = 50,
+    stride: int = 1,
     cuda_index: int = 0,
+    train_csv: str = TRAIN_CSV,
+    output_prefix: str = "hq",
 ):
     """Train an LSTM encoder-decoder that compresses a window of a traffic
     time series into a low-dimensional embedding and reconstructs it."""
@@ -186,14 +233,14 @@ def main(
 
     # --------------------------------------------------------------------- #
     # Data
-    x_all, raw_std = load_traffic_windows(
-        TRAIN_CSV, window_len=window_len, stride=stride
+    x_all, first_windows = load_traffic_windows(
+        train_csv, window_len=window_len, stride=stride
     )
     num_samples = x_all.shape[0]
-    num_series = raw_std.shape[1]
+    num_series = first_windows.shape[0]
     print(
         f"Loaded {num_samples} windows of length {window_len} "
-        f"from {num_series} series."
+        f"from {num_series} series with at least one valid window."
     )
 
     # --------------------------------------------------------------------- #
@@ -208,11 +255,11 @@ def main(
         ),
     )
 
-    # The decoder's first LSTM consumes a repeated copy of the embedding at every
-    # output timestep (we build that tensor in the training loop).
+    # Decoder: consumes z repeated at every timestep, then maps each decoder
+    # hidden state to the reconstructed scalar x_t.
     decoder = Sequential(
         LSTM(embed_size, hidden_size, last_timestep=False, seq_len=window_len),
-        LSTM(hidden_size, 1, last_timestep=False, seq_len=window_len),
+        Linear(hidden_size, 1),
     )
 
     device = f"cuda:{cuda_index}" if cuda.is_available() else "cpu"
@@ -230,41 +277,27 @@ def main(
         x_shuffled = x_all[perm]
 
         sigma_v = exponential_scheduler(
-            curr_v=sigma_v, min_v=0.5, decaying_factor=0.8, curr_iter=epoch
+            curr_v=sigma_v, min_v=0.2, decaying_factor=0.8, curr_iter=epoch
         )
-        var_y = np.full(
-            (batch_size * window_len,), sigma_v**2, dtype=np.float32
-        )
+        var_y = np.full((batch_size * window_len,), sigma_v**2, dtype=np.float32)
 
         mses = []
         num_batches = num_samples // batch_size
-        embed_slots = batch_size * window_len * embed_size
+        decoder_input_slots = batch_size * window_len * embed_size
+        embed_slots = batch_size * embed_size
         for b in range(num_batches):
             x_batch = x_shuffled[b * batch_size : (b + 1) * batch_size]
             x_flat = x_batch.reshape(-1).astype(np.float32)
 
             # Encode: (batch, window_len, 1) -> (batch, embed_size)
             m_enc, v_enc = encoder(x_batch)
-            m_enc = np.asarray(m_enc, dtype=np.float32).reshape(
-                batch_size, embed_size
-            )
-            v_enc = np.asarray(v_enc, dtype=np.float32).reshape(
-                batch_size, embed_size
-            )
+            m_enc = np.asarray(m_enc, dtype=np.float32).reshape(batch_size, embed_size)
+            v_enc = np.asarray(v_enc, dtype=np.float32).reshape(batch_size, embed_size)
 
-            # Inject the embedding only at t=0 and feed zeros afterwards; the
-            # decoder's LSTM state carries the information across the sequence.
-            # This avoids compounding 24 shared-latent deltas (which, when
-            # summed, tends to drive the encoder's posterior variance negative
-            # and produce NaNs).
-            m_dec_in = np.zeros(
-                (batch_size, window_len, embed_size), dtype=np.float32
-            )
-            v_dec_in = np.zeros_like(m_dec_in)
-            m_dec_in[:, 0, :] = m_enc
-            v_dec_in[:, 0, :] = v_enc
+            # Repeat z T times: (batch, embed_size) -> (batch, window_len, embed_size)
+            m_dec_in, v_dec_in = repeat_embedding(m_enc, v_enc, window_len)
 
-            # Decode: reconstruct the input window
+            # Decode: reconstruct the window
             m_pred, _ = decoder(m_dec_in, v_dec_in)
 
             # Reconstruction loss at the output
@@ -278,23 +311,28 @@ def main(
             decoder.backward()
             decoder.step()
 
-            # decoder.output_delta_z_buffer holds deltas for every input
-            # position; only t=0 carried the real embedding, so the encoder's
-            # output delta is just the first timestep slice.
-            d_mu = np.asarray(
+            # Propagate deltas: decoder -> repeated z -> encoder
+            delta_mu_dec = np.asarray(
                 decoder.output_delta_z_buffer.delta_mu, dtype=np.float32
-            )[:embed_slots].reshape(batch_size, window_len, embed_size)
-            d_var = np.asarray(
+            )[:decoder_input_slots]
+            delta_var_dec = np.asarray(
                 decoder.output_delta_z_buffer.delta_var, dtype=np.float32
-            )[:embed_slots].reshape(batch_size, window_len, embed_size)
-            delta_mu_agg = d_mu[:, 0, :].reshape(-1)
-            delta_var_agg = d_var[:, 0, :].reshape(-1)
+            )[:decoder_input_slots]
+            delta_mu_agg, delta_var_agg = aggregate_repeat_deltas(
+                delta_mu_dec,
+                delta_var_dec,
+                batch_size=batch_size,
+                window_len=window_len,
+                embed_size=embed_size,
+            )
+            delta_mu_agg = delta_mu_agg[:embed_slots]
+            delta_var_agg = delta_var_agg[:embed_slots]
 
             encoder.set_delta_z(delta_mu_agg, delta_var_agg)
             encoder.backward()
             encoder.step()
 
-            mses.append(float(np.mean((m_pred - x_flat) ** 2)))
+            mses.append(float(np.nanmean((m_pred - x_flat) ** 2)))
 
         # Flush any carried-over LSTM state at epoch boundary.
         encoder.reset_lstm_states()
@@ -333,11 +371,9 @@ def main(
     # --------------------------------------------------------------------- #
     # Embedding extraction: one embedding per sensor (first window)
     encoder.eval()
-    first_windows = raw_std[:window_len, :].T[:, :, np.newaxis].astype(
-        np.float32
-    )  # (num_series, window_len, 1)
 
-    embeddings = np.zeros((num_series, embed_size), dtype=np.float32)
+    emb_mean = np.zeros((num_series, embed_size), dtype=np.float32)
+    emb_var = np.zeros((num_series, embed_size), dtype=np.float32)
     for start in range(0, num_series, batch_size):
         end = min(start + batch_size, num_series)
         batch = first_windows[start:end]
@@ -351,39 +387,49 @@ def main(
 
         # reset between batches so each window is encoded from a fresh state
         encoder.reset_lstm_states()
-        mu_out, _ = encoder(batch_padded)
-        mu_out = np.asarray(mu_out).reshape(batch_size, embed_size)
-        embeddings[start:end] = mu_out[: end - start]
+        mu_out, var_out = encoder(batch_padded)
+        mu_out = np.asarray(mu_out, dtype=np.float32).reshape(batch_size, embed_size)
+        var_out = np.asarray(var_out, dtype=np.float32).reshape(batch_size, embed_size)
+        emb_mean[start:end] = mu_out[: end - start]
+        emb_var[start:end] = var_out[: end - start]
 
-    emb_path = os.path.join(SAVE_DIR, "traffic_embeddings.csv")
-    np.savetxt(emb_path, embeddings, delimiter=",")
-    print(f"Saved embeddings -> {emb_path}  (shape {embeddings.shape})")
+    mean_path = os.path.join(SAVE_DIR, f"{output_prefix}_embeddings_mean.csv")
+    var_path = os.path.join(SAVE_DIR, f"{output_prefix}_embeddings_var.csv")
+    np.savetxt(mean_path, emb_mean, delimiter=",")
+    np.savetxt(var_path, emb_var, delimiter=",")
+    print(f"Saved mean embeddings -> {mean_path}  (shape {emb_mean.shape})")
+    print(f"Saved var  embeddings -> {var_path}  (shape {emb_var.shape})")
 
     # --------------------------------------------------------------------- #
-    # 3D PCA visualisation
-    embeds_3d = pca_3d(embeddings)
+    # # 3D PCA visualisation (mean embeddings)
+    # if not np.isfinite(emb_mean).all():
+    #     print(
+    #         "Skipping PCA figure: mean embeddings contain non-finite values."
+    #     )
+    #     return
+    # embeds_3d = pca_3d(emb_mean)
 
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-    sc = ax.scatter(
-        embeds_3d[:, 0],
-        embeds_3d[:, 1],
-        embeds_3d[:, 2],
-        c=np.arange(num_series),
-        cmap="viridis",
-        s=12,
-        alpha=0.8,
-    )
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    ax.set_zlabel("PC3")
-    ax.set_title("PCA of LSTM embeddings (traffic sensors)")
-    fig.colorbar(sc, ax=ax, shrink=0.6, label="sensor index")
+    # fig = plt.figure(figsize=(10, 8))
+    # ax = fig.add_subplot(111, projection="3d")
+    # sc = ax.scatter(
+    #     embeds_3d[:, 0],
+    #     embeds_3d[:, 1],
+    #     embeds_3d[:, 2],
+    #     c=np.arange(num_series),
+    #     cmap="viridis",
+    #     s=12,
+    #     alpha=0.8,
+    # )
+    # ax.set_xlabel("PC1")
+    # ax.set_ylabel("PC2")
+    # ax.set_zlabel("PC3")
+    # ax.set_title(f"PCA of LSTM embeddings ({output_prefix})")
+    # fig.colorbar(sc, ax=ax, shrink=0.6, label="sensor index")
 
-    fig_path = os.path.join(SAVE_DIR, "traffic_embedding_pca.png")
-    plt.savefig(fig_path, bbox_inches="tight", dpi=150)
-    plt.close(fig)
-    print(f"Saved 3D PCA figure -> {fig_path}")
+    # fig_path = os.path.join(SAVE_DIR, f"{output_prefix}_embedding_pca.png")
+    # plt.savefig(fig_path, bbox_inches="tight", dpi=150)
+    # plt.close(fig)
+    # print(f"Saved 3D PCA figure -> {fig_path}")
 
 
 if __name__ == "__main__":
