@@ -170,12 +170,8 @@ class LSTMStateContainer:
         """
 
         batch_size = len(indices)
-        if batch_size != 1:
-            valid_mask = indices != -1
-            valid_indices_to_read = indices[valid_mask]
-        else:
-            valid_mask = np.array([True], dtype=bool)
-            valid_indices_to_read = indices
+        valid_mask = indices != -1
+        valid_indices_to_read = indices[valid_mask]
 
         batch_states = {}
         for layer_idx, components in self.states.items():

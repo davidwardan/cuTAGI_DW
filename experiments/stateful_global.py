@@ -162,6 +162,12 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     for epoch in pbar:
         net.train()
 
+        # Skip set_states_on_net for the first batch of each loop.
+        # The C++ LSTM only resizes its state buffer during a forward pass, so we
+        # must let the first forward pass establish the new batch size before
+        # set_lstm_states is called (otherwise size mismatch on batch-size change).
+        skip_first_set_states = True
+
         epoch_seed = None if config.seed is None else int(config.seed) + int(epoch)
         train_batch_iter = BatchLoader.create_data_loader(
             dataset=train_data.dataset,
@@ -210,7 +216,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             time_steps = w_id
 
             # set LSTM states for the current batch
-            lstm_state_container.set_states_on_net(indices, net)
+            # (skipped for the very first batch of epoch 0 — net already holds zero states)
+            if skip_first_set_states:
+                skip_first_set_states = False
+            else:
+                lstm_state_container.set_states_on_net(indices, net)
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -323,9 +333,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             # Where y is available use y otherwuse use m_pred
             y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
             v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
-            # else:
-            # y_lookback = m_post.copy()
-            # v_lookback = v_post.copy()
 
             # Update look_back buffer
             look_back_buffer.update(
@@ -342,6 +349,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
         # Validation
         net.eval()
+
+        # reset look-back buffer and LSTM states before validating
+        look_back_buffer.reset()
+        lstm_state_container.reset_states()
+
         m_preds = []
         std_preds = []
         y_trues = []
@@ -353,6 +365,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             shuffle=False,
         )
 
+        # Skip the first set_states_on_net so the forward pass can resize the
+        # C++ LSTM buffer to the val batch size (see training-loop comment).
+        skip_first_set_states = True
+
         for (x, y), ts_id, w_id in val_batch_iter:
 
             # get current batch size and indices
@@ -361,7 +377,10 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             time_steps = w_id
 
             # set LSTM states for the current batch
-            lstm_state_container.set_states_on_net(indices, net)
+            if skip_first_set_states:
+                skip_first_set_states = False
+            else:
+                lstm_state_container.set_states_on_net(indices, net)
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -396,9 +415,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             # Feedforward
             m_pred, v_pred = net(x, var_x)
-
-            # Update LSTM states for the current batch
-            lstm_state_container.update_states_from_net(indices, net)
 
             # Specific to AGVI
             if config.use_AGVI:
@@ -441,21 +457,21 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 train_mode=False,  # Important to prevent actual parameter updates
             )
 
+            # Update LSTM states for the current batch (after calculate_updates, matching train order)
+            lstm_state_container.update_states_from_net(indices, net)
+            net.reset_lstm_states()
+
             # Where y is available use y otherwuse use m_pred
-            y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
-            # else:
-            #     y_lookback = m_post.copy()
-            #     v_lookback = v_post.copy()
+            # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=y_lookback.reshape(B, -1),
-                new_var=v_lookback.reshape(B, -1),
+                new_mu=m_pred.reshape(B, -1),
+                new_var=v_pred.reshape(B, -1),
                 indices=indices,
             )
         # End of epoch
-        net.reset_lstm_states()
 
         # Calculate micro metrics for early stopping
         val_mse = metric.rmse(np.concatenate(m_preds), np.concatenate(y_trues))
@@ -552,7 +568,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
     net.eval()
 
     # reset look-back buffer and LSTM states before testing
-    # look_back_buffer.reset()
+    look_back_buffer.reset()
     # lstm_state_container.reset_states()
 
     test_batch_iter = BatchLoader.create_data_loader(
@@ -610,10 +626,6 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         # Feedforward
         m_pred, v_pred = net(x, var_x)
 
-        # Update LSTM states for the current batch
-        lstm_state_container.update_states_from_net(indices, net)
-        net.reset_lstm_states()
-
         # Specific to AGVI
         if config.use_AGVI:
             flat_m = np.ravel(m_pred)
@@ -645,16 +657,18 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             train_mode=False,  # Important to prevent actual parameter updates
         )
 
+        # Update LSTM states for the current batch (after calculate_updates, matching train order)
+        lstm_state_container.update_states_from_net(indices, net)
+        net.reset_lstm_states()
+
         # Where y is available use y otherwuse use m_pred
-        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
-        # y_lookback = m_post.copy()
-        # v_lookback = v_post.copy()
+        # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+        # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=y_lookback.reshape(B, -1),
-            new_var=v_lookback.reshape(B, -1),
+            new_mu=m_pred.reshape(B, -1),
+            new_var=v_pred.reshape(B, -1),
             indices=indices,
         )
 
@@ -1294,7 +1308,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             embed_category = "no-embeddings"
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}lb12-whitenoise_{embed_category}"
+            experiment_name = f"seed{seed}/{exp}/DEBUG_{model_category}_{embed_category}"
 
             # Load configuration
             config = Config.from_yaml(
@@ -1305,9 +1319,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.data.loader.order_mode = "by_window"
-            config.training.warmup_epochs = 3
-            config.evaluation.eval_plots = True
+            config.data.loader.train_use_ratio = int(exp.removeprefix("train")) / 100.0
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()

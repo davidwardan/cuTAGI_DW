@@ -5,9 +5,8 @@ from experiments.config import Config
 
 from pytagi import cuda
 
-DEFAULT_SEEDS: Sequence[int] = [11]
+DEFAULT_SEEDS: Sequence[int] = [17, 42, 100, 4915, 1516]
 DEFAULT_EXPERIMENTS: Sequence[str] = (
-    "train30",
     "train40",
     "train60",
     "train80",
@@ -21,26 +20,25 @@ def _run_experiment(
     train: bool,
     evaluate: bool,
 ) -> None:
-    from experiments import stateless_locals as parent_script
+    from experiments import stateful_global as parent_script
 
     # Model category
-    model_category = "locals"
-    # embed_category = "no-embeddings"
+    model_category = "global"
+    embed_category = "no-embeddings"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}-shuffled"
+    experiment_name = f"seed{seed}/{exp}/MultiForecast_{model_category}_{embed_category}"
 
     # Load configuration
     config = Config.from_yaml(
-        f"experiments/configurations/{model_category}_HQ127.yaml"
+        f"experiments/config/{model_category}_{embed_category}_HQ127.yaml"
     )
 
     config.seed = seed
     config.model.device = "cuda" if cuda.is_available() else "cpu"
     config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
     config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-    config.data.loader.order_mode = "shuffled_filtered"
-    config.evaluation.eval_plots = True
+    config.data.loader.train_use_ratio = int(exp.removeprefix("train")) / 100.0
 
     # Display config
     config.display()
@@ -61,7 +59,7 @@ def run_experiments(
     seeds: Iterable[int] = DEFAULT_SEEDS,
     experiments: Iterable[str] = DEFAULT_EXPERIMENTS,
     *,
-    train: bool = False,
+    train: bool = True,
     evaluate: bool = True,
 ) -> None:
     ctx = mp.get_context("spawn")

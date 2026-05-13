@@ -27,7 +27,6 @@ from experiments.utils import (
     LookBackBuffer,
     EarlyStopping,
     calculate_updates,
-    adjust_params,
     prepare_data,
     prepare_input,
     extract_target_history,
@@ -48,6 +47,11 @@ mpl.rcParams.update(
         "lines.linewidth": 1,  # Set line width to 1
     }
 )
+
+
+def _scalar_window_id(w_id) -> int:
+    """Return the window id for local single-series batches."""
+    return int(np.asarray(w_id).reshape(-1)[0])
 
 
 def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
@@ -87,20 +91,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             seed=config.seed,
             device=config.model.device,
             cpu_threads=config.model.cpu_threads,
-            init_params=config.model.initialization.from_file,
+            hidden_sizes=config.model.hidden_sizes,
+            shift_biases=False,
         )
-
-        # Add plasticity
-        if (
-            config.model.initialization.from_file
-            and config.model.initialization.variance_inject != 0.0
-        ):
-            adjust_params(
-                net,
-                mode=config.model.initialization.variance_action,
-                value=config.model.initialization.variance_inject,
-                threshold=config.model.initialization.variance_threshold,
-            )
 
         # Create progress bar
         pbar = tqdm(range(config.training.num_epochs), desc=f"Epochs (TS {ts})")
@@ -125,20 +118,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             if config.training.num_epochs <= 1:
                 decaying_sigma_v = [sigma_start]
             else:
+                # Exponential decay: sigma(t) = sigma_end + (sigma_start - sigma_end) * decay_factor^t
                 decay_factor = float(config.model.decaying_factor)
-                exponents = decay_factor ** np.arange(
-                    config.training.num_epochs, dtype=np.float32
-                )
-                if np.isclose(exponents[0], exponents[-1]) or decay_factor <= 0.0:
-                    weights = np.linspace(
-                        1.0, 0.0, config.training.num_epochs, dtype=np.float32
-                    )
-                else:
-                    weights = (exponents - exponents[-1]) / (
-                        exponents[0] - exponents[-1]
-                    )
+                t = np.arange(config.training.num_epochs, dtype=np.float32)
                 decaying_sigma_v = (
-                    sigma_end + (sigma_start - sigma_end) * weights
+                    sigma_end + (sigma_start - sigma_end) * (decay_factor**t)
                 ).tolist()
 
         # --- Training loop ---
@@ -148,9 +132,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             train_batch_iter = BatchLoader.create_data_loader(
                 dataset=train_data.dataset,
                 order_mode="by_window",
-                batch_size=config.data.loader.batch_size,
+                batch_size=1,
                 shuffle=False,
-                seed=1,  # fixed for all seeds and runs
             )
 
             # Initialize look-back buffer and LSTM state container
@@ -169,7 +152,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             for (x, y), _, w_id in train_batch_iter:
 
                 # get current batch size
-                B = config.data.loader.batch_size
+                B = x.shape[0]
+                time_step = _scalar_window_id(w_id)
 
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
@@ -234,7 +218,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     new_mu=m_pred,
                     new_std=s_pred_total,
                     indices=[ts],
-                    time_step=w_id.item(),
+                    time_step=time_step,
                 )
 
                 # Update
@@ -273,19 +257,22 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             std_preds = []
             y_trues = []
 
+            # reset look back buffer and LSTM states before validating
+            look_back_buffer.reset()
+            net.reset_lstm_states()
+
             val_batch_iter = BatchLoader.create_data_loader(
                 dataset=val_data.dataset,
                 order_mode="by_window",
-                batch_size=config.data.loader.batch_size,
+                batch_size=1,
                 shuffle=False,
             )
-
-            look_back_buffer_val = copy.deepcopy(look_back_buffer)
 
             for (x, y), _, w_id in val_batch_iter:
 
                 # get current batch size
-                B = config.data.loader.batch_size
+                B = x.shape[0]
+                time_step = _scalar_window_id(w_id)
 
                 # prepare obsevation noise matrix
                 if not config.use_AGVI:
@@ -296,9 +283,9 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     )
 
                 # prepare look_back buffer
-                if look_back_buffer_val.needs_initialization[0]:
+                if look_back_buffer.needs_initialization[0]:
                     initial_mu = extract_target_history(x, config.window_len)
-                    look_back_buffer_val.initialize(
+                    look_back_buffer.initialize(
                         initial_mu=initial_mu,
                         initial_var=np.zeros_like(initial_mu, dtype=np.float32),
                         indices=[0],
@@ -308,16 +295,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 x, var_x = prepare_input(
                     x=x,
                     var_x=None,
-                    look_back_mu=(
-                        look_back_buffer_val.mu
-                        if config.forecasting.recursive_val
-                        else None
-                    ),
-                    look_back_var=(
-                        look_back_buffer_val.var
-                        if config.forecasting.recursive_val
-                        else None
-                    ),
+                    look_back_mu=look_back_buffer.mu,
+                    look_back_var=look_back_buffer.var,
                     indices=np.array([0]),
                 )
 
@@ -353,7 +332,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                     new_mu=m_pred,
                     new_std=s_pred_total,
                     indices=[ts],
-                    time_step=w_id.item(),
+                    time_step=time_step,
                 )
 
                 # Fake Update
@@ -369,17 +348,11 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 )
 
                 # Where y is available use y otherwuse use m_pred
-                y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-                v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+                # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+                # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
-                    new_mu=y_lookback,
-                    new_var=v_lookback,
-                    indices=[0],
-                )
-
-                look_back_buffer_val.update(
                     new_mu=m_pred,
                     new_var=v_pred,
                     indices=[0],
@@ -473,22 +446,21 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         net.eval()
 
         # reset look-back buffer
-        # look_back_buffer.reset()
+        look_back_buffer.reset()
+        net.set_lstm_states(lstm_states)
 
         test_batch_iter = BatchLoader.create_data_loader(
             dataset=test_data.dataset,
             order_mode="by_window",
-            batch_size=config.data.loader.batch_size,
+            batch_size=1,
             shuffle=False,
         )
 
         for (x, y), _, w_id in test_batch_iter:
 
             # get current batch size
-            B = config.data.loader.batch_size
-
-            # set LSTM states for the current batc h
-            net.set_lstm_states(lstm_states)
+            B = x.shape[0]
+            time_step = _scalar_window_id(w_id)
 
             # prepare obsevation noise matrix
             if not config.use_AGVI:
@@ -500,7 +472,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
 
             # rolling window mechanism for traffic and electricity datasets
             if config.forecasting.rolling_window:
-                if w_id % config.forecasting.rolling_window_size == 0:
+                if time_step % config.forecasting.rolling_window_size == 0:
                     look_back_buffer.needs_initialization = [True]
 
             # prepare look_back buffer
@@ -516,20 +488,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             x, var_x = prepare_input(
                 x=x,
                 var_x=None,
-                look_back_mu=(
-                    look_back_buffer.mu if config.forecasting.recursive_test else None
-                ),
-                look_back_var=(
-                    look_back_buffer.var if config.forecasting.recursive_test else None
-                ),
+                look_back_mu=look_back_buffer.mu,
+                look_back_var=look_back_buffer.var,
                 indices=np.array([0]),
             )
 
             # Feedforward
             m_pred, v_pred = net(x, var_x)
-
-            # Update LSTM states for the current batch
-            lstm_states = net.get_lstm_states()
 
             # Specific to AGVI
             if config.use_AGVI:
@@ -547,7 +512,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 new_mu=m_pred,
                 new_std=s_pred_total,
                 indices=[ts],
-                time_step=w_id.item(),
+                time_step=time_step,
             )
 
             # Fake Update
@@ -792,8 +757,8 @@ def eval_model(config, experiment_name: Optional[str] = None):
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [11, 42, 27, 3, 99]
-    list_of_experiments = ["train30", "train40", "train60", "train80", "train100"]
+    list_of_seeds = [42]
+    list_of_experiments = ["train100"]
 
     for seed in list_of_seeds:
         for exp in list_of_experiments:
@@ -808,18 +773,18 @@ def main(Train=True, Eval=True, log_wandb=False):
                 os.makedirs(output_base_dir)
 
             # Define experiment name
-            experiment_name = f"seed{seed}/{exp}/experiment01_{model_category}"
+            experiment_name = f"seed{seed}/{exp}/DEBUG_{model_category}"
 
             # Create configuration
             config = Config.from_yaml(
-                f"experiments/configurations/{model_category}_HQ127.yaml"
+                f"experiments/config/{model_category}_HQ127.yaml"
             )
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"
             config.data.paths.x_train = f"data/hq/{exp}/split_train_values.csv"
             config.data.paths.dates_train = f"data/hq/{exp}/split_train_datetimes.csv"
-            config.evaluation.eval_plots = True
+            config.data.loader.train_use_ratio = int(exp.removeprefix("train")) / 100.0
 
             # Convert config object to a dictionary for W&B
             config_dict = config.wandb_dict()
