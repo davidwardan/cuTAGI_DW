@@ -1,4 +1,5 @@
-from typing import Generator, Optional, Tuple, List, Dict
+from pathlib import Path
+from typing import Generator, Optional, Tuple, List, Dict, Mapping
 import numpy as np
 import pandas as pd
 
@@ -306,6 +307,8 @@ class TimeSeriesDataBuilder:
                 "ts_to_use length must match number of loaded series columns. "
                 f"Got {len(ts_indices)} indices for {N} columns."
             )
+        self.series_ids = np.asarray(ts_indices, dtype=np.int32)
+        self.raw_target_values = np.asarray(X_all, dtype=np.float32).copy()
 
         rolled_per_ts = []
         scaling_info_per_ts = []  # To store calculated (mu, sd) tuples
@@ -402,30 +405,7 @@ class TimeSeriesDataBuilder:
             self.x_mean = list(means)
             self.x_std = list(stds)
 
-        # # Plot distribution for each time Series
-        # pdf_name = self.x_file.split("/")[-1].replace(".csv", "")
-
-        # all_means = np.nanmean(X_all_norm, axis=0)
-        # all_stds = np.nanstd(X_all_norm, axis=0)
-        # plt.figure(figsize=(min(12, len(all_means) * 0.1), 3))
-        # plt.errorbar(
-        #     x=np.arange(len(all_means)),
-        #     y=all_means,
-        #     yerr=all_stds,
-        #     fmt="o",
-        #     markersize=3,
-        #     ecolor="r",
-        #     capsize=3,
-        # )
-        # plt.xlabel("Time Series Index")
-        # plt.ylabel("Value")
-        # plt.title(f"{pdf_name}")
-        # plt.grid(True)
-        # plt.tight_layout()
-        # plt.xlim(-1, len(all_means))
-        # plt.ylim(-5, 5)
-        # plt.savefig(f"out/dist_{pdf_name}.svg")
-        # plt.close()
+        self.standardized_target_values = X_all_norm.copy()
 
         # --- Concatenation Logic ---
         if self.order_mode == "by_series" or self.order_mode == "by_series_batch":
@@ -581,8 +561,181 @@ class TimeSeriesDataBuilder:
             raise ValueError(f"Unknown order_mode: {self.order_mode}")
 
 
+def plot_standardization_distributions(
+    split_data: Mapping[str, TimeSeriesDataBuilder],
+    output_dir: str = "out/data_distributions",
+    file_stem: str = "time_series_standardization",
+) -> List[Path]:
+    """Plot per-series mean and standard deviation before and after scaling."""
+    if not split_data:
+        raise ValueError("split_data must contain at least one split.")
+    unscaled_splits = [
+        split_name
+        for split_name, data in split_data.items()
+        if data.scale_method != "standard"
+    ]
+    if unscaled_splits:
+        names = ", ".join(unscaled_splits)
+        raise ValueError(
+            "Standardization distribution plots require scale_method='standard'. "
+            f"Missing for: {names}."
+        )
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    single_col = (3.5, 2.5)
+    style = {
+        "pgf.texsystem": "pdflatex",
+        "font.family": "serif",
+        "text.usetex": True,
+        "pgf.rcfonts": False,
+        "pgf.preamble": (
+            r"\usepackage{amsfonts}\usepackage{amssymb}\usepackage{amsmath}"
+        ),
+        "text.latex.preamble": (
+            r"\usepackage{amsfonts}\usepackage{amssymb}\usepackage{amsmath}"
+        ),
+        "lines.linewidth": 1,
+        "figure.figsize": single_col,
+        "font.size": 9,
+        "savefig.dpi": 300,
+    }
+
+    with plt.rc_context(style):
+        fig, axes = plt.subplots(
+            2,
+            1,
+            figsize=(single_col[0], 4.2),
+            sharex=True,
+        )
+
+        split_colors = ("#0072B2", "#D55E00", "#009E73")
+        value_attributes = (
+            "raw_target_values",
+            "standardized_target_values",
+        )
+
+        split_offsets = np.linspace(-0.22, 0.22, len(split_data))
+        for ax, values_attr in zip(axes, value_attributes):
+            for split_idx, (split_name, data) in enumerate(split_data.items()):
+                color = split_colors[split_idx % len(split_colors)]
+                values = getattr(data, values_attr)
+                masked_values = np.ma.masked_invalid(values)
+                means = np.ma.mean(masked_values, axis=0).filled(np.nan)
+                stds = np.ma.std(masked_values, axis=0).filled(np.nan)
+                positions = np.arange(values.shape[1])
+                valid = np.isfinite(means) & np.isfinite(stds)
+
+                ax.errorbar(
+                    positions[valid] + split_offsets[split_idx],
+                    means[valid],
+                    yerr=stds[valid],
+                    fmt="o",
+                    color=color,
+                    ecolor=color,
+                    markersize=1.8,
+                    markeredgewidth=0,
+                    elinewidth=0.45,
+                    capsize=0,
+                    alpha=0.75,
+                    label=split_name,
+                )
+
+            ax.set_ylabel("Value")
+            ax.grid(axis="y", color="0.9", linewidth=0.5)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+        raw_ax, standardized_ax = axes
+        raw_ax.set_yscale("symlog", linthresh=1.0)
+        raw_ax.set_yticks([-100, -10, -1, 0, 1, 10, 100])
+        raw_ax.set_ylabel("Raw value")
+
+        standardized_ax.axhline(
+            0.0, color="0.4", linewidth=0.8, linestyle=":"
+        )
+        standardized_ax.set_ylim(-3, 3)
+        standardized_ax.set_yticks(np.arange(-3, 4))
+        standardized_ax.set_ylabel("Standardized value")
+        standardized_ax.set_xlabel("Time-series index")
+
+        reference_data = next(iter(split_data.values()))
+        n_series = len(reference_data.series_ids)
+        standardized_ax.set_xlim(-1, max(n_series, 1))
+        if n_series > 0:
+            n_ticks = min(5, n_series)
+            tick_positions = np.unique(
+                np.linspace(0, n_series - 1, n_ticks, dtype=int)
+            )
+            standardized_ax.set_xticks(tick_positions)
+            standardized_ax.set_xticklabels(
+                reference_data.series_ids[tick_positions]
+            )
+
+        raw_ax.legend(
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.0),
+            ncol=3,
+            frameon=False,
+            handlelength=1.5,
+            columnspacing=0.9,
+        )
+        fig.tight_layout(h_pad=0.8)
+        saved_paths = []
+        for suffix in ("pdf", "pgf", "svg"):
+            path = output_path / f"{file_stem}.{suffix}"
+            fig.savefig(path, bbox_inches="tight")
+            saved_paths.append(path)
+        plt.close(fig)
+
+    return saved_paths
+
+
 class BatchLoader:
     # -- Data Loader Generators ---
+    @staticmethod
+    def _drop_random_series(
+        X: np.ndarray,
+        Y: np.ndarray,
+        S: np.ndarray,
+        K: np.ndarray,
+        drop_series_count: int,
+        rng: Optional[np.random.Generator] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Removes all windows belonging to a random subset of series."""
+        if drop_series_count < 0:
+            raise ValueError("drop_series_count must be non-negative.")
+        if drop_series_count == 0 or len(S) == 0:
+            return X, Y, S, K
+
+        active_series_ids = np.unique(S[S >= 0])
+        n_active_series = len(active_series_ids)
+        if n_active_series == 0:
+            return X, Y, S, K
+        if drop_series_count >= n_active_series:
+            raise ValueError(
+                "drop_series_count must be smaller than the number of active "
+                f"series in the dataset. Got {drop_series_count} for "
+                f"{n_active_series} active series."
+            )
+
+        if rng is None:
+            dropped_series_ids = np.random.choice(
+                active_series_ids,
+                size=drop_series_count,
+                replace=False,
+            )
+        else:
+            dropped_series_ids = rng.choice(
+                active_series_ids,
+                size=drop_series_count,
+                replace=False,
+            )
+
+        keep_mask = ~np.isin(S, dropped_series_ids)
+        return X[keep_mask], Y[keep_mask], S[keep_mask], K[keep_mask]
+
     @staticmethod
     def _loader_by_window(
         X: np.ndarray,
@@ -876,6 +1029,8 @@ class BatchLoader:
         batch_size: int,
         shuffle: bool = False,
         seed: Optional[int] = None,
+        drop_series_count: int = 0,
+        drop_series_seed: Optional[int] = None,
     ) -> Generator[
         Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray], None, None
     ]:
@@ -901,6 +1056,18 @@ class BatchLoader:
             return
 
         rng = np.random.default_rng(seed) if seed is not None else None
+        dropout_rng = (
+            np.random.default_rng(drop_series_seed)
+            if drop_series_seed is not None
+            else rng
+        )
+
+        if drop_series_count > 0:
+            X, Y, S, K = BatchLoader._drop_random_series(
+                X, Y, S, K, drop_series_count, dropout_rng
+            )
+            if len(X) == 0:
+                return
 
         # Call the other static methods using the class name
         if order_mode == "by_series":

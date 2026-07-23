@@ -137,9 +137,7 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             )
 
             # Initialize look-back buffer and LSTM state container
-            look_back_buffer = LookBackBuffer(
-                input_seq_len=config.window_len, nb_ts=1
-            )
+            look_back_buffer = LookBackBuffer(input_seq_len=config.window_len, nb_ts=1)
 
             # get current sigma_v if not using AGVI
             if not config.use_AGVI:
@@ -348,13 +346,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
                 )
 
                 # Where y is available use y otherwuse use m_pred
-                # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-                # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+                y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+                v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
                 # Update look_back buffer
                 look_back_buffer.update(
-                    new_mu=m_pred,
-                    new_var=v_pred,
+                    new_mu=y_lookback,
+                    new_var=v_lookback,
                     indices=[0],
                 )
 
@@ -587,7 +585,9 @@ def eval_model(config, experiment_name: Optional[str] = None):
     train_states = np.load(input_dir / "train_states.npz")
     val_states = np.load(input_dir / "val_states.npz")
     test_states = np.load(input_dir / "test_states.npz")
-    true_train, true_val, true_test = load_true_split_arrays(**config.true_split_kwargs())
+    true_train, true_val, true_test = load_true_split_arrays(
+        **config.true_split_kwargs()
+    )
 
     def _trim_trailing_nans(x: np.ndarray):
         """Trim padded trailing NaNs in the *target* series, keep the same cut for datetime."""
@@ -776,9 +776,7 @@ def main(Train=True, Eval=True, log_wandb=False):
             experiment_name = f"seed{seed}/{exp}/DEBUG_{model_category}"
 
             # Create configuration
-            config = Config.from_yaml(
-                f"experiments/config/{model_category}_HQ127.yaml"
-            )
+            config = Config.from_yaml(f"experiments/config/{model_category}_HQ127.yaml")
 
             config.seed = seed
             config.model.device = "cuda" if cuda.is_available() else "cpu"

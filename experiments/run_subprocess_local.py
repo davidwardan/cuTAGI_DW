@@ -5,7 +5,7 @@ from experiments.config import Config
 
 from pytagi import cuda
 
-DEFAULT_SEEDS: Sequence[int] = [17, 42, 100, 4915, 1516]
+DEFAULT_SEEDS: Sequence[int] = [11, 42, 235, 2026, 3]
 DEFAULT_EXPERIMENTS: Sequence[str] = (
     "train40",
     "train60",
@@ -26,7 +26,7 @@ def _run_experiment(
     model_category = "locals"
 
     # Define experiment name
-    experiment_name = f"seed{seed}/{exp}/MultiForecast_{model_category}"
+    experiment_name = f"seed{seed}/{exp}/Filter_{model_category}"
 
     # Load configuration
     config = Config.from_yaml(

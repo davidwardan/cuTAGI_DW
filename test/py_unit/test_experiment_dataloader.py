@@ -220,9 +220,9 @@ class TestExperimentDataLoader(unittest.TestCase):
                 "s3": [30, 31, 32, 33, 34],
             }
         ).to_csv(x_path, index=False)
-        pd.DataFrame({"datetime": [f"2024-01-01T0{i}:00:00" for i in range(5)]}).to_csv(
-            dt_path, index=False
-        )
+        pd.DataFrame(
+            {"datetime": [f"2024-01-01T0{i}:00:00" for i in range(5)]}
+        ).to_csv(dt_path, index=False)
 
         data = TimeSeriesDataBuilder(
             x_file=x_path,
@@ -238,6 +238,205 @@ class TestExperimentDataLoader(unittest.TestCase):
         )
 
         self.assertSetEqual(set(np.unique(data.dataset["series_id"]).tolist()), {1, 3})
+
+    def test_standard_scaling_is_applied_per_series_before_windowing(self):
+        x_path = os.path.join(self.tmpdir.name, "x_standard_multi.csv")
+        dt_path = os.path.join(self.tmpdir.name, "dt_standard_multi.csv")
+
+        pd.DataFrame(
+            {
+                "s0": [1, 2, 3, 4, 5],
+                "s1": [101, 102, 103, 104, 105],
+            }
+        ).to_csv(x_path, index=False)
+        pd.DataFrame({"datetime": [f"2024-01-01T0{i}:00:00" for i in range(5)]}).to_csv(
+            dt_path, index=False
+        )
+
+        data = TimeSeriesDataBuilder(
+            x_file=x_path,
+            date_time_file=dt_path,
+            input_seq_len=2,
+            output_seq_len=1,
+            stride=1,
+            time_covariates=[],
+            covariate_window_mode="last_step",
+            order_mode="by_window",
+            scale_method="standard",
+            ts_to_use=[0, 1],
+        )
+
+        x, y = data.dataset["value"]
+        series_id = data.dataset["series_id"]
+        window_id = data.dataset["window_id"]
+
+        np.testing.assert_allclose(data.x_mean[0], np.array([3.0], dtype=np.float32))
+        np.testing.assert_allclose(
+            data.x_mean[1], np.array([103.0], dtype=np.float32)
+        )
+        np.testing.assert_allclose(data.x_std[0], data.x_std[1])
+
+        for k in np.unique(window_id):
+            idx = np.where(window_id == k)[0]
+            self.assertSetEqual(set(series_id[idx].tolist()), {0, 1})
+            np.testing.assert_allclose(x[idx[0]], x[idx[1]], rtol=1e-6, atol=1e-6)
+            np.testing.assert_allclose(y[idx[0]], y[idx[1]], rtol=1e-6, atol=1e-6)
+
+        expected_first_x = np.array([-2, -1], dtype=np.float32) / np.sqrt(2.0)
+        np.testing.assert_allclose(x[0], expected_first_x, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(y[0], np.array([0.0], dtype=np.float32), atol=1e-6)
+
+    def test_config_reading_drives_standard_scaling_for_stateful_global_data(self):
+        train_x = os.path.join(self.tmpdir.name, "cfg_train_x.csv")
+        train_dt = os.path.join(self.tmpdir.name, "cfg_train_dt.csv")
+        val_x = os.path.join(self.tmpdir.name, "cfg_val_x.csv")
+        val_dt = os.path.join(self.tmpdir.name, "cfg_val_dt.csv")
+        test_x = os.path.join(self.tmpdir.name, "cfg_test_x.csv")
+        test_dt = os.path.join(self.tmpdir.name, "cfg_test_dt.csv")
+        cfg_path = os.path.join(self.tmpdir.name, "stateful_global_cfg.yaml")
+
+        pd.DataFrame({"s0": [1, 2, 3, 4, 5], "s1": [101, 102, 103, 104, 105]}).to_csv(
+            train_x, index=False
+        )
+        pd.DataFrame({"s0": [6, 7, 8], "s1": [106, 107, 108]}).to_csv(
+            val_x, index=False
+        )
+        pd.DataFrame({"s0": [9, 10, 11], "s1": [109, 110, 111]}).to_csv(
+            test_x, index=False
+        )
+        for path, n_rows, start_hour in (
+            (train_dt, 5, 0),
+            (val_dt, 3, 5),
+            (test_dt, 3, 8),
+        ):
+            pd.DataFrame(
+                {
+                    "datetime": [
+                        f"2024-01-01T{start_hour + i:02d}:00:00"
+                        for i in range(n_rows)
+                    ]
+                }
+            ).to_csv(path, index=False)
+
+        with open(cfg_path, "w") as f:
+            yaml.safe_dump(
+                {
+                    "data": {
+                        "paths": {
+                            "x_train": train_x,
+                            "dates_train": train_dt,
+                            "x_val": val_x,
+                            "dates_val": val_dt,
+                            "x_test": test_x,
+                            "dates_test": test_dt,
+                        },
+                        "loader": {
+                            "scale_method": "standard",
+                            "order_mode": "by_window",
+                            "input_seq_len": 2,
+                            "look_back_len": 2,
+                            "carry_split_context": False,
+                            "time_covariates": [],
+                            "covariate_window_mode": "last_step",
+                            "nb_ts": 2,
+                            "ts_to_use": [],
+                        },
+                    }
+                },
+                f,
+            )
+
+        config = Config.from_yaml(cfg_path)
+        kwargs = config.prepare_data_kwargs()
+        train_data, val_data, _ = prepare_data(**kwargs)
+
+        self.assertEqual(config.data.loader.scale_method, "standard")
+        self.assertEqual(kwargs["scale_method"], "standard")
+        np.testing.assert_allclose(
+            train_data.x_mean[0], np.array([3.0], dtype=np.float32)
+        )
+        np.testing.assert_allclose(
+            train_data.x_mean[1], np.array([103.0], dtype=np.float32)
+        )
+
+        x_train, y_train = train_data.dataset["value"]
+        for k in np.unique(train_data.dataset["window_id"]):
+            idx = np.where(train_data.dataset["window_id"] == k)[0]
+            np.testing.assert_allclose(x_train[idx[0]], x_train[idx[1]], atol=1e-6)
+            np.testing.assert_allclose(y_train[idx[0]], y_train[idx[1]], atol=1e-6)
+
+        x_val, y_val = val_data.dataset["value"]
+        np.testing.assert_allclose(x_val[0], x_val[1], rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(y_val[0], y_val[1], rtol=1e-6, atol=1e-6)
+
+        expected_val_x0 = np.array([6 - 3, 7 - 3], dtype=np.float32) / np.sqrt(2.0)
+        expected_val_y0 = np.array([8 - 3], dtype=np.float32) / np.sqrt(2.0)
+        np.testing.assert_allclose(x_val[0], expected_val_x0, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(y_val[0], expected_val_y0, rtol=1e-6, atol=1e-6)
+
+    def test_prepare_data_writes_standardization_distribution_plots(self):
+        train_x = os.path.join(self.tmpdir.name, "plot_train_x.csv")
+        train_dt = os.path.join(self.tmpdir.name, "plot_train_dt.csv")
+        val_x = os.path.join(self.tmpdir.name, "plot_val_x.csv")
+        val_dt = os.path.join(self.tmpdir.name, "plot_val_dt.csv")
+        test_x = os.path.join(self.tmpdir.name, "plot_test_x.csv")
+        test_dt = os.path.join(self.tmpdir.name, "plot_test_dt.csv")
+        plot_dir = os.path.join(self.tmpdir.name, "plots")
+
+        pd.DataFrame({"s0": [1, 2, 3, 4, 5], "s1": [10, 11, 12, 13, 14]}).to_csv(
+            train_x, index=False
+        )
+        pd.DataFrame({"s0": [6, 7, 8], "s1": [15, 16, 17]}).to_csv(
+            val_x, index=False
+        )
+        pd.DataFrame({"s0": [9, 10, 11], "s1": [18, 19, 20]}).to_csv(
+            test_x, index=False
+        )
+        for path, n_rows, start_hour in (
+            (train_dt, 5, 0),
+            (val_dt, 3, 5),
+            (test_dt, 3, 8),
+        ):
+            pd.DataFrame(
+                {
+                    "datetime": [
+                        f"2024-01-01T{start_hour + i:02d}:00:00"
+                        for i in range(n_rows)
+                    ]
+                }
+            ).to_csv(path, index=False)
+
+        train_data, _, _ = prepare_data(
+            x_file=[train_x, val_x, test_x],
+            date_file=[train_dt, val_dt, test_dt],
+            input_seq_len=2,
+            carry_split_context=False,
+            time_covariates=[],
+            covariate_window_mode="last_step",
+            scale_method="standard",
+            order_mode="by_window",
+            ts_to_use=None,
+            plot_distributions=True,
+            distribution_plot_dir=plot_dir,
+        )
+
+        self.assertEqual(train_data.raw_target_values.shape, (5, 2))
+        self.assertEqual(train_data.standardized_target_values.shape, (5, 2))
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(plot_dir, "time_series_standardization.pdf")
+            )
+        )
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(plot_dir, "time_series_standardization.pgf")
+            )
+        )
+        self.assertTrue(
+            os.path.exists(
+                os.path.join(plot_dir, "time_series_standardization.svg")
+            )
+        )
 
     def test_config_allows_missing_top_level_sections(self):
         config = Config.model_validate(

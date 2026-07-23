@@ -175,6 +175,8 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             batch_size=config.data.loader.batch_size,
             shuffle=config.training.shuffle,
             seed=epoch_seed,
+            drop_series_count=config.training.series_dropout_count,
+            drop_series_seed=epoch_seed,
         )
 
         # Initialize look-back buffer and LSTM state container
@@ -462,13 +464,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
             net.reset_lstm_states()
 
             # Where y is available use y otherwuse use m_pred
-            # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-            # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+            y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+            v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
             # Update look_back buffer
             look_back_buffer.update(
-                new_mu=m_pred.reshape(B, -1),
-                new_var=v_pred.reshape(B, -1),
+                new_mu=y_lookback.reshape(B, -1),
+                new_var=v_lookback.reshape(B, -1),
                 indices=indices,
             )
         # End of epoch
@@ -662,13 +664,13 @@ def train_model(config, experiment_name: Optional[str] = None, wandb_run=None):
         net.reset_lstm_states()
 
         # Where y is available use y otherwuse use m_pred
-        # y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
-        # v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
+        y_lookback = np.where(np.isnan(y.flatten()), m_post, y.flatten())
+        v_lookback = np.where(np.isnan(y.flatten()), v_post, 0.0)
 
         # Update look_back buffer
         look_back_buffer.update(
-            new_mu=m_pred.reshape(B, -1),
-            new_var=v_pred.reshape(B, -1),
+            new_mu=y_lookback.reshape(B, -1),
+            new_var=v_lookback.reshape(B, -1),
             indices=indices,
         )
 
@@ -1295,8 +1297,8 @@ def eval_model(
 
 def main(Train=True, Eval=True, log_wandb=False):
 
-    list_of_seeds = [42]
-    list_of_experiments = ["train100"]
+    list_of_seeds = [1,2,3,4,5]
+    list_of_experiments = ["train60"]
 
     # Iterate over experiments and seeds
     for seed in list_of_seeds:

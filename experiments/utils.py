@@ -7,6 +7,7 @@ import networkx as nx
 
 from experiments.data_loader import (
     TimeSeriesDataBuilder,
+    plot_standardization_distributions,
 )
 
 from typing import List
@@ -601,6 +602,8 @@ def prepare_data(
     split_train_ratio: float = 0.7,
     split_val_ratio: float = 0.1,
     train_use_ratio: float = 1.0,
+    plot_distributions: bool = False,
+    distribution_plot_dir: str = "out/data_distributions",
 ):
     if full_x_file is not None or full_date_file is not None:
         if full_x_file is None or full_date_file is None:
@@ -667,6 +670,15 @@ def prepare_data(
             order_mode="by_window",
             ts_to_use=ts_to_use,
         )
+        if plot_distributions:
+            plot_standardization_distributions(
+                {
+                    "Train": train_data,
+                    "Validation": val_data,
+                    "Test": test_data,
+                },
+                output_dir=distribution_plot_dir,
+            )
         return train_data, val_data, test_data
 
     train_data = TimeSeriesDataBuilder(
@@ -716,6 +728,16 @@ def prepare_data(
         order_mode="by_window",
         ts_to_use=ts_to_use,
     )
+
+    if plot_distributions:
+        plot_standardization_distributions(
+            {
+                "Train": train_data,
+                "Validation": val_data,
+                "Test": test_data,
+            },
+            output_dir=distribution_plot_dir,
+        )
 
     return train_data, val_data, test_data
 

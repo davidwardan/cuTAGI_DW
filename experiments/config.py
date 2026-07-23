@@ -3,6 +3,15 @@ import yaml
 from pydantic import BaseModel, Field
 
 
+def _construct_python_tuple(loader, node):
+    return tuple(loader.construct_sequence(node))
+
+
+yaml.SafeLoader.add_constructor(
+    "tag:yaml.org,2002:python/tuple", _construct_python_tuple
+)
+
+
 class DataPaths(BaseModel):
     x_full: Optional[str] = None
     dates_full: Optional[str] = None
@@ -29,8 +38,10 @@ class DataLoader(BaseModel):
     carry_split_context: bool = False
     batch_size: int = 16
     output_col: List[int] = Field(default_factory=lambda: [0])
-    nb_ts: int = 127
+    nb_ts: int = 101
     ts_to_use: List[int] = Field(default_factory=list)
+    plot_distributions: bool = False
+    distribution_plot_dir: str = "out/data_distributions"
 
 
 class Data(BaseModel):
@@ -112,6 +123,7 @@ class Training(BaseModel):
     warmup_epochs: int = 0
     shuffle: bool = True
     use_look_back_predictions: bool = True
+    series_dropout_count: int = Field(default=0, ge=0)
 
 
 class Evaluation(BaseModel):
@@ -182,6 +194,8 @@ class Config(BaseModel):
             "split_train_ratio": self.data.loader.split_train_ratio,
             "split_val_ratio": self.data.loader.split_val_ratio,
             "train_use_ratio": self.data.loader.train_use_ratio,
+            "plot_distributions": self.data.loader.plot_distributions,
+            "distribution_plot_dir": self.data.loader.distribution_plot_dir,
         }
 
     def true_split_kwargs(self, ts_to_use: Optional[List[int]] = None) -> Dict[str, Any]:
