@@ -38,7 +38,7 @@ class Sequential {
     int z_buffer_size = 0;        // e.g., batch size x seq_len x input size
     int z_buffer_block_size = 0;  // e.g., batch size
     int z_buffer_seq_len = 1;     // current buffer sequence length
-    int num_samples = 0;          // number of training samples
+    int num_samples = 0;          // smoothing-buffer capacity in timesteps
 
     int input_size = 0;
     bool training = true;

@@ -252,10 +252,10 @@ void SLSTM::forward(BaseHiddenStates &input_states,
     }
 
     // Initialize smoothing hidden states for SLSTM layer
-    if (this->smooth_states.num_timesteps !=
-        smooth_input_states.num_timesteps) {
-        this->smooth_states.set_num_states(this->output_size,
-                                           smooth_input_states.num_timesteps);
+    if (this->smooth_states.capacity_timesteps !=
+        smooth_input_states.capacity_timesteps) {
+        this->smooth_states.set_num_states(
+            this->output_size, smooth_input_states.capacity_timesteps);
     }
 
     // Update number of actual states.
@@ -437,6 +437,17 @@ void SLSTM::forward(BaseHiddenStates &input_states,
 
     // Save for smoothing
     if (this->training) {
+        if (this->time_step < 0 ||
+            static_cast<size_t>(this->time_step) >=
+                this->smooth_states.capacity_timesteps) {
+            LOG(LogLevel::ERROR,
+                "SLSTM smoothing buffer capacity exceeded at timestep " +
+                    std::to_string(this->time_step) + " (capacity: " +
+                    std::to_string(
+                        this->smooth_states.capacity_timesteps) +
+                    ").");
+        }
+
         save_priors_smoother(this->time_step, this->output_size,
                              this->lstm_states, this->smooth_states);
 
@@ -643,10 +654,20 @@ void SLSTM::backward(BaseDeltaStates &input_delta_states,
     }
 
     // Save for smoothing
+    if (this->time_step < 0 ||
+        static_cast<size_t>(this->time_step) >=
+            this->smooth_states.capacity_timesteps) {
+        LOG(LogLevel::ERROR,
+            "SLSTM smoothing buffer capacity exceeded at timestep " +
+                std::to_string(this->time_step) + " (capacity: " +
+                std::to_string(this->smooth_states.capacity_timesteps) + ").");
+    }
+
     save_posteriors_smoother(this->time_step, this->output_size,
                              this->lstm_states, this->smooth_states);
 
-    // TODO: Increase index for next time step
+    this->smooth_states.num_timesteps =
+        static_cast<size_t>(this->time_step) + 1;
     ++this->time_step;
 }
 
@@ -654,6 +675,10 @@ void SLSTM::smoother()
 /*
  */
 {
+    if (this->smooth_states.num_timesteps == 0) {
+        LOG(LogLevel::ERROR, "Cannot smooth an empty SLSTM state buffer.");
+    }
+
     // Initialize the last time step for smoothing
     size_t num_states = this->smooth_states.num_states;
     size_t last_timestep_start =

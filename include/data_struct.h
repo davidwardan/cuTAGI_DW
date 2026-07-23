@@ -109,11 +109,11 @@ class BaseHiddenStates {
 
 class SmoothingHiddenStates : public BaseHiddenStates {
    public:
-    int num_timesteps = 0;
+    int capacity_timesteps = 0;
 
     // Constructor with initialization
-    SmoothingHiddenStates(size_t n, size_t m, int num_timesteps)
-        : BaseHiddenStates(n, m), num_timesteps(num_timesteps) {}
+    SmoothingHiddenStates(size_t n, size_t m, int capacity_timesteps)
+        : BaseHiddenStates(n, m), capacity_timesteps(capacity_timesteps) {}
 
     std::string get_name() const override { return "SmoothingHiddenStates"; }
 };
@@ -233,15 +233,16 @@ class BaseLSTMStates {
 // Smoother for linear layer
 class SmoothSLinear {
    public:
-    size_t num_states;
+    size_t num_states = 0;
     size_t num_timesteps = 0;
+    size_t capacity_timesteps = 0;
     std::vector<float> mu_zo_priors, var_zo_priors, mu_zo_posts, var_zo_posts,
         mu_zo_smooths, var_zo_smooths;
 
-    SmoothSLinear(size_t num_states, size_t num_timesteps);
+    SmoothSLinear(size_t num_states, size_t capacity_timesteps);
     SmoothSLinear();
     ~SmoothSLinear() = default;
-    virtual void set_num_states(size_t num_states, size_t num_timesteps);
+    virtual void set_num_states(size_t num_states, size_t capacity_timesteps);
     virtual std::string get_name() const { return "SmoothSLinear"; };
     void reset_zeros();
 };
@@ -249,16 +250,17 @@ class SmoothSLinear {
 // Smoother for LSTM layer
 class SmoothSLSTM {
    public:
-    size_t num_states;
+    size_t num_states = 0;
     size_t num_timesteps = 0;
+    size_t capacity_timesteps = 0;
     std::vector<float> mu_h_priors, var_h_priors, mu_c_priors, var_c_priors,
         mu_h_posts, var_h_posts, mu_c_posts, var_c_posts, mu_h_smooths,
         var_h_smooths, mu_c_smooths, var_c_smooths, cov_cc, cov_hh;
 
-    SmoothSLSTM(size_t num_states, size_t num_timesteps);
+    SmoothSLSTM(size_t num_states, size_t capacity_timesteps);
     SmoothSLSTM();
     ~SmoothSLSTM() = default;
-    virtual void set_num_states(size_t num_states, size_t num_timesteps);
+    virtual void set_num_states(size_t num_states, size_t capacity_timesteps);
     virtual std::string get_name() const { return "SmoothSLSTM"; };
     void reset_zeros();
 };

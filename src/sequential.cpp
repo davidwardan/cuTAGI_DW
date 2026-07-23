@@ -169,9 +169,9 @@ void Sequential::init_output_state_buffer()
 {
     if (this->device.compare("cpu") == 0) {
         if (this->layers[0]->get_layer_type() == LayerType::SLSTM) {
-            if (this->num_samples == 0 && this->training) {
+            if (this->num_samples <= 0 && this->training) {
                 LOG(LogLevel::ERROR,
-                    "num_samples was not initialized for smoothing.");
+                    "num_samples must be a positive smoothing-buffer capacity.");
             }
             this->output_z_buffer = std::make_shared<SmoothingHiddenStates>(
                 this->z_buffer_size, this->z_buffer_block_size,
@@ -489,15 +489,27 @@ std::tuple<std::vector<float>, std::vector<float>> Sequential::smoother()
         if (current_layer->get_layer_type() == LayerType::SLSTM) {
             auto *slstm_layer = dynamic_cast<SLSTM *>(current_layer);
             slstm_layer->smoother();
-            mu_h_smooths_last_slstm = slstm_layer->smooth_states.mu_h_smooths;
-            var_h_smooths_lastm_slstm =
-                slstm_layer->smooth_states.var_h_smooths;
+            size_t valid_size = slstm_layer->smooth_states.num_timesteps *
+                                slstm_layer->smooth_states.num_states;
+            mu_h_smooths_last_slstm.assign(
+                slstm_layer->smooth_states.mu_h_smooths.begin(),
+                slstm_layer->smooth_states.mu_h_smooths.begin() + valid_size);
+            var_h_smooths_lastm_slstm.assign(
+                slstm_layer->smooth_states.var_h_smooths.begin(),
+                slstm_layer->smooth_states.var_h_smooths.begin() + valid_size);
         } else if (current_layer->get_layer_type() == LayerType::SLinear) {
             auto *slinear_layer = dynamic_cast<SLinear *>(current_layer);
             slinear_layer->smoother(mu_h_smooths_last_slstm,
                                     var_h_smooths_lastm_slstm);
-            mu_zo_smooths = slinear_layer->smooth_states.mu_zo_smooths;
-            var_zo_smooths = slinear_layer->smooth_states.var_zo_smooths;
+            size_t valid_size = slinear_layer->smooth_states.num_timesteps *
+                                slinear_layer->smooth_states.num_states;
+            mu_zo_smooths.assign(
+                slinear_layer->smooth_states.mu_zo_smooths.begin(),
+                slinear_layer->smooth_states.mu_zo_smooths.begin() + valid_size);
+            var_zo_smooths.assign(
+                slinear_layer->smooth_states.var_zo_smooths.begin(),
+                slinear_layer->smooth_states.var_zo_smooths.begin() +
+                    valid_size);
         }
     }
     return std::make_tuple(mu_zo_smooths, var_zo_smooths);
@@ -891,9 +903,9 @@ Sequential::get_outputs_smoother()
 {
     auto last_layer = dynamic_cast<SLinear *>(this->layers.back().get());
 
-    int total_size = last_layer->smooth_states.mu_zo_smooths.size();
     int num_output = last_layer->output_size;
-    int num_timestep = total_size / num_output;
+    int num_timestep =
+        static_cast<int>(last_layer->smooth_states.num_timesteps);
 
     pybind11::array_t<float> py_mu_zo_smooths({num_output, num_timestep});
     pybind11::array_t<float> py_var_zo_smooths({num_output, num_timestep});

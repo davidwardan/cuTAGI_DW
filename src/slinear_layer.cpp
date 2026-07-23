@@ -118,10 +118,10 @@ void SLinear::forward(BaseHiddenStates &input_states,
     int effective_batch = batch_size * seq_len;
     this->set_cap_factor_udapte(batch_size);
 
-    if (this->smooth_states.num_timesteps !=
-        smooth_input_states->num_timesteps) {
-        this->smooth_states.set_num_states(this->output_size,
-                                           smooth_input_states->num_timesteps);
+    if (this->smooth_states.capacity_timesteps !=
+        smooth_input_states->capacity_timesteps) {
+        this->smooth_states.set_num_states(
+            this->output_size, smooth_input_states->capacity_timesteps);
     }
 
     // Forward pass
@@ -152,6 +152,17 @@ void SLinear::forward(BaseHiddenStates &input_states,
 
     // save z_output prior for smoothing
     if (this->training) {
+        if (this->time_step < 0 ||
+            static_cast<size_t>(this->time_step) >=
+                this->smooth_states.capacity_timesteps) {
+            LOG(LogLevel::ERROR,
+                "SLinear smoothing buffer capacity exceeded at timestep " +
+                    std::to_string(this->time_step) + " (capacity: " +
+                    std::to_string(
+                        this->smooth_states.capacity_timesteps) +
+                    ").");
+        }
+
         for (int i = 0; i < this->output_size; i++) {
             this->smooth_states
                 .mu_zo_priors[this->time_step * this->output_size + i] =
@@ -238,7 +249,18 @@ void SLinear::backward(BaseDeltaStates &input_delta_states,
             }
         }
     }
-    // TODO: Increase index for next time step
+
+    if (this->time_step < 0 ||
+        static_cast<size_t>(this->time_step) >=
+            this->smooth_states.capacity_timesteps) {
+        LOG(LogLevel::ERROR,
+            "SLinear smoothing buffer capacity exceeded at timestep " +
+                std::to_string(this->time_step) + " (capacity: " +
+                std::to_string(this->smooth_states.capacity_timesteps) + ").");
+    }
+
+    this->smooth_states.num_timesteps =
+        static_cast<size_t>(this->time_step) + 1;
     ++this->time_step;
 }
 
@@ -247,6 +269,10 @@ void SLinear::smoother(const std::vector<float> &mu_h_smooths_prev_slstm,
 /*
  */
 {
+    if (this->smooth_states.num_timesteps == 0) {
+        LOG(LogLevel::ERROR, "Cannot smooth an empty SLinear state buffer.");
+    }
+
     smooth_zo(this->smooth_states.num_timesteps, this->input_size,
               this->output_size, this->mu_w, this->var_w, this->mu_b,
               this->var_b, mu_h_smooths_prev_slstm, var_h_smooths_prev_slstm,

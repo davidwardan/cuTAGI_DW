@@ -357,55 +357,57 @@ void BaseLSTMStates::reset_prev_states()
 // Smoother for Slinear layer
 ////////////////////////////////////////////////////////////////////////////////
 SmoothSLinear::SmoothSLinear() {}
-SmoothSLinear::SmoothSLinear(size_t num_states, size_t num_timesteps)
+SmoothSLinear::SmoothSLinear(size_t num_states, size_t capacity_timesteps)
     : num_states(num_states),
-      num_timesteps(num_timesteps)
+      capacity_timesteps(capacity_timesteps)
 /*
  */
 {
     this->reset_zeros();
 }
 
-void SmoothSLinear::set_num_states(size_t num_states, size_t num_timesteps)
+void SmoothSLinear::set_num_states(size_t num_states, size_t capacity_timesteps)
 /*
  */
 {
     this->num_states = num_states;
-    this->num_timesteps = num_timesteps;
+    this->capacity_timesteps = capacity_timesteps;
     this->reset_zeros();
 }
 
 void SmoothSLinear::reset_zeros()
 /**/
 {
+    this->num_timesteps = 0;
+
     // Resize and reset mu_zo_priors
-    if (mu_zo_priors.size() != num_states * num_timesteps)
-        mu_zo_priors.resize(num_states * num_timesteps);
+    if (mu_zo_priors.size() != num_states * capacity_timesteps)
+        mu_zo_priors.resize(num_states * capacity_timesteps);
     for (auto& val : mu_zo_priors) val = 0;
 
     // Resize and reset var_zo_priors
-    if (var_zo_priors.size() != num_states * num_timesteps)
-        var_zo_priors.resize(num_states * num_timesteps);
+    if (var_zo_priors.size() != num_states * capacity_timesteps)
+        var_zo_priors.resize(num_states * capacity_timesteps);
     for (auto& val : var_zo_priors) val = 0;
 
     // Resize and reset mu_zo_posts
-    if (mu_zo_posts.size() != num_states * num_timesteps)
-        mu_zo_posts.resize(num_states * num_timesteps);
+    if (mu_zo_posts.size() != num_states * capacity_timesteps)
+        mu_zo_posts.resize(num_states * capacity_timesteps);
     for (auto& val : mu_zo_posts) val = 0;
 
     // Resize and reset var_zo_posts
-    if (var_zo_posts.size() != num_states * num_timesteps)
-        var_zo_posts.resize(num_states * num_timesteps);
+    if (var_zo_posts.size() != num_states * capacity_timesteps)
+        var_zo_posts.resize(num_states * capacity_timesteps);
     for (auto& val : var_zo_posts) val = 0;
 
     // Resize and reset mu_zo_smooths
-    if (mu_zo_smooths.size() != num_states * num_timesteps)
-        mu_zo_smooths.resize(num_states * num_timesteps);
+    if (mu_zo_smooths.size() != num_states * capacity_timesteps)
+        mu_zo_smooths.resize(num_states * capacity_timesteps);
     for (auto& val : mu_zo_smooths) val = 0;
 
     // Resize and reset var_zo_smooths
-    if (var_zo_smooths.size() != num_states * num_timesteps)
-        var_zo_smooths.resize(num_states * num_timesteps);
+    if (var_zo_smooths.size() != num_states * capacity_timesteps)
+        var_zo_smooths.resize(num_states * capacity_timesteps);
     for (auto& val : var_zo_smooths) val = 0;
 }
 
@@ -413,94 +415,96 @@ void SmoothSLinear::reset_zeros()
 // Smoother for SLSTM layer
 ////////////////////////////////////////////////////////////////////////////////
 SmoothSLSTM::SmoothSLSTM() {}
-SmoothSLSTM::SmoothSLSTM(size_t num_states, size_t num_timesteps)
+SmoothSLSTM::SmoothSLSTM(size_t num_states, size_t capacity_timesteps)
     : num_states(num_states),
-      num_timesteps(num_timesteps)
+      capacity_timesteps(capacity_timesteps)
 /*
  */
 {
     this->reset_zeros();
 }
 
-void SmoothSLSTM::set_num_states(size_t num_states, size_t num_timesteps)
+void SmoothSLSTM::set_num_states(size_t num_states, size_t capacity_timesteps)
 /*
  */
 {
     this->num_states = num_states;
-    this->num_timesteps = num_timesteps;
+    this->capacity_timesteps = capacity_timesteps;
     this->reset_zeros();
 }
 
 void SmoothSLSTM::reset_zeros()
 /**/
 {
+    this->num_timesteps = 0;
+
     // Resize and reset mu_h_priors
-    if (mu_h_priors.size() != num_states * num_timesteps)
-        mu_h_priors.resize(num_states * num_timesteps);
+    if (mu_h_priors.size() != num_states * capacity_timesteps)
+        mu_h_priors.resize(num_states * capacity_timesteps);
     for (auto& val : mu_h_priors) val = 0;
 
     // Resize and reset var_h_priors
-    if (var_h_priors.size() != num_states * num_timesteps)
-        var_h_priors.resize(num_states * num_timesteps);
+    if (var_h_priors.size() != num_states * capacity_timesteps)
+        var_h_priors.resize(num_states * capacity_timesteps);
     for (auto& val : var_h_priors) val = 0;
 
     // Resize and reset mu_c_priors
-    if (mu_c_priors.size() != num_states * num_timesteps)
-        mu_c_priors.resize(num_states * num_timesteps);
+    if (mu_c_priors.size() != num_states * capacity_timesteps)
+        mu_c_priors.resize(num_states * capacity_timesteps);
     for (auto& val : mu_c_priors) val = 0;
 
     // Resize and reset var_c_priors
-    if (var_c_priors.size() != num_states * num_timesteps)
-        var_c_priors.resize(num_states * num_timesteps);
+    if (var_c_priors.size() != num_states * capacity_timesteps)
+        var_c_priors.resize(num_states * capacity_timesteps);
     for (auto& val : var_c_priors) val = 0;
 
     // Resize and reset mu_h_posts
-    if (mu_h_posts.size() != num_states * num_timesteps)
-        mu_h_posts.resize(num_states * num_timesteps);
+    if (mu_h_posts.size() != num_states * capacity_timesteps)
+        mu_h_posts.resize(num_states * capacity_timesteps);
     for (auto& val : mu_h_posts) val = 0;
 
     // Resize and reset var_h_posts
-    if (var_h_posts.size() != num_states * num_timesteps)
-        var_h_posts.resize(num_states * num_timesteps);
+    if (var_h_posts.size() != num_states * capacity_timesteps)
+        var_h_posts.resize(num_states * capacity_timesteps);
     for (auto& val : var_h_posts) val = 0;
 
     // Resize and reset mu_c_posts
-    if (mu_c_posts.size() != num_states * num_timesteps)
-        mu_c_posts.resize(num_states * num_timesteps);
+    if (mu_c_posts.size() != num_states * capacity_timesteps)
+        mu_c_posts.resize(num_states * capacity_timesteps);
     for (auto& val : mu_c_posts) val = 0;
 
     // Resize and reset var_c_posts
-    if (var_c_posts.size() != num_states * num_timesteps)
-        var_c_posts.resize(num_states * num_timesteps);
+    if (var_c_posts.size() != num_states * capacity_timesteps)
+        var_c_posts.resize(num_states * capacity_timesteps);
     for (auto& val : var_c_posts) val = 0;
 
     // Resize and reset mu_h_smooths
-    if (mu_h_smooths.size() != num_states * num_timesteps)
-        mu_h_smooths.resize(num_states * num_timesteps);
+    if (mu_h_smooths.size() != num_states * capacity_timesteps)
+        mu_h_smooths.resize(num_states * capacity_timesteps);
     for (auto& val : mu_h_smooths) val = 0;
 
     // Resize and reset var_h_smooths
-    if (var_h_smooths.size() != num_states * num_timesteps)
-        var_h_smooths.resize(num_states * num_timesteps);
+    if (var_h_smooths.size() != num_states * capacity_timesteps)
+        var_h_smooths.resize(num_states * capacity_timesteps);
     for (auto& val : var_h_smooths) val = 0;
 
     // Resize and reset mu_c_smooths
-    if (mu_c_smooths.size() != num_states * num_timesteps)
-        mu_c_smooths.resize(num_states * num_timesteps);
+    if (mu_c_smooths.size() != num_states * capacity_timesteps)
+        mu_c_smooths.resize(num_states * capacity_timesteps);
     for (auto& val : mu_c_smooths) val = 0;
 
     // Resize and reset var_c_smooths
-    if (var_c_smooths.size() != num_states * num_timesteps)
-        var_c_smooths.resize(num_states * num_timesteps);
+    if (var_c_smooths.size() != num_states * capacity_timesteps)
+        var_c_smooths.resize(num_states * capacity_timesteps);
     for (auto& val : var_c_smooths) val = 0;
 
     // Resize and reset cov_cc
-    if (cov_cc.size() != num_states * num_timesteps)
-        cov_cc.resize(num_states * num_timesteps);
+    if (cov_cc.size() != num_states * capacity_timesteps)
+        cov_cc.resize(num_states * capacity_timesteps);
     for (auto& val : cov_cc) val = 0;
 
     // Resize and reset cov_hh
-    if (cov_hh.size() != num_states * num_states * num_timesteps)
-        cov_hh.resize(num_states * num_states * num_timesteps);
+    if (cov_hh.size() != num_states * num_states * capacity_timesteps)
+        cov_hh.resize(num_states * num_states * capacity_timesteps);
     for (auto& val : cov_hh) val = 0;
 }
