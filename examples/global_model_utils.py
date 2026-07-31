@@ -101,25 +101,46 @@ class EarlyStopping:
         self.min_delta = min_delta
         self.best_score = np.inf
         self.best_state = None
+        self.best_sigma_v = None
         self.epochs_without_improvement = 0
 
-    def update(self, score: float, model: Sequential) -> bool:
+    def update(self, score: float, model: Sequential, sigma_v: float) -> bool:
         """Record an improvement and return True when training should stop."""
         if np.isfinite(score) and score < self.best_score - self.min_delta:
             self.best_score = score
             self.best_state = copy.deepcopy(model.state_dict())
+            self.best_sigma_v = float(sigma_v)
             self.epochs_without_improvement = 0
             return False
 
         self.epochs_without_improvement += 1
         return self.epochs_without_improvement >= self.patience
 
-    def restore_best(self, model: Sequential) -> None:
-        if self.best_state is None:
+    def restore_best(self, model: Sequential) -> float:
+        if self.best_state is None or self.best_sigma_v is None:
             raise RuntimeError(
                 "Early stopping did not observe a finite validation score."
             )
         model.load_state_dict(self.best_state)
+        return self.best_sigma_v
+
+
+def sigma_v_schedule(
+    num_epochs: int,
+    start: float,
+    end: float,
+    decay_factor: float,
+) -> np.ndarray:
+    """Build the exponential observation-noise schedule used in experiments."""
+    if num_epochs <= 0:
+        raise ValueError("num_epochs must be positive.")
+    if start <= 0 or end <= 0:
+        raise ValueError("sigma_v start and end values must be positive.")
+    if not 0 < decay_factor <= 1:
+        raise ValueError("decay_factor must be in the interval (0, 1].")
+
+    epochs = np.arange(num_epochs, dtype=np.float32)
+    return end + (start - end) * (decay_factor**epochs)
 
 
 def load_values(path: str | Path) -> tuple[np.ndarray, np.ndarray]:

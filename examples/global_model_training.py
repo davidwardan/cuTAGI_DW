@@ -18,6 +18,7 @@ from global_model_utils import (
     predictions_to_original_scale,
     prepare_data,
     prepare_inputs,
+    sigma_v_schedule,
     update_model,
 )
 
@@ -38,13 +39,16 @@ SHUFFLE_SERIES = True
 SEED = 1
 
 HIDDEN_SIZES = (40, 40)
-OBSERVATION_STD = 0.3
 DEVICE = "cpu"  # "cpu" or "cuda"
 CPU_THREADS = 1
 
 MAX_EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 10
 EARLY_STOPPING_MIN_DELTA = 1e-4
+
+SIGMA_V_START = 0.3
+SIGMA_V_END = 0.05
+SIGMA_V_DECAY_FACTOR = 0.99
 
 # "one_step_ahead": condition each prior prediction on its observed target and
 # append the posterior to the lookback window.
@@ -59,7 +63,13 @@ TEST_PREDICTION_MODE = "one_step_ahead"
 # ---------------------------------------------------------------------------
 
 
-def train_one_epoch(model, output_updater, train_data: DataSplit, epoch: int) -> None:
+def train_one_epoch(
+    model,
+    output_updater,
+    train_data: DataSplit,
+    epoch: int,
+    sigma_v: float,
+) -> None:
     model.train()
     batches = by_series_batch(
         train_data.dataset,
@@ -68,21 +78,29 @@ def train_one_epoch(model, output_updater, train_data: DataSplit, epoch: int) ->
         seed=SEED + epoch,
     )
 
+    first_batch = True
     for batch in batches:
-        if batch.starts_new_group:
+        # This backend cannot reset its LSTM buffer before the first forward.
+        if batch.starts_new_group and (epoch > 0 or not first_batch):
             model.reset_lstm_states()
 
         inputs, input_variances = prepare_inputs(batch.x)
         model(inputs, input_variances)
+        first_batch = False
         update_model(
             model,
             output_updater,
             batch.y,
-            observation_variance=OBSERVATION_STD**2,
+            observation_variance=sigma_v**2,
         )
 
 
-def forecast_batches(model, split: DataSplit, prediction_mode: str):
+def forecast_batches(
+    model,
+    split: DataSplit,
+    prediction_mode: str,
+    sigma_v: float,
+):
     """Run stateful forecasts with a posterior or recursive lookback."""
     model.eval()
     lookback = None
@@ -103,7 +121,7 @@ def forecast_batches(model, split: DataSplit, prediction_mode: str):
             targets=batch.y,
             active=batch.series_ids >= 0,
             mode=prediction_mode,
-            observation_variance=OBSERVATION_STD**2,
+            observation_variance=sigma_v**2,
         )
         yield batch, prior_means, prior_variances
 
@@ -112,12 +130,13 @@ def validation_rmse(
     model,
     validation_data: DataSplit,
     prediction_mode: str,
+    sigma_v: float,
 ) -> float:
     squared_error = 0.0
     observation_count = 0
 
     for batch, predicted_means, _ in forecast_batches(
-        model, validation_data, prediction_mode
+        model, validation_data, prediction_mode, sigma_v
     ):
         targets = batch.y.reshape(-1)
         active = (batch.series_ids >= 0) & np.isfinite(targets)
@@ -134,17 +153,18 @@ def validation_rmse(
 def predict(
     model,
     split: DataSplit,
+    sigma_v: float,
     prediction_mode: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Predict a split; None keeps teacher-forced lookback inputs."""
     model.eval()
     saved_batches = []
-    observation_variance = OBSERVATION_STD**2
+    observation_variance = sigma_v**2
 
     if prediction_mode is None:
         predictions = teacher_forced_batches(model, split)
     else:
-        predictions = forecast_batches(model, split, prediction_mode)
+        predictions = forecast_batches(model, split, prediction_mode, sigma_v)
 
     for batch, prior_means, prior_variances in predictions:
         predictive_variances = prior_variances + observation_variance
@@ -189,34 +209,57 @@ def main() -> None:
         patience=EARLY_STOPPING_PATIENCE,
         min_delta=EARLY_STOPPING_MIN_DELTA,
     )
+    scheduled_sigma_v = sigma_v_schedule(
+        num_epochs=MAX_EPOCHS,
+        start=SIGMA_V_START,
+        end=SIGMA_V_END,
+        decay_factor=SIGMA_V_DECAY_FACTOR,
+    )
+    sigma_v_history = []
 
     for epoch in range(MAX_EPOCHS):
-        train_one_epoch(model, output_updater, train_data, epoch)
+        sigma_v = float(scheduled_sigma_v[epoch])
+        sigma_v_history.append(sigma_v)
+        train_one_epoch(model, output_updater, train_data, epoch, sigma_v)
         score = validation_rmse(
             model,
             validation_data,
             prediction_mode=VALIDATION_PREDICTION_MODE,
+            sigma_v=sigma_v,
         )
-        print(f"Epoch {epoch + 1:03d} | validation RMSE: {score:.6f}")
+        print(
+            f"Epoch {epoch + 1:03d} | validation RMSE: {score:.6f} "
+            f"| sigma_v: {sigma_v:.6f}"
+        )
 
-        if early_stopping.update(score, model):
+        if early_stopping.update(score, model, sigma_v):
             print(f"Early stopping after epoch {epoch + 1}.")
             break
 
-    early_stopping.restore_best(model)
+    best_sigma_v = early_stopping.restore_best(model)
     model.save(str(output_dir / "model.bin"))
 
-    train_mean, train_std = predict(model, train_data)
+    train_mean, train_std = predict(model, train_data, best_sigma_v)
     validation_mean, validation_std = predict(
-        model, validation_data, VALIDATION_PREDICTION_MODE
+        model,
+        validation_data,
+        best_sigma_v,
+        VALIDATION_PREDICTION_MODE,
     )
-    test_mean, test_std = predict(model, test_data, TEST_PREDICTION_MODE)
+    test_mean, test_std = predict(
+        model,
+        test_data,
+        best_sigma_v,
+        TEST_PREDICTION_MODE,
+    )
 
     np.savez(
         output_dir / "predictions.npz",
         column_names=column_names,
         validation_prediction_mode=VALIDATION_PREDICTION_MODE,
         test_prediction_mode=TEST_PREDICTION_MODE,
+        sigma_v_history=np.asarray(sigma_v_history, dtype=np.float32),
+        best_sigma_v=np.float32(best_sigma_v),
         train_target=train_data.values,
         train_mean=train_mean,
         train_std=train_std,
