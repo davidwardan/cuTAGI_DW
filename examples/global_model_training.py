@@ -12,6 +12,7 @@ import numpy as np
 from global_model_utils import (
     DataSplit,
     EarlyStopping,
+    ForecastLookback,
     build_model,
     by_series_batch,
     predictions_to_original_scale,
@@ -45,6 +46,13 @@ MAX_EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 10
 EARLY_STOPPING_MIN_DELTA = 1e-4
 
+# "one_step_ahead": condition each prior prediction on its observed target and
+# append the posterior to the lookback window.
+# "multi_step_ahead": recursively append the prior prediction without using
+# the observed target.
+VALIDATION_PREDICTION_MODE = "one_step_ahead"
+TEST_PREDICTION_MODE = "one_step_ahead"
+
 
 # ---------------------------------------------------------------------------
 # Training and prediction
@@ -74,18 +82,43 @@ def train_one_epoch(model, output_updater, train_data: DataSplit, epoch: int) ->
         )
 
 
-def validation_rmse(model, validation_data: DataSplit) -> float:
+def forecast_batches(model, split: DataSplit, prediction_mode: str):
+    """Run stateful forecasts with a posterior or recursive lookback."""
     model.eval()
+    lookback = None
+
+    for batch in by_series_batch(split.dataset, BATCH_SIZE):
+        if batch.starts_new_group:
+            model.reset_lstm_states()
+            lookback = ForecastLookback(batch.x)
+
+        inputs, input_variances = prepare_inputs(lookback.means, lookback.variances)
+        prior_means, prior_variances = model(inputs, input_variances)
+        prior_means = np.asarray(prior_means).reshape(-1)
+        prior_variances = np.asarray(prior_variances).reshape(-1)
+
+        lookback.update(
+            prior_means=prior_means,
+            prior_variances=prior_variances,
+            targets=batch.y,
+            active=batch.series_ids >= 0,
+            mode=prediction_mode,
+            observation_variance=OBSERVATION_STD**2,
+        )
+        yield batch, prior_means, prior_variances
+
+
+def validation_rmse(
+    model,
+    validation_data: DataSplit,
+    prediction_mode: str,
+) -> float:
     squared_error = 0.0
     observation_count = 0
 
-    for batch in by_series_batch(validation_data.dataset, BATCH_SIZE):
-        if batch.starts_new_group:
-            model.reset_lstm_states()
-
-        inputs, input_variances = prepare_inputs(batch.x)
-        predicted_means, _ = model(inputs, input_variances)
-        predicted_means = np.asarray(predicted_means).reshape(-1)
+    for batch, predicted_means, _ in forecast_batches(
+        model, validation_data, prediction_mode
+    ):
         targets = batch.y.reshape(-1)
         active = (batch.series_ids >= 0) & np.isfinite(targets)
 
@@ -98,22 +131,41 @@ def validation_rmse(model, validation_data: DataSplit) -> float:
     return float(np.sqrt(squared_error / observation_count))
 
 
-def predict(model, split: DataSplit) -> tuple[np.ndarray, np.ndarray]:
+def predict(
+    model,
+    split: DataSplit,
+    prediction_mode: str | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Predict a split; None keeps teacher-forced lookback inputs."""
     model.eval()
     saved_batches = []
     observation_variance = OBSERVATION_STD**2
 
+    if prediction_mode is None:
+        predictions = teacher_forced_batches(model, split)
+    else:
+        predictions = forecast_batches(model, split, prediction_mode)
+
+    for batch, prior_means, prior_variances in predictions:
+        predictive_variances = prior_variances + observation_variance
+        saved_batches.append((batch, prior_means, predictive_variances))
+
+    return predictions_to_original_scale(split, saved_batches)
+
+
+def teacher_forced_batches(model, split: DataSplit):
+    """Use observed values in every lookback, matching the training inputs."""
     for batch in by_series_batch(split.dataset, BATCH_SIZE):
         if batch.starts_new_group:
             model.reset_lstm_states()
 
         inputs, input_variances = prepare_inputs(batch.x)
-        means, variances = model(inputs, input_variances)
-        means = np.asarray(means).reshape(-1)
-        variances = np.asarray(variances).reshape(-1) + observation_variance
-        saved_batches.append((batch, means, variances))
-
-    return predictions_to_original_scale(split, saved_batches)
+        prior_means, prior_variances = model(inputs, input_variances)
+        yield (
+            batch,
+            np.asarray(prior_means).reshape(-1),
+            np.asarray(prior_variances).reshape(-1),
+        )
 
 
 def main() -> None:
@@ -140,7 +192,11 @@ def main() -> None:
 
     for epoch in range(MAX_EPOCHS):
         train_one_epoch(model, output_updater, train_data, epoch)
-        score = validation_rmse(model, validation_data)
+        score = validation_rmse(
+            model,
+            validation_data,
+            prediction_mode=VALIDATION_PREDICTION_MODE,
+        )
         print(f"Epoch {epoch + 1:03d} | validation RMSE: {score:.6f}")
 
         if early_stopping.update(score, model):
@@ -151,12 +207,16 @@ def main() -> None:
     model.save(str(output_dir / "model.bin"))
 
     train_mean, train_std = predict(model, train_data)
-    validation_mean, validation_std = predict(model, validation_data)
-    test_mean, test_std = predict(model, test_data)
+    validation_mean, validation_std = predict(
+        model, validation_data, VALIDATION_PREDICTION_MODE
+    )
+    test_mean, test_std = predict(model, test_data, TEST_PREDICTION_MODE)
 
     np.savez(
         output_dir / "predictions.npz",
         column_names=column_names,
+        validation_prediction_mode=VALIDATION_PREDICTION_MODE,
+        test_prediction_mode=TEST_PREDICTION_MODE,
         train_target=train_data.values,
         train_mean=train_mean,
         train_std=train_std,

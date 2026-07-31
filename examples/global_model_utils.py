@@ -18,6 +18,7 @@ from pytagi.nn import LSTM, Linear, OutputUpdater, Sequential
 
 
 Dataset = dict[str, np.ndarray | tuple[np.ndarray, np.ndarray]]
+PREDICTION_MODES = ("one_step_ahead", "multi_step_ahead")
 
 
 @dataclass
@@ -40,6 +41,56 @@ class SeriesBatch:
     series_ids: np.ndarray
     time_ids: np.ndarray
     starts_new_group: bool
+
+
+class ForecastLookback:
+    """Rolling mean and variance used during validation and testing."""
+
+    def __init__(self, initial_means: np.ndarray) -> None:
+        self.means = initial_means.astype(np.float32, copy=True)
+        self.variances = np.zeros_like(self.means, dtype=np.float32)
+
+    def update(
+        self,
+        prior_means: np.ndarray,
+        prior_variances: np.ndarray,
+        targets: np.ndarray,
+        active: np.ndarray,
+        mode: str,
+        observation_variance: float,
+    ) -> None:
+        """Append either the posterior or prior prediction to the window."""
+        if mode not in PREDICTION_MODES:
+            raise ValueError(
+                f"mode must be one of {PREDICTION_MODES}; received {mode!r}."
+            )
+        if observation_variance <= 0:
+            raise ValueError("observation_variance must be positive.")
+
+        prior_means = np.asarray(prior_means, dtype=np.float32).reshape(-1)
+        prior_variances = np.maximum(
+            np.asarray(prior_variances, dtype=np.float32).reshape(-1), 0.0
+        )
+        targets = np.asarray(targets, dtype=np.float32).reshape(-1)
+        active = np.asarray(active, dtype=bool).reshape(-1)
+
+        next_means = prior_means.copy()
+        next_variances = prior_variances.copy()
+
+        if mode == "one_step_ahead":
+            observed = active & np.isfinite(targets)
+            kalman_gain = prior_variances[observed] / (
+                prior_variances[observed] + observation_variance
+            )
+            next_means[observed] += kalman_gain * (
+                targets[observed] - prior_means[observed]
+            )
+            next_variances[observed] *= 1.0 - kalman_gain
+
+        self.means = np.roll(self.means, -1, axis=1)
+        self.variances = np.roll(self.variances, -1, axis=1)
+        self.means[:, -1] = np.where(active, next_means, np.nan)
+        self.variances[:, -1] = np.where(active, next_variances, 0.0)
 
 
 class EarlyStopping:
@@ -242,11 +293,21 @@ def build_model(
     return model, OutputUpdater(model.device)
 
 
-def prepare_inputs(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Replace NaN padding in model inputs and flatten the batch."""
+def prepare_inputs(
+    x: np.ndarray,
+    variances: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Replace NaN padding and flatten input means and variances."""
     means = np.nan_to_num(x, nan=0.0).astype(np.float32, copy=False).reshape(-1)
-    variances = np.zeros_like(means, dtype=np.float32)
-    return means, variances
+    if variances is None:
+        input_variances = np.zeros_like(means, dtype=np.float32)
+    else:
+        if variances.shape != x.shape:
+            raise ValueError("Input means and variances must have the same shape.")
+        input_variances = np.nan_to_num(variances, nan=0.0, posinf=2.0, neginf=0.0)
+        input_variances = np.clip(input_variances, 0.0, 2.0)
+        input_variances = input_variances.astype(np.float32, copy=False).reshape(-1)
+    return means, input_variances
 
 
 def update_model(
