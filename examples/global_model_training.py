@@ -9,12 +9,14 @@ from pathlib import Path
 
 import numpy as np
 
-from global_model_utils import (
+from examples.global_model_utils import (
     DataSplit,
     EarlyStopping,
     ForecastLookback,
     build_model,
     by_series_batch,
+    gaussian_log_likelihood_terms,
+    macro_average_series_log_likelihood,
     predictions_to_original_scale,
     prepare_data,
     prepare_inputs,
@@ -27,28 +29,31 @@ from global_model_utils import (
 # Settings
 # ---------------------------------------------------------------------------
 
-VALUES_FILE = "data/toy_embedding/time_series_values.csv"
+VALUES_FILE = "data/hq/ts_weekly_values_final.csv"
+DATETIMES_FILE = "data/hq/ts_weekly_datetimes_final.csv"
+TIME_COVARIATES = ("week_of_year",)
 OUTPUT_DIR = "out/global_stateful_lstm"
 
 TRAIN_RATIO = 0.70
 VALIDATION_RATIO = 0.10
-LOOKBACK = 24
+LOOKBACK = 52
 
-BATCH_SIZE = 8
+BATCH_SIZE = 32
 SHUFFLE_SERIES = True
 SEED = 1
 
-HIDDEN_SIZES = (40, 40)
+HIDDEN_SIZES = (50,)
 DEVICE = "cpu"  # "cpu" or "cuda"
 CPU_THREADS = 1
 
 MAX_EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 10
 EARLY_STOPPING_MIN_DELTA = 1e-4
+EARLY_STOPPING_WARMUP_EPOCHS = 10  # Set to 0 to disable warmup.
 
-SIGMA_V_START = 0.3
-SIGMA_V_END = 0.05
-SIGMA_V_DECAY_FACTOR = 0.99
+SIGMA_V_START = 2.0
+SIGMA_V_END = 0.1
+SIGMA_V_DECAY_FACTOR = 0.8
 
 # "one_step_ahead": condition each prior prediction on its observed target and
 # append the posterior to the lookback window.
@@ -84,7 +89,9 @@ def train_one_epoch(
         if batch.starts_new_group and (epoch > 0 or not first_batch):
             model.reset_lstm_states()
 
-        inputs, input_variances = prepare_inputs(batch.x)
+        inputs, input_variances = prepare_inputs(
+            batch.x, time_covariates=batch.time_covariates
+        )
         model(inputs, input_variances)
         first_batch = False
         update_model(
@@ -110,7 +117,11 @@ def forecast_batches(
             model.reset_lstm_states()
             lookback = ForecastLookback(batch.x)
 
-        inputs, input_variances = prepare_inputs(lookback.means, lookback.variances)
+        inputs, input_variances = prepare_inputs(
+            lookback.means,
+            lookback.variances,
+            batch.time_covariates,
+        )
         prior_means, prior_variances = model(inputs, input_variances)
         prior_means = np.asarray(prior_means).reshape(-1)
         prior_variances = np.asarray(prior_variances).reshape(-1)
@@ -126,28 +137,35 @@ def forecast_batches(
         yield batch, prior_means, prior_variances
 
 
-def validation_rmse(
+def validation_log_likelihood(
     model,
     validation_data: DataSplit,
     prediction_mode: str,
     sigma_v: float,
 ) -> float:
-    squared_error = 0.0
-    observation_count = 0
+    saved_log_likelihoods = []
+    saved_series_ids = []
+    observation_variance = sigma_v**2
 
-    for batch, predicted_means, _ in forecast_batches(
+    for batch, predicted_means, prior_variances in forecast_batches(
         model, validation_data, prediction_mode, sigma_v
     ):
         targets = batch.y.reshape(-1)
-        active = (batch.series_ids >= 0) & np.isfinite(targets)
+        predictive_variances = np.maximum(prior_variances, 0.0) + observation_variance
+        log_likelihoods = gaussian_log_likelihood_terms(
+            targets, predicted_means, predictive_variances
+        )
+        active = (batch.series_ids >= 0) & np.isfinite(log_likelihoods)
 
-        errors = predicted_means[active] - targets[active]
-        squared_error += float(np.sum(errors**2))
-        observation_count += int(np.sum(active))
+        saved_log_likelihoods.append(log_likelihoods[active])
+        saved_series_ids.append(batch.series_ids[active])
 
-    if observation_count == 0:
+    if not saved_log_likelihoods:
         raise RuntimeError("The validation split contains no usable targets.")
-    return float(np.sqrt(squared_error / observation_count))
+    return macro_average_series_log_likelihood(
+        np.concatenate(saved_log_likelihoods),
+        np.concatenate(saved_series_ids),
+    )
 
 
 def predict(
@@ -179,7 +197,9 @@ def teacher_forced_batches(model, split: DataSplit):
         if batch.starts_new_group:
             model.reset_lstm_states()
 
-        inputs, input_variances = prepare_inputs(batch.x)
+        inputs, input_variances = prepare_inputs(
+            batch.x, time_covariates=batch.time_covariates
+        )
         prior_means, prior_variances = model(inputs, input_variances)
         yield (
             batch,
@@ -194,12 +214,14 @@ def main() -> None:
 
     train_data, validation_data, test_data, column_names = prepare_data(
         values_file=VALUES_FILE,
+        datetime_file=DATETIMES_FILE,
         train_ratio=TRAIN_RATIO,
         validation_ratio=VALIDATION_RATIO,
         lookback=LOOKBACK,
+        time_covariates=TIME_COVARIATES,
     )
     model, output_updater = build_model(
-        input_size=LOOKBACK,
+        input_size=LOOKBACK + len(TIME_COVARIATES),
         hidden_sizes=HIDDEN_SIZES,
         seed=SEED,
         device=DEVICE,
@@ -208,6 +230,8 @@ def main() -> None:
     early_stopping = EarlyStopping(
         patience=EARLY_STOPPING_PATIENCE,
         min_delta=EARLY_STOPPING_MIN_DELTA,
+        mode="max",
+        warmup_epochs=EARLY_STOPPING_WARMUP_EPOCHS,
     )
     scheduled_sigma_v = sigma_v_schedule(
         num_epochs=MAX_EPOCHS,
@@ -216,23 +240,31 @@ def main() -> None:
         decay_factor=SIGMA_V_DECAY_FACTOR,
     )
     sigma_v_history = []
+    validation_log_likelihood_history = []
 
     for epoch in range(MAX_EPOCHS):
         sigma_v = float(scheduled_sigma_v[epoch])
         sigma_v_history.append(sigma_v)
         train_one_epoch(model, output_updater, train_data, epoch, sigma_v)
-        score = validation_rmse(
+        validation_log_likelihood_score = validation_log_likelihood(
             model,
             validation_data,
             prediction_mode=VALIDATION_PREDICTION_MODE,
             sigma_v=sigma_v,
         )
+        validation_log_likelihood_history.append(validation_log_likelihood_score)
         print(
-            f"Epoch {epoch + 1:03d} | validation RMSE: {score:.6f} "
+            f"Epoch {epoch + 1:03d} | validation macro log-likelihood: "
+            f"{validation_log_likelihood_score:.6f} "
             f"| sigma_v: {sigma_v:.6f}"
+            + (
+                " | early stopping warmup"
+                if epoch < EARLY_STOPPING_WARMUP_EPOCHS
+                else ""
+            )
         )
 
-        if early_stopping.update(score, model, sigma_v):
+        if early_stopping.update(validation_log_likelihood_score, model, sigma_v):
             print(f"Early stopping after epoch {epoch + 1}.")
             break
 
@@ -259,14 +291,23 @@ def main() -> None:
         validation_prediction_mode=VALIDATION_PREDICTION_MODE,
         test_prediction_mode=TEST_PREDICTION_MODE,
         sigma_v_history=np.asarray(sigma_v_history, dtype=np.float32),
+        validation_log_likelihood_history=np.asarray(
+            validation_log_likelihood_history, dtype=np.float64
+        ),
+        best_validation_log_likelihood=np.float64(early_stopping.best_score),
+        early_stopping_warmup_epochs=np.int32(EARLY_STOPPING_WARMUP_EPOCHS),
         best_sigma_v=np.float32(best_sigma_v),
+        time_covariates=np.asarray(TIME_COVARIATES),
         train_target=train_data.values,
+        train_datetimes=train_data.datetimes,
         train_mean=train_mean,
         train_std=train_std,
         validation_target=validation_data.values,
+        validation_datetimes=validation_data.datetimes,
         validation_mean=validation_mean,
         validation_std=validation_std,
         test_target=test_data.values,
+        test_datetimes=test_data.datetimes,
         test_mean=test_mean,
         test_std=test_std,
     )
