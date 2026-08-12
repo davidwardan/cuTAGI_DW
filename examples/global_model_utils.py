@@ -71,11 +71,14 @@ class ForecastLookback:
             raise ValueError("observation_variance must be positive.")
 
         prior_means = np.asarray(prior_means, dtype=np.float32).reshape(-1)
-        prior_variances = np.maximum(
-            np.asarray(prior_variances, dtype=np.float32).reshape(-1), 0.0
-        )
+        prior_variances = np.asarray(prior_variances, dtype=np.float32).reshape(-1)
         targets = np.asarray(targets, dtype=np.float32).reshape(-1)
         active = np.asarray(active, dtype=bool).reshape(-1)
+        validate_nonnegative_variances(
+            prior_variances,
+            active=active,
+            name="Prior prediction variances",
+        )
 
         if mode == "one_step_ahead":
             posterior_means = prior_means.copy()
@@ -198,6 +201,35 @@ def macro_average_series_log_likelihood(
     _, inverse_ids = np.unique(series_ids[valid], return_inverse=True)
     series_sums = np.bincount(inverse_ids, weights=log_likelihoods[valid])
     return float(np.mean(series_sums))
+
+
+def validate_nonnegative_variances(
+    variances: np.ndarray,
+    active: np.ndarray | None = None,
+    name: str = "Variances",
+) -> None:
+    """Raise when an active variance is negative.
+
+    Variances are deliberately validated instead of clipped so numerical errors
+    in model output remain visible to callers.
+    """
+    variances = np.asarray(variances).reshape(-1)
+    if active is None:
+        active = np.ones(variances.shape, dtype=bool)
+    else:
+        active = np.asarray(active, dtype=bool).reshape(-1)
+        if active.shape != variances.shape:
+            raise ValueError(
+                "Variances and the active mask must have identical shapes."
+            )
+
+    invalid = active & (variances < 0)
+    if np.any(invalid):
+        index = int(np.flatnonzero(invalid)[0])
+        raise ValueError(
+            f"{name} must be non-negative; received {variances[index]} "
+            f"at flat index {index}."
+        )
 
 
 def sigma_v_schedule(
@@ -606,13 +638,16 @@ def predictions_to_original_scale(
         series_ids = batch.series_ids[active]
         time_ids = batch.time_ids[active]
         scale = split.stds[series_ids]
+        validate_nonnegative_variances(
+            predicted_variances,
+            active=active,
+            name="Predictive variances",
+        )
 
         means[time_ids, series_ids] = (
             predicted_means[active] * scale + split.means[series_ids]
         )
-        stds[time_ids, series_ids] = (
-            np.sqrt(np.maximum(predicted_variances[active], 0.0)) * scale
-        )
+        stds[time_ids, series_ids] = np.sqrt(predicted_variances[active]) * scale
 
     return means, stds
 
@@ -660,7 +695,7 @@ def _make_split(
                 continue
             x_rows.append(combined[target_position - lookback : target_position])
             raw_covariates = _datetime_covariates(
-                combined_datetimes[target_position - 1 : target_position],
+                combined_datetimes[target_position : target_position + 1],
                 time_covariates,
             )[0]
             covariate_rows.append(

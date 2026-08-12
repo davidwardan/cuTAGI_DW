@@ -8,6 +8,7 @@ Edit the constants in the first section, then run:
 from pathlib import Path
 
 import numpy as np
+import pytagi.metric as metric
 
 from examples.global_model_utils import (
     DataSplit,
@@ -15,13 +16,12 @@ from examples.global_model_utils import (
     ForecastLookback,
     build_model,
     by_series_batch,
-    gaussian_log_likelihood_terms,
-    macro_average_series_log_likelihood,
     predictions_to_original_scale,
     prepare_data,
     prepare_inputs,
     sigma_v_schedule,
     update_model,
+    validate_nonnegative_variances,
 )
 
 
@@ -29,10 +29,10 @@ from examples.global_model_utils import (
 # Settings
 # ---------------------------------------------------------------------------
 
-VALUES_FILE = "data/hq/ts_weekly_values_final.csv"
-DATETIMES_FILE = "data/hq/ts_weekly_datetimes_final.csv"
+VALUES_FILE = "data/hq_benchmark/weekly_values.csv"
+DATETIMES_FILE = "data/hq_benchmark/weekly_datetimes.csv"
 TIME_COVARIATES = ("week_of_year",)
-OUTPUT_DIR = "out/global_stateful_lstm"
+OUTPUT_DIR = "out/hq_benchmark_training"
 
 TRAIN_RATIO = 0.70
 VALIDATION_RATIO = 0.10
@@ -49,7 +49,8 @@ CPU_THREADS = 1
 MAX_EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 10
 EARLY_STOPPING_MIN_DELTA = 1e-4
-EARLY_STOPPING_WARMUP_EPOCHS = 10  # Set to 0 to disable warmup.
+EARLY_STOPPING_WARMUP_EPOCHS = 1  # Set to 0 to disable warmup.
+VALIDATION_METRIC = "log_likelihood"  # "log_likelihood" or "mse"
 
 SIGMA_V_START = 2.0
 SIGMA_V_END = 0.1
@@ -137,34 +138,48 @@ def forecast_batches(
         yield batch, prior_means, prior_variances
 
 
-def validation_log_likelihood(
-    model,
-    validation_data: DataSplit,
-    prediction_mode: str,
-    sigma_v: float,
+def calculate_validation_metric(
+    targets: np.ndarray,
+    predicted_means: np.ndarray,
+    predicted_stds: np.ndarray,
+    metric_name: str,
 ) -> float:
-    saved_log_likelihoods = []
-    saved_series_ids = []
-    observation_variance = sigma_v**2
+    """Calculate a PyTAGI metric from aligned prediction arrays."""
+    targets = np.asarray(targets)
+    predicted_means = np.asarray(predicted_means)
+    predicted_stds = np.asarray(predicted_stds)
+    if not (targets.shape == predicted_means.shape == predicted_stds.shape):
+        raise ValueError("Targets, predicted means, and stds must have equal shapes.")
 
-    for batch, predicted_means, prior_variances in forecast_batches(
-        model, validation_data, prediction_mode, sigma_v
-    ):
-        targets = batch.y.reshape(-1)
-        predictive_variances = np.maximum(prior_variances, 0.0) + observation_variance
-        log_likelihoods = gaussian_log_likelihood_terms(
-            targets, predicted_means, predictive_variances
+    valid = np.isfinite(targets) & np.isfinite(predicted_means)
+    if metric_name == "log_likelihood":
+        valid &= np.isfinite(predicted_stds) & (predicted_stds > 0)
+        if not np.any(valid):
+            raise RuntimeError("The validation split contains no usable predictions.")
+        return float(
+            metric.log_likelihood(
+                predicted_means[valid], targets[valid], predicted_stds[valid]
+            )
         )
-        active = (batch.series_ids >= 0) & np.isfinite(log_likelihoods)
+    if metric_name == "mse":
+        if not np.any(valid):
+            raise RuntimeError("The validation split contains no usable predictions.")
+        return float(metric.mse(predicted_means[valid], targets[valid]))
+    raise ValueError(
+        "VALIDATION_METRIC must be either 'log_likelihood' or 'mse'; "
+        f"received {metric_name!r}."
+    )
 
-        saved_log_likelihoods.append(log_likelihoods[active])
-        saved_series_ids.append(batch.series_ids[active])
 
-    if not saved_log_likelihoods:
-        raise RuntimeError("The validation split contains no usable targets.")
-    return macro_average_series_log_likelihood(
-        np.concatenate(saved_log_likelihoods),
-        np.concatenate(saved_series_ids),
+def validation_metric_mode(metric_name: str) -> str:
+    """Return the early-stopping direction for a supported metric."""
+    if metric_name == "log_likelihood":
+        return "max"
+    if metric_name == "mse":
+        return "min"
+    raise ValueError(
+        "VALIDATION_METRIC must be either 'log_likelihood' or 'mse'; "
+        f"received {metric_name!r}."
     )
 
 
@@ -185,6 +200,11 @@ def predict(
         predictions = forecast_batches(model, split, prediction_mode, sigma_v)
 
     for batch, prior_means, prior_variances in predictions:
+        validate_nonnegative_variances(
+            prior_variances,
+            active=batch.series_ids >= 0,
+            name="Prior prediction variances",
+        )
         predictive_variances = prior_variances + observation_variance
         saved_batches.append((batch, prior_means, predictive_variances))
 
@@ -230,7 +250,7 @@ def main() -> None:
     early_stopping = EarlyStopping(
         patience=EARLY_STOPPING_PATIENCE,
         min_delta=EARLY_STOPPING_MIN_DELTA,
-        mode="max",
+        mode=validation_metric_mode(VALIDATION_METRIC),
         warmup_epochs=EARLY_STOPPING_WARMUP_EPOCHS,
     )
     scheduled_sigma_v = sigma_v_schedule(
@@ -240,22 +260,28 @@ def main() -> None:
         decay_factor=SIGMA_V_DECAY_FACTOR,
     )
     sigma_v_history = []
-    validation_log_likelihood_history = []
+    validation_metric_history = []
 
     for epoch in range(MAX_EPOCHS):
         sigma_v = float(scheduled_sigma_v[epoch])
         sigma_v_history.append(sigma_v)
         train_one_epoch(model, output_updater, train_data, epoch, sigma_v)
-        validation_log_likelihood_score = validation_log_likelihood(
+        validation_mean, validation_std = predict(
             model,
             validation_data,
-            prediction_mode=VALIDATION_PREDICTION_MODE,
             sigma_v=sigma_v,
+            prediction_mode=VALIDATION_PREDICTION_MODE,
         )
-        validation_log_likelihood_history.append(validation_log_likelihood_score)
+        validation_score = calculate_validation_metric(
+            validation_data.values,
+            validation_mean,
+            validation_std,
+            VALIDATION_METRIC,
+        )
+        validation_metric_history.append(validation_score)
         print(
-            f"Epoch {epoch + 1:03d} | validation macro log-likelihood: "
-            f"{validation_log_likelihood_score:.6f} "
+            f"Epoch {epoch + 1:03d} | validation {VALIDATION_METRIC}: "
+            f"{validation_score:.6f} "
             f"| sigma_v: {sigma_v:.6f}"
             + (
                 " | early stopping warmup"
@@ -264,7 +290,7 @@ def main() -> None:
             )
         )
 
-        if early_stopping.update(validation_log_likelihood_score, model, sigma_v):
+        if early_stopping.update(validation_score, model, sigma_v):
             print(f"Early stopping after epoch {epoch + 1}.")
             break
 
@@ -291,10 +317,11 @@ def main() -> None:
         validation_prediction_mode=VALIDATION_PREDICTION_MODE,
         test_prediction_mode=TEST_PREDICTION_MODE,
         sigma_v_history=np.asarray(sigma_v_history, dtype=np.float32),
-        validation_log_likelihood_history=np.asarray(
-            validation_log_likelihood_history, dtype=np.float64
+        validation_metric=VALIDATION_METRIC,
+        validation_metric_history=np.asarray(
+            validation_metric_history, dtype=np.float64
         ),
-        best_validation_log_likelihood=np.float64(early_stopping.best_score),
+        best_validation_metric=np.float64(early_stopping.best_score),
         early_stopping_warmup_epochs=np.int32(EARLY_STOPPING_WARMUP_EPOCHS),
         best_sigma_v=np.float32(best_sigma_v),
         time_covariates=np.asarray(TIME_COVARIATES),
