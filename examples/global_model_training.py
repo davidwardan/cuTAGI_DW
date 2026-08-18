@@ -5,10 +5,12 @@ Edit the constants in the first section, then run:
     python examples/global_model_training.py
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pytagi.metric as metric
+from pytagi.nn import Sequential
 
 from examples.global_model_utils import (
     DataSplit,
@@ -49,19 +51,18 @@ CPU_THREADS = 1
 MAX_EPOCHS = 100
 EARLY_STOPPING_PATIENCE = 10
 EARLY_STOPPING_MIN_DELTA = 1e-4
-EARLY_STOPPING_WARMUP_EPOCHS = 1  # Set to 0 to disable warmup.
+EARLY_STOPPING_WARMUP_EPOCHS = 3  # Set to 0 to disable warmup.
 VALIDATION_METRIC = "log_likelihood"  # "log_likelihood" or "mse"
 
-SIGMA_V_START = 2.0
+SIGMA_V_START = 0.5
 SIGMA_V_END = 0.1
-SIGMA_V_DECAY_FACTOR = 0.8
+SIGMA_V_DECAY_FACTOR = 0.75
 
 # "one_step_ahead": condition each prior prediction on its observed target and
 # append the posterior to the lookback window.
 # "multi_step_ahead": recursively append the prior prediction without using
 # the observed target.
 VALIDATION_PREDICTION_MODE = "one_step_ahead"
-TEST_PREDICTION_MODE = "one_step_ahead"
 
 
 # ---------------------------------------------------------------------------
@@ -228,21 +229,26 @@ def teacher_forced_batches(model, split: DataSplit):
         )
 
 
-def main() -> None:
-    output_dir = Path(OUTPUT_DIR)
-    output_dir.mkdir(parents=True, exist_ok=True)
+@dataclass
+class TrainingRun:
+    """The best model found by early stopping and its per-epoch history."""
 
-    train_data, validation_data, test_data, column_names = prepare_data(
-        values_file=VALUES_FILE,
-        datetime_file=DATETIMES_FILE,
-        train_ratio=TRAIN_RATIO,
-        validation_ratio=VALIDATION_RATIO,
-        lookback=LOOKBACK,
-        time_covariates=TIME_COVARIATES,
-    )
+    model: Sequential
+    best_sigma_v: float
+    best_validation_metric: float
+    sigma_v_history: list[float]
+    validation_metric_history: list[float]
+
+
+def train_with_early_stopping(
+    train_data: DataSplit,
+    validation_data: DataSplit,
+    hidden_sizes: tuple[int, ...],
+) -> TrainingRun:
+    """Train until early stopping and restore the best validation model."""
     model, output_updater = build_model(
         input_size=LOOKBACK + len(TIME_COVARIATES),
-        hidden_sizes=HIDDEN_SIZES,
+        hidden_sizes=hidden_sizes,
         seed=SEED,
         device=DEVICE,
         cpu_threads=CPU_THREADS,
@@ -295,35 +301,50 @@ def main() -> None:
             break
 
     best_sigma_v = early_stopping.restore_best(model)
-    model.save(str(output_dir / "model.bin"))
-
-    train_mean, train_std = predict(model, train_data, best_sigma_v)
-    validation_mean, validation_std = predict(
-        model,
-        validation_data,
-        best_sigma_v,
-        VALIDATION_PREDICTION_MODE,
+    return TrainingRun(
+        model=model,
+        best_sigma_v=best_sigma_v,
+        best_validation_metric=float(early_stopping.best_score),
+        sigma_v_history=sigma_v_history,
+        validation_metric_history=validation_metric_history,
     )
-    test_mean, test_std = predict(
-        model,
-        test_data,
-        best_sigma_v,
-        TEST_PREDICTION_MODE,
+
+
+def main() -> None:
+    output_dir = Path(OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    train_data, validation_data, _, column_names = prepare_data(
+        values_file=VALUES_FILE,
+        datetime_file=DATETIMES_FILE,
+        train_ratio=TRAIN_RATIO,
+        validation_ratio=VALIDATION_RATIO,
+        lookback=LOOKBACK,
+        time_covariates=TIME_COVARIATES,
+    )
+    run = train_with_early_stopping(train_data, validation_data, HIDDEN_SIZES)
+    run.model.save(str(output_dir / "model.bin"))
+
+    train_mean, train_std = predict(run.model, train_data, run.best_sigma_v)
+    validation_mean, validation_std = predict(
+        run.model,
+        validation_data,
+        run.best_sigma_v,
+        VALIDATION_PREDICTION_MODE,
     )
 
     np.savez(
         output_dir / "predictions.npz",
         column_names=column_names,
         validation_prediction_mode=VALIDATION_PREDICTION_MODE,
-        test_prediction_mode=TEST_PREDICTION_MODE,
-        sigma_v_history=np.asarray(sigma_v_history, dtype=np.float32),
+        sigma_v_history=np.asarray(run.sigma_v_history, dtype=np.float32),
         validation_metric=VALIDATION_METRIC,
         validation_metric_history=np.asarray(
-            validation_metric_history, dtype=np.float64
+            run.validation_metric_history, dtype=np.float64
         ),
-        best_validation_metric=np.float64(early_stopping.best_score),
+        best_validation_metric=np.float64(run.best_validation_metric),
         early_stopping_warmup_epochs=np.int32(EARLY_STOPPING_WARMUP_EPOCHS),
-        best_sigma_v=np.float32(best_sigma_v),
+        best_sigma_v=np.float32(run.best_sigma_v),
         time_covariates=np.asarray(TIME_COVARIATES),
         train_target=train_data.values,
         train_datetimes=train_data.datetimes,
@@ -333,10 +354,6 @@ def main() -> None:
         validation_datetimes=validation_data.datetimes,
         validation_mean=validation_mean,
         validation_std=validation_std,
-        test_target=test_data.values,
-        test_datetimes=test_data.datetimes,
-        test_mean=test_mean,
-        test_std=test_std,
     )
     print(f"Saved model and predictions to {output_dir}.")
 
