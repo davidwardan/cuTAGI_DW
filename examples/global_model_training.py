@@ -76,13 +76,14 @@ def train_one_epoch(
     train_data: DataSplit,
     epoch: int,
     sigma_v: float,
+    seed: int = SEED,
 ) -> None:
     model.train()
     batches = by_series_batch(
         train_data.dataset,
         batch_size=BATCH_SIZE,
         shuffle=SHUFFLE_SERIES,
-        seed=SEED + epoch,
+        seed=seed + epoch,
     )
 
     first_batch = True
@@ -244,12 +245,13 @@ def train_with_early_stopping(
     train_data: DataSplit,
     validation_data: DataSplit,
     hidden_sizes: tuple[int, ...],
+    seed: int = SEED,
 ) -> TrainingRun:
     """Train until early stopping and restore the best validation model."""
     model, output_updater = build_model(
         input_size=LOOKBACK + len(TIME_COVARIATES),
         hidden_sizes=hidden_sizes,
-        seed=SEED,
+        seed=seed,
         device=DEVICE,
         cpu_threads=CPU_THREADS,
     )
@@ -271,7 +273,7 @@ def train_with_early_stopping(
     for epoch in range(MAX_EPOCHS):
         sigma_v = float(scheduled_sigma_v[epoch])
         sigma_v_history.append(sigma_v)
-        train_one_epoch(model, output_updater, train_data, epoch, sigma_v)
+        train_one_epoch(model, output_updater, train_data, epoch, sigma_v, seed)
         validation_mean, validation_std = predict(
             model,
             validation_data,
