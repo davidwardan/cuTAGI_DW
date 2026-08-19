@@ -321,25 +321,27 @@ def split_values(
     train_ratio: float,
     validation_ratio: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Chronologically split every series, ignoring trailing NaN padding."""
+    """Return required train/validation splits and an optional test remainder."""
     if train_ratio <= 0 or validation_ratio <= 0:
         raise ValueError("train_ratio and validation_ratio must be positive.")
-    if train_ratio + validation_ratio >= 1:
-        raise ValueError("train_ratio + validation_ratio must be less than 1.")
+    total_ratio = train_ratio + validation_ratio
+    if total_ratio > 1:
+        raise ValueError("train_ratio + validation_ratio must not exceed 1.")
 
     split_columns: list[list[np.ndarray]] = [[], [], []]
     for series in values.T:
         series = _trim_trailing_nans(series)
         train_end = int(len(series) * train_ratio)
-        validation_end = train_end + int(len(series) * validation_ratio)
+        validation_end = (
+            len(series)
+            if total_ratio == 1
+            else train_end + int(len(series) * validation_ratio)
+        )
 
-        if (
-            train_end == 0
-            or validation_end == train_end
-            or validation_end == len(series)
-        ):
+        if train_end == 0 or validation_end == train_end:
             raise ValueError(
-                "Every series must contain at least one value in each split. "
+                "Every series must contain at least one value in the train and "
+                "validation splits. "
                 "Use more data or adjust the split ratios."
             )
 
@@ -360,28 +362,30 @@ def split_values_and_datetimes(
     tuple[np.ndarray, np.ndarray],
     tuple[np.ndarray, np.ndarray],
 ]:
-    """Chronologically split paired values and dates using identical cuts."""
+    """Return required train/validation pairs and an optional test remainder."""
     if values.shape != datetimes.shape:
         raise ValueError("values and datetimes must have identical shapes.")
     if train_ratio <= 0 or validation_ratio <= 0:
         raise ValueError("train_ratio and validation_ratio must be positive.")
-    if train_ratio + validation_ratio >= 1:
-        raise ValueError("train_ratio + validation_ratio must be less than 1.")
+    total_ratio = train_ratio + validation_ratio
+    if total_ratio > 1:
+        raise ValueError("train_ratio + validation_ratio must not exceed 1.")
 
     value_columns: list[list[np.ndarray]] = [[], [], []]
     datetime_columns: list[list[np.ndarray]] = [[], [], []]
     for series, series_datetimes in zip(values.T, datetimes.T):
         series, series_datetimes = _trim_pair(series, series_datetimes)
         train_end = int(len(series) * train_ratio)
-        validation_end = train_end + int(len(series) * validation_ratio)
+        validation_end = (
+            len(series)
+            if total_ratio == 1
+            else train_end + int(len(series) * validation_ratio)
+        )
 
-        if (
-            train_end == 0
-            or validation_end == train_end
-            or validation_end == len(series)
-        ):
+        if train_end == 0 or validation_end == train_end:
             raise ValueError(
-                "Every series must contain at least one value in each split. "
+                "Every series must contain at least one value in the train and "
+                "validation splits. "
                 "Use more data or adjust the split ratios."
             )
 
